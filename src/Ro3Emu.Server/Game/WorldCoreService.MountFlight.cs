@@ -24,29 +24,32 @@ public sealed partial class WorldCoreService
     /// <summary>CombatService.BeforeCast: the ridden flying mount's take-off on the ground, its landing in the air.</summary>
     internal async Task MountFlightCastAsync(GameSession s, int skillId)
     {
-        if (MountService.FlySkills(s, data) is not { } fly) return;
-        if (skillId == fly.Up && !s.WorldState.Flying && worldData.Map(s.SceneEntry) != null)
+        if (MountService.FlySkills(s, _data) is not { } fly) return;
+        if (skillId == fly.Up && !s.WorldState.Flying && _worldData.Map(s.SceneEntry) != null)
         {
             s.WorldState.Flying = true;
             s.WorldState.LastFlyMs = Now;
+            s.WorldState.TakeOff = s.Position.Clone();
             await FlightStateAsync(s);
         }
         else if (skillId == fly.Down && s.WorldState.Flying)
         {
             s.WorldState.Flying = false;
-            if (worldData.Map(s.SceneEntry) is { } here)
-            {
-                var at = here.Grounded(new MapPoint(s.Position.X, s.Position.Y, s.Position.Z, s.Face));
-                s.PreviousPosition = s.Position; s.Position = new Vec3 { X = at.X, Y = at.Y, Z = at.Z };
-            }
+            if (_worldData.Map(s.SceneEntry)?.Landing(new MapPoint(s.Position.X, s.Position.Y, s.Position.Z, s.Face)) is { } at)
+            { s.PreviousPosition = s.Position; s.Position = new Vec3 { X = at.X, Y = at.Y, Z = at.Z }; }
             await FlightStateAsync(s);
         }
     }
 
+    /// <summary>CombatService.CanLand: the landing skill is refused over a cell with no walkable layer (water, off the
+    /// grid), where it would leave the rider standing in the air off the navmesh (inferred).</summary>
+    internal bool CanLand(GameSession s) =>
+        _worldData.Map(s.SceneEntry) is not { } map || map.Landing(new MapPoint(s.Position.X, s.Position.Y, s.Position.Z, s.Face)) != null;
+
     /// <summary>MountService.Changed: getting off (or swapping) the mount in the air lands at once.</summary>
     internal async Task MountsChangedAsync(GameSession s)
     {
-        if (s.WorldState.Flying && !CanFly(s)) await LandAsync(s, s.Position, s.Face);
+        if (s.WorldState.Flying && !CanFly(s)) await LandAsync(s, s.Position, s.Face, forced: true);
     }
 
     /// <summary>The eObjectStateFly bit to the flyer and its viewers, then <see cref="FlightChanged"/>.</summary>

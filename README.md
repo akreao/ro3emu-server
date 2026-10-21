@@ -30,7 +30,8 @@ server first; changes to the original rules come after.
 
 1. Download **`RO3Emu-win-x64.zip`** from the [latest release](https://github.com/akreao/ro3emu-server/releases/latest)
    and extract it anywhere. A release is cut every day main changes, and its notes list what changed. The very newest
-   build of main is the rolling [`launcher` release](https://github.com/akreao/ro3emu-server/releases/tag/launcher).
+   build of main is the rolling [`launcher` release](https://github.com/akreao/ro3emu-server/releases/tag/launcher):
+   it gets every daily release and hand-pushed `v*` tag, and is also rebuilt right away when the launcher, patcher or client DLLs change.
 2. Double-click **`RO3Emu.exe`**. Nothing to install: no .NET, Java or Node.js. If Windows says "Windows protected
    your PC" (RO3Emu is not signed), click *More info*, then *Run anyway*.
 3. The first time, it finds your Ragnarok 3: Genesis game folder (or asks for the one with `ro3.exe`), prepares the
@@ -42,7 +43,8 @@ server first; changes to the original rules come after.
 **Don't have the game?** RO3Emu.exe downloads it from the Genesis update servers (about 24 GB) and checks every file
 against the publisher's signature: it offers this when it finds no game folder, or run `RO3Emu.exe install`. RO3Emu
 never hosts game files. Tested with the Genesis client releases of 7 and 16 October 2026, and adapted to the 18
-October 2026 release ([reopened content](docs/guide/reopened-content.md)). Genesis is a private server, not the
+October 2026 release ([reopened content](docs/guide/reopened-content.md)); the 20 October
+release passes `RO3Emu.exe check` and the data export. Genesis is a private server, not the
 official one: the official Ragnarok Online 3 server has not launched yet.
 
 | Command | What it does |
@@ -79,7 +81,7 @@ is off unless the host adds `--voice-port 33101` (any free port); then forward t
 ./server.sh --client /path/to/ROO_PC --host <public IP> --gm <your account>     # a game folder copied from Windows
 ./server.sh --download /srv/ro3/ROO_PC --host <public IP> --gm <your account>   # or only the files it needs, from Genesis
 ./server.sh --service ...                                                       # install it as a systemd service
-./server.sh --dev --host 127.0.0.1                                              # Development mode, for testing
+./server.sh --dev --host 127.0.0.1 --gm <your account>                         # Development mode, for testing
 ```
 
 Open TCP `5380`, `20000` and `33100`, and the voice port if you turn voice on with `--voice-port 33101`.
@@ -269,9 +271,10 @@ to test) and on main, where it publishes them to the rolling
 [`client-dlls` release](https://github.com/akreao/ro3emu-server/releases/tag/client-dlls).
 `tools/update-client-dlls.sh` installs that build (or a folder you give it) into RO3Emu and the game.
 
-This fork's own `RO3Emu.exe` is built by the `release` workflow on every change to main that goes into it (the
-launcher, patcher and client DLL sources) and published to the rolling
-[`launcher` release](https://github.com/akreao/ro3emu-server/releases/tag/launcher) as `RO3Emu-win-x64.zip`.
+This fork's own `RO3Emu.exe` and the server it bundles are published to the rolling
+[`launcher` release](https://github.com/akreao/ro3emu-server/releases/tag/launcher) as `RO3Emu-win-x64.zip` by every
+daily release (below) and hand-pushed `v*` tag, and by the `release` workflow on every change to main that goes into the exe (the launcher,
+patcher and client DLL sources). A change to the server alone reaches it with the next daily release.
 `tools/update-launcher.sh` installs it into RO3Emu (backing up the old exe) and then runs `update-client-dlls.sh`
 with the DLLs from the same zip.
 
@@ -310,6 +313,7 @@ flowchart LR
 
 Issues and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers the build checks, the evidence rules and
 what to include in a report or a change. Thanks to everyone who has sent fixes so far.
+Report a security issue privately, as [SECURITY.md](SECURITY.md) describes.
 
 ## Documentation
 

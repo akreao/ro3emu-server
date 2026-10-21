@@ -20,31 +20,31 @@ public sealed class GiftTests : IAsyncLifetime
     private const int Crystal = 3;
     private const int TeaParty = 5000002, TeaPartySuit = 40050010, TeaPartyHat = 10050010, TeaPartyBonus = 3025101; // [3,1880], award 180002.
     private const int Macaron = 5000015, MacaronHair = 70050010;                        // [3,480].
-    private readonly string directory = Path.Combine(Path.GetTempPath(), "ro3emu-gift-" + Guid.NewGuid().ToString("N"));
-    private WebApplication app = null!;
-    private string http = "";
+    private readonly string _directory = Path.Combine(Path.GetTempPath(), "ro3emu-gift-" + Guid.NewGuid().ToString("N"));
+    private WebApplication _app = null!;
+    private string _http = "";
     private static readonly TimeSpan Wait = TimeSpan.FromSeconds(10);
-    private T Service<T>() where T : notnull => app.Services.GetRequiredService<T>();
+    private T Service<T>() where T : notnull => _app.Services.GetRequiredService<T>();
     private GameSession Session(string name) => Service<SessionRegistry>().All().Single(s => s.Role?.Name == name);
 
     public async Task InitializeAsync()
     {
         var (web, micro, game) = TestPorts.FreePorts();
-        app = ServerHost.Create([], o =>
+        _app = ServerHost.Create([], o =>
         {
-            o.DataDir = directory; o.GameDataDir = Path.Combine(RepoRoot(), "data");
+            o.DataDir = _directory; o.GameDataDir = Path.Combine(RepoRoot(), "data");
             o.HttpPort = web; o.MicroGatePort = micro; o.GameGatePort = game;
             o.PlayBook = 101;
         });
-        await app.StartAsync();
-        http = $"http://127.0.0.1:{web}";
+        await _app.StartAsync();
+        _http = $"http://127.0.0.1:{web}";
     }
 
     public async Task DisposeAsync()
     {
-        await app.StopAsync(); await app.DisposeAsync();
+        await _app.StopAsync(); await _app.DisposeAsync();
         SqliteConnection.ClearAllPools();
-        try { Directory.Delete(directory, true); } catch (IOException) { }
+        try { Directory.Delete(_directory, true); } catch (IOException) { }
     }
 
     private static string RepoRoot()
@@ -56,7 +56,7 @@ public sealed class GiftTests : IAsyncLifetime
 
     private async Task<(BotClient Bot, long Role)> Enter(string name)
     {
-        var bot = new BotClient(http, File.ReadAllText(Path.Combine(directory, "gate_rsa_public.pem")));
+        var bot = new BotClient(_http, File.ReadAllText(Path.Combine(_directory, "gate_rsa_public.pem")));
         await bot.LoginAsync(name.ToLowerInvariant(), "pw"); await bot.EnterGateAsync();
         long role = (await bot.CreateRoleAsync(name)).RoleBaseInfo.Id;
         await bot.EnterWorldAsync(role);
@@ -69,7 +69,7 @@ public sealed class GiftTests : IAsyncLifetime
     private async Task Gm(string name, string command)
     {
         using var client = new HttpClient();
-        (await client.PostAsync(http + "/ro3emu/gm?account=" + name.ToLowerInvariant(), new StringContent(command))).EnsureSuccessStatusCode();
+        (await client.PostAsync(_http + "/ro3emu/gm?account=" + name.ToLowerInvariant(), new StringContent(command))).EnsureSuccessStatusCode();
     }
 
     private static async Task<T> Next<T>(BotClient bot, uint id, MessageParser<T> parser, Func<T, bool>? match = null) where T : IMessage<T> =>
@@ -125,10 +125,8 @@ public sealed class GiftTests : IAsyncLifetime
 
         Assert.Equal(0, await Pick(bob, sent.OrderId));
         Assert.True(Session("GiftBob").Wardrobe!.AllLightUpAppearances.ContainsKey(TeaPartySuit));
-        // The bonus voucher is _QuickUse [3, 0]: used on receipt, it lights the matching headwear.
-        Assert.Equal(0, (await Next(bob, CharacterService.ItemUse, ItemUseResp.Parser, m => m.ItemId == TeaPartyBonus)).Result);
-        Assert.Equal(0, Count("GiftBob", TeaPartyBonus));
-        Assert.True(Session("GiftBob").Wardrobe!.AllLightUpAppearances.ContainsKey(TeaPartyHat));
+        Assert.Equal(1, Count("GiftBob", TeaPartyBonus)); // tradable (_iTrade 2): not auto-used
+        Assert.False(Session("GiftBob").Wardrobe!.AllLightUpAppearances.ContainsKey(TeaPartyHat));
         Assert.False(Session("GiftAlice").Wardrobe!.AllLightUpAppearances.ContainsKey(TeaPartySuit));
         Assert.Single((await Next(bob, ShopService.PresentList, CommodityPresentListNtf.Parser, m => m.Orders.Any(o => o.State == 1))).Orders);
         await Next(alice, ShopService.SentGiftsList, SentGiftsListNtf.Parser, m => m.SentGifts.Any(o => o.State == 1));

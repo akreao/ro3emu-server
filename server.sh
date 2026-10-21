@@ -9,11 +9,12 @@
 #   --host ADDRESS  the address players connect to (default: this machine's first address)
 #   --gm ACCOUNT    an account that gets GM commands in game (repeatable)
 #   --voice-port PORT  turn on party voice chat on this TCP port, for example 33101 (off by default)
-#   --dev           run as Development, not Production (docs/guide/development-mode.md): GM for everyone without --gm
+#   --dev           run as Development, not Production, for testing (docs/guide/development-mode.md)
 #   --service       install and start a systemd service (needs sudo) instead of running in this terminal
 #   --reexport      export the game data again (after a client update)
 set -euo pipefail
-cd "$(dirname "$(readlink -f "$0")")"
+self=$(readlink -f "$0")  # before the cd: a relative $0 no longer resolves after it
+cd "$(dirname "$self")"
 root=$(pwd)
 
 client=""; host=""; voice=""; dev=0; service=0; reexport=0; gms=()
@@ -28,7 +29,7 @@ while [ $# -gt 0 ]; do
     --dev) dev=1; shift ;;
     --service) service=1; shift ;;
     --reexport) reexport=1; shift ;;
-    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,/^[^#]/{/^#/p}' "$self"; exit 0 ;;  # the header comment, however long
     *) echo "unknown option $1 (see ./server.sh --help)"; exit 1 ;;
   esac
 done
@@ -91,12 +92,10 @@ settings=(
 )
 for i in "${!gms[@]}"; do settings+=("Ro3Emu__GmAccounts__$i=${gms[$i]}"); done
 [ -z "$voice" ] || settings+=("Ro3Emu__Voice__Port=$voice")
-if [ "$dev" = 1 ]; then
-  echo '  Development mode: appsettings.Development.json applies (the Exchange seller and buy-back too).'
-  [ ${#gms[@]} -gt 0 ] || echo '  No --gm account: in Development EVERY account has GM commands in game.'
-else
-  [ ${#gms[@]} -gt 0 ] || echo '  No --gm account: nobody has GM commands in game.'
-fi
+# Without --gm nobody has GM, also with --dev (Development alone would open GM to every account).
+settings+=("Ro3Emu__GmOpenWhenEmpty=false")
+[ "$dev" = 0 ] || echo '  Development mode: appsettings.Development.json applies (the Exchange seller and buy-back too).'
+[ ${#gms[@]} -gt 0 ] || echo '  No --gm account: nobody has GM commands in game.'
 
 ports_note() {
   if [ -n "$voice" ]; then
