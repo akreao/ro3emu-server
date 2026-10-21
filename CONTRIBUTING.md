@@ -27,12 +27,20 @@ client: tests of rules use an invented data set, and tests of real content are s
 dotnet test tests/Ro3Emu.Tests/Ro3Emu.Tests.csproj -c Release --filter "Category!=Slow"
 ```
 
-Compiler and analyzer warnings fail the build (`Directory.Build.props`), and CI checks the C# layout set in
+Compiler and analyzer warnings fail the build (`Directory.Build.props`), except in `Ro3Emu.ClientHooks`,
+`Ro3Emu.Loc` and `Ro3Emu.ClientTools`, which only build against a local client. CI checks the C# layout set in
 `.editorconfig`. Before you push, run:
 
 ```powershell
 dotnet format whitespace --folder
 ```
+
+Any .NET 10 SDK builds and tests the code, including the 10.0.1xx band that distributions such as Arch and
+CachyOS package (`global.json` asks for 10.0.100 or later). CI formats with the 10.0.4xx band (`dotnet-version` in
+`.github/workflows`), and other bands lay out some statements differently: 10.0.1xx would reformat about a dozen
+unrelated files. Run `dotnet format` with a 10.0.4xx SDK, for example one from
+[dotnet-install](https://learn.microsoft.com/dotnet/core/tools/dotnet-install-script) next to the distribution's, or
+leave the layout check to CI.
 
 Package versions live in `Directory.Packages.props`: a `PackageReference` names the package without a version.
 

@@ -24,6 +24,8 @@ public sealed class MountTests : IAsyncLifetime
         var (h, m, g) = TestPorts.FreePorts();
         app = ServerHost.Create([], o => { o.DataDir = dir; o.GameDataDir = Path.Combine(RepoRoot(), "data"); o.HttpPort = h; o.MicroGatePort = m; o.GameGatePort = g; }, clock);
         await app.StartAsync(); http = $"http://127.0.0.1:{h}";
+        // These tests drive the manual 31323 use of the _QuickUse [3, 0] mount and look vouchers.
+        app.Services.GetRequiredService<ItemAutoUseService>().Paused = true;
     }
     public async Task DisposeAsync()
     {
@@ -591,11 +593,16 @@ public sealed class MountTests : IAsyncLifetime
         Assert.DoesNotContain(s.Buffs, b => b.ConfigId == TakeFlight);
         Assert.Equal(Land, s.MountSkillShown);
 
-        // In the air 31084 moves her (the server raised her by the take-off's 20 m, as the client's effect does).
-        var ahead = s.Position.Clone(); ahead.X += 1;
+        // In the air 31084 moves her, climbing as the take-off skill lifts her (20 m), with no echo to herself.
+        var ahead = s.Position.Clone(); ahead.X += 1; ahead.Y += 15;
+        int seen = a.Inbox.Snapshot().Count;
         await a.SendGameAsync(WorldCoreService.FlyMove, new FlyMoveReq { Pos = ahead, Dir = new Vec3 { X = 1 }, Face = 90 });
         await Task.Delay(300);
         Assert.Equal(ahead.X, s.Position.X);
+        Assert.Equal(ahead.Y, s.Position.Y);
+        Assert.DoesNotContain(a.Inbox.Snapshot().Skip(seen), e => e.IsGame(GameAoiSink.MovementChange)
+            && MovementChangeNtf.Parser.ParseFrom(e.Body).Uid == self);
+        Assert.DoesNotContain(a.Inbox.Snapshot().Skip(seen), e => e.IsGame(99999) && APIErrorMsg.Parser.ParseFrom(e.Body).OriginMsgId == WorldCoreService.FlyMove);
 
         await loop.InvokeAsync(() =>
         {

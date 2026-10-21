@@ -393,6 +393,7 @@ public static class ServerHost
         territory.BattleSettled.Add(questTasks.OnTerritoryBattleSettled); // 106610, 106609
         app.Services.GetRequiredService<EmblemService>().Upgraded.Add(questTasks.OnEchoUpgraded); // 317002
         app.Services.GetRequiredService<TowerService>().Settled.Add(questTasks.OnTowerSettled); // 101007, 101010
+        app.Services.GetRequiredService<TrainingService>().ChallengeSettled.Add(questTasks.OnDummyChallengeSettled); // 210006
         app.Services.GetRequiredService<PersonalService>().Upvoted.Add(questTasks.OnProfileLiked); // 106902
         app.Services.GetRequiredService<GuildCampfireService>().Joined.Add(questTasks.OnCampfireJoined); // 106018
         app.Services.GetRequiredService<GuildService>().MembershipChanged.Add(questTasks.OnStateChanged); // 104007
@@ -531,6 +532,7 @@ internal sealed class GameLoopTickers(IServiceProvider services) : IHostedServic
         Add<Game.Persistence.SettingsPersistence>();
         Add<Game.Persistence.WildAfkPersistence>();
         Add<ShopService>(); // 05:00 purchase-limit rollover
+        Add<RankService>(); // leaderboard reward settlement at each _kPrizesTimeNew boundary
         Add<ItemBoxService>(); // award boxes; 05:00 item use-time rollover
         Add<PowerService>(); // throttled 31502/31503 republish of changed power
         Add<Voice.VoiceRooms>(); // VAD silence timeout every tick, team-membership sweep every second

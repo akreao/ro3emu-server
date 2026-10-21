@@ -8,7 +8,7 @@ server first; changes to the original rules come after.
 
 <p align="center">
   <a href="https://github.com/akreao/ro3emu-server/releases/latest"><img src="https://img.shields.io/github/v/release/akreao/ro3emu-server?label=release" alt="Latest release"></a>
-  <a href="https://github.com/akreao/ro3emu-server/actions/workflows/tests.yml"><img src="https://github.com/akreao/ro3emu-server/actions/workflows/tests.yml/badge.svg" alt="Tests on Linux"></a>
+  <a href="https://github.com/akreao/ro3emu-server/actions/workflows/tests.yml"><img src="https://github.com/akreao/ro3emu-server/actions/workflows/tests.yml/badge.svg" alt="Tests on Linux and Windows"></a>
   <a href="https://github.com/akreao/ro3emu-server/actions/workflows/ci.yml"><img src="https://github.com/akreao/ro3emu-server/actions/workflows/ci.yml/badge.svg" alt="Client-independent .NET checks"></a>
   <img src="https://img.shields.io/badge/C%23-.NET%2010-512BD4?logo=dotnet&logoColor=white" alt=".NET 10">
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="GPL-3.0">
@@ -39,10 +39,11 @@ server first; changes to the original rules come after.
 4. Log in with any account name and password: the account is created on first login. Keep the RO3Emu window open
    while you play; press **Q** there (or close it) to stop the server.
 
-**Don't have the game?** RO3Emu.exe downloads it from the Genesis update servers (about 24 GB) and checks every
-file against the publisher's signature: it offers this when it finds no game folder, or run `RO3Emu.exe install`.
-RO3Emu never hosts game files. Tested with the Genesis client releases of 7 and 16 October 2026. Genesis is a private
-server, not the official one: the official Ragnarok Online 3 server has not launched yet.
+**Don't have the game?** RO3Emu.exe downloads it from the Genesis update servers (about 24 GB) and checks every file
+against the publisher's signature: it offers this when it finds no game folder, or run `RO3Emu.exe install`. RO3Emu
+never hosts game files. Tested with the Genesis client releases of 7 and 16 October 2026, and adapted to the 18
+October 2026 release ([reopened content](docs/guide/reopened-content.md)). Genesis is a private server, not the
+official one: the official Ragnarok Online 3 server has not launched yet.
 
 | Command | What it does |
 |---|---|
@@ -78,6 +79,7 @@ is off unless the host adds `--voice-port 33101` (any free port); then forward t
 ./server.sh --client /path/to/ROO_PC --host <public IP> --gm <your account>     # a game folder copied from Windows
 ./server.sh --download /srv/ro3/ROO_PC --host <public IP> --gm <your account>   # or only the files it needs, from Genesis
 ./server.sh --service ...                                                       # install it as a systemd service
+./server.sh --dev --host 127.0.0.1                                              # Development mode, for testing
 ```
 
 Open TCP `5380`, `20000` and `33100`, and the voice port if you turn voice on with `--voice-port 33101`.
@@ -144,7 +146,7 @@ show is playable from day one, without season or server-day gates ([details](doc
 - NPC, point and guild shops, battle pass, cash shop and Top Up, Fashion gifts to friends
 - friends and gifts, parties and raids, chat channels and horns
 - Connect Quests and activity Intimacy between party friends
-- party voice chat through the server (off by default, see below)
+- party and guild voice chat through the server (off by default, see below)
 - Tavern rooms with text and voice chat, mic rules, gifts and the Daily Tavern
 - adventure groups
 
@@ -162,7 +164,7 @@ show is playable from day one, without season or server-day gates ([details](doc
 - bosses cast their special skills, with phases and summons
 - Monster Hunt, Rift Crisis, Survivor Battle, Wedding Crashers,
   Dragon Coffin Island, Mock Battle (40 vs 40), Hunting Challenge,
-  timed events, daily activities, leaderboards
+  timed events, daily activities, leaderboards and their rank rewards
 
 </td></tr>
 </table>
@@ -175,15 +177,14 @@ show is playable from day one, without season or server-day gates ([details](doc
 - **Survivor Battle extras:** the "Go, Kafra, Go!" weekly tasks.
 - **Smaller missing pieces:** some stages of the story dungeons
   that are still simplified.
-- **Guild voice:** only party and Tavern voice are implemented.
+- **Guild voice invites:** guild voice rooms work, but voice invites are not answered yet.
 - **Guild Technology and Timed Strategies**, the Starshatter Dragon Summon Ritual, party teleport invites and big-map
   marks: the client sends these requests and the server does not answer them yet.
-- **Leaderboard rewards:** the boards show, but they don't pay out their rewards yet.
 
 **Voice.** Party voice goes through a relay in the server instead of the publisher's Tencent GME, and the patched
-client records and plays it through Windows' own winmm. It is off by default: `Voice:Port` turns it on. The voice
-stream is encrypted (AES-CTR with an HMAC-SHA256 tag per frame) with a fresh key per session that travels inside the
-one-time ticket over the encrypted game gate, so the relay serves off loopback too.
+client records and plays it through Windows' own winmm. It is off by default: `Ro3Emu:Voice:Port` turns it on. The
+voice stream is encrypted (AES-CTR with an HMAC-SHA256 tag per frame) with a fresh key per session that travels inside
+the one-time ticket over the encrypted game gate, so the relay serves off loopback too.
 
 ## For developers
 
@@ -191,7 +192,8 @@ one-time ticket over the encrypted game gate, so the relay serves off loopback t
 
 You need only the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0). `start.cmd` builds the server, the
 client DLLs and RO3Emu from source and runs RO3Emu with this repository as its home; `join.cmd <address>` does the
-same for joining, and both take any RO3Emu.exe option. On Linux, `./server.sh` builds and runs the server from source.
+same for joining, and both take any RO3Emu.exe option. On Linux, `./server.sh` builds and runs the server from source; `--dev` runs it as Development
+([development mode](docs/guide/development-mode.md)).
 
 The same steps by hand:
 

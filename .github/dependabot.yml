@@ -17,3 +17,6 @@ updates:
     groups:
       tests:
         patterns: ['xunit*', 'Microsoft.NET.Test.Sdk', 'coverlet.*']
+      # The runtime and the generator of the protobuf code move together.
+      protobuf:
+        patterns: ['Google.Protobuf', 'Grpc.Tools']

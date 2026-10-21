@@ -27,11 +27,11 @@ namespace Ro3Emu.Server.Micro;
 /// PublicParamConfig.LeaderBoardRefreshIntervalTs seconds, the client's own refresh interval (inferred reuse).
 /// Only entries with a positive score are listed (inferred: the original fed boards on progress events).
 /// _iSortingRules [[1,1],[2,2]] is read as Values[1] descending, then the board's tie-break ascending (inferred).
-/// Reward settlement (_iRefresh, _kPrizesTimeNew, _iRankRewards, LeaderBoardsGiftConfig) is not implemented.
+/// Rank rewards (_kPrizesTimeNew, _iRankRewards, LeaderBoardsGiftConfig, _iMailId) are settled in RankService.Rewards.
 /// </para>
 /// </summary>
-public sealed class RankService(GameData data, AccountStore accounts, GuildService guilds, CharacterService character,
-    EmblemService emblems, TimeProvider clock, ILogger<RankService> log) : IMicroService
+public sealed partial class RankService(GameData data, AccountStore accounts, GuildService guilds, CharacterService character,
+    EmblemService emblems, MailService mail, GameLoop loop, TimeProvider clock, ILogger<RankService> log) : IMicroService
 {
     // Board ids: LeaderBoardsConfig _iID / enum_LeaderBoardType (Lua_GameDefine.lua:10440-10552).
     public const int SpiritTower = 1011, GuildPrestige = 1030, GuildActivity = 1031, SurvivorOverall = 1052, SurvivorWeeklyKills = 1053,
@@ -88,7 +88,8 @@ public sealed class RankService(GameData data, AccountStore accounts, GuildServi
             case "getUserRankSurrounding":
                 {
                     if (!TryParseRankId(Arg(args, -1, "RankId"), out int boardId, out bool sub)) return MicroServiceRouter.Fail("bad rank id");
-                    long.TryParse(Convert.ToString(Arg(args, -1, "UserId"), System.Globalization.CultureInfo.InvariantCulture), out long id);
+                    if (!long.TryParse(Convert.ToString(Arg(args, -1, "UserId"), System.Globalization.CultureInfo.InvariantCulture), out long id))
+                        return MicroServiceRouter.Fail("bad user id");
                     // (inferred) a bounded window; the client asks a few rows each side.
                     int before = (int)Math.Clamp(Number(Arg(args, -1, "Before")), 0, 100);
                     int after = (int)Math.Clamp(Number(Arg(args, -1, "After")), 0, 100);
