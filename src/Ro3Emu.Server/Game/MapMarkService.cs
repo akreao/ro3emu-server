@@ -25,8 +25,8 @@ public sealed class MapMarkService(GameData data, TeamService teams, GuildStore 
 
     private readonly record struct Board(Maps.RuntimeMapKey Map, long Audience, DungeonMarkType Type);
 
-    private readonly Lock gate = new();
-    private readonly Dictionary<Board, SortedDictionary<int, DungeonMarkPos>> boards = [];
+    private readonly Lock _gate = new();
+    private readonly Dictionary<Board, SortedDictionary<int, DungeonMarkPos>> _boards = [];
 
     private int MaxMarks => data.Table("PublicParamConfig").TryGetValue("GVEMapMarkMaxNum", out var v)
         && GameData.Number(v) is > 0 and var n ? (int)n : DefaultMaxMarks;
@@ -61,14 +61,14 @@ public sealed class MapMarkService(GameData data, TeamService teams, GuildStore 
         DungeonSetMarkPosNtf? ntf = null;
         var board = new Board(s.RuntimeMap, audience, type);
         if (result == 0)
-            lock (gate)
+            lock (_gate)
             {
                 Prune();
-                boards.TryGetValue(board, out var marks);
+                _boards.TryGetValue(board, out var marks);
                 if (req.BDel) result = marks != null && marks.Remove(Slot(req.Pos?.Id ?? 0, type)) ? 0 : ErrorCodes.Parameter;
                 else if (Enumerable.Range(1, MaxMarks).FirstOrDefault(i => marks?.ContainsKey(i) != true) is > 0 and var slot
                     && req.Pos?.Pos is { } at)
-                    (marks ??= boards[board] = [])[slot] = placed = new DungeonMarkPos { Id = slot, Pos = at.Clone(), MarkType = type };
+                    (marks ??= _boards[board] = [])[slot] = placed = new DungeonMarkPos { Id = slot, Pos = at.Clone(), MarkType = type };
                 else result = ErrorCodes.Parameter; // (inferred) every slot is taken
                 if (result == 0 && marks != null) ntf = new DungeonSetMarkPosNtf { MarkType = type, Pos = { marks.Values.Select(m => m.Clone()) } };
             }
@@ -91,8 +91,8 @@ public sealed class MapMarkService(GameData data, TeamService teams, GuildStore 
             var mark = new Board(s.RuntimeMap, AudienceOf(role, type), type);
             if (audience == 0) result = ErrorCodes.NoPermission;
             else
-                lock (gate)
-                    if (boards.TryGetValue(mark, out var marks) && marks.ContainsKey(Slot(req.Pos.Id, type))) { result = 0; board = mark; }
+                lock (_gate)
+                    if (_boards.TryGetValue(mark, out var marks) && marks.ContainsKey(Slot(req.Pos.Id, type))) { result = 0; board = mark; }
         }
         else if (InBattle(s) && req.GatherType == DungeonGatherType.DungeonGatherBuilding && req.GatherGuid != 0
             && req.Pos?.Pos != null)
@@ -119,10 +119,10 @@ public sealed class MapMarkService(GameData data, TeamService teams, GuildStore 
         PreparedMessage.SendToAsync(sessions.All().Where(p => p.Role != null && !p.SceneLoading && p.RuntimeMap == board.Map
             && AudienceOf(p.Role.Id, board.Type) == board.Audience), id, body);
 
-    /// <summary>Drops the flags of instances nobody is in any more. Called under <see cref="gate"/>.</summary>
+    /// <summary>Drops the flags of instances nobody is in any more. Called under <see cref="_gate"/>.</summary>
     private void Prune()
     {
         var live = sessions.All().Where(p => p.Role != null).Select(p => p.RuntimeMap).ToHashSet();
-        foreach (var key in boards.Keys.Where(k => !live.Contains(k.Map)).ToArray()) boards.Remove(key);
+        foreach (var key in _boards.Keys.Where(k => !live.Contains(k.Map)).ToArray()) _boards.Remove(key);
     }
 }
