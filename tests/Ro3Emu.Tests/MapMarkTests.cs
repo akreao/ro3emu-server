@@ -24,6 +24,8 @@ public sealed class MapMarkTests
         return await Next(bot, MapMarkService.SetMark, DungeonSetMarkPosRsp.Parser);
     }
 
+    private static string Ids(DungeonSetMarkPosNtf list) => string.Join(",", list.Pos.Select(p => p.Id));
+
     private static async Task<DungeonSetMarkPosNtf> NextList(BotClient bot) =>
         await Next(bot, MapMarkService.MarkNtf, DungeonSetMarkPosNtf.Parser);
 
@@ -67,15 +69,15 @@ public sealed class MapMarkTests
         var first = await Set(alice, false, Flag(leader));
         Assert.Equal(0, first.Result);
         Assert.Equal(1, first.Pos.Id);
-        Assert.Equal(new[] { 1 }, (await NextList(bob)).Pos.Select(p => p.Id));
+        Assert.Equal("1", Ids(await NextList(bob)));
         Assert.Equal(2, (await Set(alice, false, Flag(leader, x: 5))).Pos.Id);
-        Assert.Equal(new[] { 1, 2 }, (await NextList(bob)).Pos.Select(p => p.Id));
+        Assert.Equal("1,2", Ids(await NextList(bob)));
 
         // Deleting slot 1 frees it for the next flag; every push carries the type's whole list.
         Assert.Equal(0, (await Set(alice, true, Flag(leader, id: 1))).Result);
         var after = await NextList(bob);
         Assert.Equal(leader, after.MarkType);
-        Assert.Equal(new[] { 2 }, after.Pos.Select(p => p.Id));
+        Assert.Equal("2", Ids(after));
         Assert.Equal(5f, after.Pos[0].Pos.X);
         Assert.Equal(1, (await Set(alice, false, Flag(leader))).Pos.Id);
         Assert.Equal(ErrorCodes.Parameter, (await Set(alice, true, Flag(leader, id: 9))).Result);
