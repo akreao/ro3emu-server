@@ -42,6 +42,11 @@ public sealed class MapMarkService(GameData data, TeamService teams, GuildStore 
     private long AudienceOf(long role, DungeonMarkType type) => type == DungeonMarkType.DungeonMarkCommander
         ? guildStore.ForRole(role)?.Id ?? 0 : teams.TeamOf(role).TeamId;
 
+    /// <summary>The slot a delete or gather names. UI_Sys_BigMap_MarkTipPanelCtrl sends m_iFlagIndex, the index in the
+    /// client's list of all types ((type - 1) * GVEMapMarkMaxNum + slot); only its escort branch subtracts the offset.
+    /// A plain slot is accepted as well.</summary>
+    private int Slot(int id, DungeonMarkType type) => id > MaxMarks ? id - ((int)type - 1) * MaxMarks : id;
+
     private static bool InBattle(GameSession s) => s.Role != null && s.InstanceId != 0 && !s.SceneLoading;
 
     public async Task SetMarkAsync(GameSession s, DungeonSetMarkPosReq req)
@@ -59,13 +64,13 @@ public sealed class MapMarkService(GameData data, TeamService teams, GuildStore 
             lock (gate)
             {
                 Prune();
-                var marks = boards.TryGetValue(board, out var found) ? found : boards[board] = [];
-                if (req.BDel) result = marks.Remove(req.Pos?.Id ?? 0) ? 0 : ErrorCodes.Parameter;
-                else if (Enumerable.Range(1, MaxMarks).FirstOrDefault(i => !marks.ContainsKey(i)) is > 0 and var slot
+                boards.TryGetValue(board, out var marks);
+                if (req.BDel) result = marks != null && marks.Remove(Slot(req.Pos?.Id ?? 0, type)) ? 0 : ErrorCodes.Parameter;
+                else if (Enumerable.Range(1, MaxMarks).FirstOrDefault(i => marks?.ContainsKey(i) != true) is > 0 and var slot
                     && req.Pos?.Pos is { } at)
-                    marks[slot] = placed = new DungeonMarkPos { Id = slot, Pos = at.Clone(), MarkType = type };
+                    (marks ??= boards[board] = [])[slot] = placed = new DungeonMarkPos { Id = slot, Pos = at.Clone(), MarkType = type };
                 else result = ErrorCodes.Parameter; // (inferred) every slot is taken
-                if (result == 0) ntf = new DungeonSetMarkPosNtf { MarkType = type, Pos = { marks.Values.Select(m => m.Clone()) } };
+                if (result == 0 && marks != null) ntf = new DungeonSetMarkPosNtf { MarkType = type, Pos = { marks.Values.Select(m => m.Clone()) } };
             }
         await s.SendGameAsync(SetMark, new DungeonSetMarkPosRsp
         {
@@ -87,7 +92,7 @@ public sealed class MapMarkService(GameData data, TeamService teams, GuildStore 
             if (audience == 0) result = ErrorCodes.NoPermission;
             else
                 lock (gate)
-                    if (boards.TryGetValue(mark, out var marks) && marks.ContainsKey(req.Pos.Id)) { result = 0; board = mark; }
+                    if (boards.TryGetValue(mark, out var marks) && marks.ContainsKey(Slot(req.Pos.Id, type))) { result = 0; board = mark; }
         }
         else if (InBattle(s) && req.GatherType == DungeonGatherType.DungeonGatherBuilding && req.GatherGuid != 0
             && req.Pos?.Pos != null)

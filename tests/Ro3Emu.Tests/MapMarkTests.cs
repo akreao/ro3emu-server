@@ -1,6 +1,7 @@
 using Google.Protobuf;
 using Romsg;
 using Ro3Emu.Bot;
+using Ro3Emu.Server.Accounts;
 using Ro3Emu.Server.Game;
 
 namespace Ro3Emu.Tests;
@@ -23,6 +24,9 @@ public sealed class MapMarkTests
         await bot.SendGameAsync(MapMarkService.SetMark, new DungeonSetMarkPosReq { BDel = del, Pos = pos });
         return await Next(bot, MapMarkService.SetMark, DungeonSetMarkPosRsp.Parser);
     }
+
+    /// <summary>The id UI_Sys_BigMap_MarkTipPanelCtrl sends for a slot: its index in the list of both types.</summary>
+    private static int ListIndex(DungeonMarkType type, int slot) => ((int)type - 1) * 10 + slot;
 
     private static string Ids(DungeonSetMarkPosNtf list) => string.Join(",", list.Pos.Select(p => p.Id));
 
@@ -73,14 +77,15 @@ public sealed class MapMarkTests
         Assert.Equal(2, (await Set(alice, false, Flag(leader, x: 5))).Pos.Id);
         Assert.Equal("1,2", Ids(await NextList(bob)));
 
-        // Deleting slot 1 frees it for the next flag; every push carries the type's whole list.
-        Assert.Equal(0, (await Set(alice, true, Flag(leader, id: 1))).Result);
+        // The tip panel deletes by the index in the client's list of both types: TeamLeader slot 1 is 11. Deleting it
+        // frees the slot for the next flag; every push carries the type's whole list.
+        Assert.Equal(0, (await Set(alice, true, Flag(leader, id: ListIndex(leader, 1)))).Result);
         var after = await NextList(bob);
         Assert.Equal(leader, after.MarkType);
         Assert.Equal("2", Ids(after));
         Assert.Equal(5f, after.Pos[0].Pos.X);
         Assert.Equal(1, (await Set(alice, false, Flag(leader))).Pos.Id);
-        Assert.Equal(ErrorCodes.Parameter, (await Set(alice, true, Flag(leader, id: 9))).Result);
+        Assert.Equal(ErrorCodes.Parameter, (await Set(alice, true, Flag(leader, id: ListIndex(leader, 9)))).Result);
     }
 
     [Fact]
@@ -115,6 +120,7 @@ public sealed class MapMarkTests
         var leader = DungeonMarkType.DungeonMarkTeamLeader;
         var flag = (await Set(alice, false, Flag(leader))).Pos;
 
+        flag.Id = ListIndex(leader, flag.Id);
         await alice.SendGameAsync(MapMarkService.Gather, new DungeonGatherMarkPosReq
         { GatherType = DungeonGatherType.DungeonGatherMark, Pos = flag });
         Assert.Equal(0, (await Next(alice, MapMarkService.Gather, DungeonGatherMarkPosRsp.Parser)).Result);
@@ -122,7 +128,7 @@ public sealed class MapMarkTests
         Assert.Equal(flag.Id, gather.Pos.Id);
 
         await alice.SendGameAsync(MapMarkService.Gather, new DungeonGatherMarkPosReq
-        { GatherType = DungeonGatherType.DungeonGatherMark, Pos = Flag(leader, id: 7) });
+        { GatherType = DungeonGatherType.DungeonGatherMark, Pos = Flag(leader, id: ListIndex(leader, 7)) });
         Assert.Equal(ErrorCodes.Parameter, (await Next(alice, MapMarkService.Gather, DungeonGatherMarkPosRsp.Parser)).Result);
 
         // Bob leaves for another instance: the next gather isn't sent to him.
@@ -134,5 +140,56 @@ public sealed class MapMarkTests
         Assert.Equal(0, (await Next(alice, MapMarkService.Gather, DungeonGatherMarkPosRsp.Parser)).Result);
         await Next(alice, MapMarkService.GatherNtf, DungeonGatherMarkPosNtf.Parser);
         Assert.Equal(before, Gathers());
+    }
+
+    [Fact]
+    public async Task AGuildCommanderSharesFlagsAndBuildingGathersWithTheGuild()
+    {
+        await using var host = await SyntheticHost.StartAsync();
+        var (alice, bob) = await RaidAsync(host);
+        await using var a = alice;
+        await using var b = bob;
+        await FoundGuildAsync(host, alice, bob);
+        var commander = DungeonMarkType.DungeonMarkCommander;
+
+        // The guild leader holds every right, BattleFieldCommand included; an ordinary member doesn't.
+        Assert.Equal(1, (await Set(alice, false, Flag(commander))).Pos.Id);
+        var list = await NextList(bob);
+        Assert.Equal(commander, list.MarkType);
+        Assert.Equal("1", Ids(list));
+        Assert.Equal(ErrorCodes.NoPermission, (await Set(bob, false, Flag(commander))).Result);
+        Assert.Equal(0, (await Set(alice, true, Flag(commander, id: ListIndex(commander, 1)))).Result);
+        Assert.Empty((await NextList(bob)).Pos);
+
+        await alice.SendGameAsync(MapMarkService.Gather, new DungeonGatherMarkPosReq
+        { GatherType = DungeonGatherType.DungeonGatherBuilding, GatherGuid = 77, Pos = Flag(commander) });
+        Assert.Equal(0, (await Next(alice, MapMarkService.Gather, DungeonGatherMarkPosRsp.Parser)).Result);
+        Assert.Equal(77, (await Next(bob, MapMarkService.GatherNtf, DungeonGatherMarkPosNtf.Parser)).GatherGuid);
+
+        await alice.SendGameAsync(MapMarkService.Gather, new DungeonGatherMarkPosReq
+        { GatherType = DungeonGatherType.DungeonGatherBuilding, Pos = Flag(commander) });
+        Assert.Equal(ErrorCodes.Parameter, (await Next(alice, MapMarkService.Gather, DungeonGatherMarkPosRsp.Parser)).Result);
+    }
+
+    /// <summary>Alice founds a guild (she is its leader, Official 1) and Bob joins it as an ordinary member.</summary>
+    private static async Task FoundGuildAsync(SyntheticHost host, BotClient leader, BotClient member)
+    {
+        var sessions = host.Service<SessionRegistry>();
+        GameSession Of(BotClient bot) => sessions.All().Single(s => s.Role?.Id == (long)bot.Self!.Uuid);
+        await host.Service<GameLoop>().InvokeAsync(() => host.Service<CharacterService>().SetLevelAsync(Of(leader), 99, null));
+        await leader.SendGameAsync(GuildService.Create, new GuildCreateReq
+        {
+            Name = "Banner", Icon = new GuildHeadIcon { BackgroundType = 100101, IconType = 200101 },
+        });
+        Assert.Equal(0, (await Next(leader, GuildService.Create, GuildCreateResp.Parser)).Result);
+        var store = host.Service<GuildStore>();
+        await host.Service<GameLoop>().InvokeAsync(() =>
+        {
+            var role = Of(member).Role!;
+            if (store.ForRole((long)leader.Self!.Uuid) is not { } guild) throw new InvalidOperationException("No guild.");
+            guild.Members[role.Id] = new GuildStore.Member { RoleId = role.Id, Name = role.Name, Level = 1, Career = 1000 };
+            Assert.True(store.Save(guild));
+            return Task.CompletedTask;
+        });
     }
 }
