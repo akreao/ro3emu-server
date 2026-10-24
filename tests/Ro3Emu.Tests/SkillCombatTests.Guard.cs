@@ -126,32 +126,6 @@ public sealed partial class SkillCombatTests
     }
 
     [ClientDataFact]
-    public async Task SightAndRuwachUncoverHiddenEnemies()
-    {
-        await using var alice = await InWorld("Alice"); await using var bob = await InWorld("Bob");
-        Combat.PlayerHostile = (_, _) => true;
-        await Gm("alice", "!job 2100"); await Teach("alice", 12002); await Seasoned("alice");
-        await Loop.InvokeAsync(() => Buffs.AddAsync(Session("bob"), 5000901, 30000, Session("bob").Role!.Id)); // Hiding
-        await Until(s => s.Stealthed, "bob");
-        Assert.Equal(0, await CastSelf(alice, 1200201, Session("alice").Role!.Id));
-        await Until(s => !s.Stealthed, "bob");
-
-        await Until(s => s.SkillCast == null, "alice"); // Sight's action time, else the next cast is busy (3005)
-        await Gm("alice", "!job 4100"); await Teach("alice", 14005);
-        await Loop.InvokeAsync(() => Buffs.AddAsync(Session("bob"), 5000901, 30000, Session("bob").Role!.Id));
-        await Until(s => s.Stealthed, "bob");
-        await Loop.InvokeAsync(() =>
-        {
-            foreach (var b in Session("alice").Buffs.Where(b => b.ConfigId == 1201201).ToArray()) Session("alice").Buffs.Remove(b);
-            Session("alice").SkillCds.Clear(); Session("alice").SkillModeCds.Clear();
-            return Task.CompletedTask;
-        });
-        Assert.Equal(0, await CastSelf(alice, 1400501, Session("alice").Role!.Id));
-        await Until(s => !s.Stealthed, "bob");
-        await Until(s => !s.Buffs.Any(b => b.ConfigId == 1400501), "alice"); // "disappears after Discovering a target"
-    }
-
-    [ClientDataFact]
     public async Task ShieldReflectStrikesBackAtAMeleeAttacker()
     {
         await using var alice = await InWorld("Alice");

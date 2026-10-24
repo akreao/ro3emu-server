@@ -52,6 +52,7 @@ namespace Ro3Emu.ClientHooks
                 BgmOnWindowFocus.Tick();
                 PassChallenges.Tick();
                 PassButton.Tick();
+                TitleButton.Tick();
             }
             catch (Exception e)
             {

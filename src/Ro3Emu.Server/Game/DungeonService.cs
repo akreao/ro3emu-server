@@ -16,6 +16,10 @@ namespace Ro3Emu.Server.Game;
 /// </summary>
 public sealed partial class DungeonService
 {
+    private const long EggThiefDungeon = 1021301;
+    private const int EggThiefWaveSpeedCm = 550;
+    private const float EggThiefWaveLeash = 100f;
+
     public const uint Sync = 5062, Enter = 30400, BaseInfo = 30401, Leave = 30402, Result = 30403, Event = 30404,
         Confirm = 30406, ClientEvent = 30106, CreateResult = 30107, EnterSceneResult = 30108,
         Reset = 30124, ReadyQueue = 42033, TeamInfo = 30441, ConfirmReminder = 42047, ConfirmReminderNotify = 42046,
@@ -116,6 +120,17 @@ public sealed partial class DungeonService
         /// <summary>30441 roster slots by role (index = 0-based position), fixed on the first roster.</summary>
         public List<long> Slots { get; } = new();
         public HashSet<long> Killed { get; } = new();
+        /// <summary>The completing events a step with "all" has seen so far.</summary>
+        public HashSet<(ReconstructedDungeons.TriggerKind Kind, long Id)> StepSeen { get; } = [];
+        /// <summary>A scripted step's strikes taken so far, by monster uid.</summary>
+        public Dictionary<long, int> Struck { get; } = [];
+        /// <summary>A step's own timers' generation: each step (and each new hide-and-seek game) starts a new one, so a
+        /// stale timer does nothing.</summary>
+        public int StepGeneration { get; set; }
+        /// <summary>A hide-and-seek step: the round being played (1-based) and the hiding places already searched in
+        /// this game.</summary>
+        public int SeekRound { get; set; }
+        public HashSet<long> Searched { get; } = [];
         public HashSet<long> Precounted { get; } = new();
         public bool ObligationsFrozen { get; set; }
         public bool ObligationsActivated { get; set; }
@@ -473,9 +488,10 @@ public sealed partial class DungeonService
         if (a.Wave >= a.Plan.Waves.Count || CurrentQuest(a) <= 0) return null;
         int size = a.Plan.Waves[a.Wave].Spawns.Count;
         var v = new DungeonVar { VarId = 10003 };
-        if (Step(a) is { Fight: false } step)
+        if (Step(a) is { } step && size == 0)
         {
-            v.Vi64.Add([step.Goal.Done, step.Goal.Total]); // a scripted step: its configured counter (inferred)
+            // A scripted step: its configured counter, or the events an "all" step has seen (inferred).
+            v.Vi64.Add(step.All ? [a.StepSeen.Count, step.Complete.Count] : [step.Goal.Done, step.Goal.Total]);
             return v;
         }
         v.Vi64.Add([Math.Clamp(a.Killed.Count - a.WaveBase, 0, size), size]);
@@ -585,7 +601,7 @@ public sealed partial class DungeonService
         if (Step(a) is { } step)
         {
             await BeginStepAsync(a, step);
-            if (!step.Fight)
+            if (a.Plan.Waves[a.Wave].Spawns.Count == 0)
             {
                 a.Spawning = false;
                 await AdvanceAsync(a); // waits for the step's client event
@@ -594,12 +610,25 @@ public sealed partial class DungeonService
                     await PlayerMovedAsync(member);
                 return;
             }
-            // A fight step spawns its monsters below and completes when they are all killed.
+            // A step with a fight spawns it below; it advances once its event and its kills are both in.
         }
         foreach (var spawn in a.Plan.Waves[a.Wave].Spawns)
         {
             if (a.Settled || a.Room.Closed) { a.Spawning = false; return; }
-            var monster = await _instances.SpawnAsync(a.Room, spawn.NpcId, spawn.Point);
+            MonsterTemplate? waveTemplate = null;
+            if (a.Plan.SceneEntry == EggThiefDungeon && _monsters.Template(spawn.NpcId) is { } template)
+            {
+                // (inferred) The missing original encounter script sent these three portal waves toward the player. The
+                // reconstructed first-wave Pupa is immobile and all three authored portals lie outside its normal
+                // 20 m home leash, so ordinary field AI leaves two actors off-camera forever. Use the 550 cm/s pace
+                // already carried by this encounter's Boa/Willow waves and a room-sized leash for this scene only.
+                waveTemplate = template with
+                {
+                    SpeedCm = Math.Max(template.SpeedCm, EggThiefWaveSpeedCm),
+                    LeashDistance = Math.Max(template.LeashDistance, EggThiefWaveLeash),
+                };
+            }
+            var monster = await _instances.SpawnAsync(a.Room, spawn.NpcId, spawn.Point, customTemplate: waveTemplate);
             if (a.Settled || a.Room.Closed)
             {
                 a.Spawning = false;
@@ -709,7 +738,7 @@ public sealed partial class DungeonService
         a.RevivesUsed[s.Role.Id] = a.RevivesUsed.GetValueOrDefault(s.Role.Id) + 1;
     }
 
-    public Task PublishExternalReviveAsync(GameSession s) => Active(s) is { } a
+    public Task PublishExternalReviveAsync(GameSession s) => s.Role != null && Active(s) is { } a
         ? SendReviveInfoAsync(s, a) : Task.CompletedTask;
 
     private async Task PlayerDiedAsync(GameSession s)

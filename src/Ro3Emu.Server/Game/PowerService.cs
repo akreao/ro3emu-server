@@ -25,7 +25,7 @@ namespace Ro3Emu.Server.Game;
 /// SpecialEffectConfig._iPower (CalcSpecialScore). Inferred: no skill table carries a power column, and the
 /// configured powers that do exist equal their rows' attribute weights (StrengthenTable 1050/1050 rows exactly).</item>
 /// <item>titleScore: TitleConfig._iPowerAdd of the current title (UI_Sys_Role_Title_CellWidgetCtrl shows it) plus its
-/// _kAttr weights. The title comes from TitleService through <see cref="TitleId"/>.</item>
+/// _kAttr weights; the rank is TitleService's (<see cref="TitleId"/>).</item>
 /// <item>equipRankScore: the worn pieces' instance score (EquipmentRating, itemInfos[2]), EquipConfig._iPower
 /// (Lua_CFG_EquipConfig.GetPower; absent in this export) and their Enchantment._iPower (season part
 /// _iSeasonPower). Counting enchantments under rank is inferred: no package field names them.</item>
@@ -85,6 +85,10 @@ public sealed class PowerService : IGameTicker
     /// <summary>The role's current TitleConfig id (TitleService).</summary>
     public Func<GameSession, long>? TitleId { get; set; }
 
+    /// <summary>The Astral Level's lvPower (ParagonService). No package unit names it, so like the pet lineup it lands
+    /// in the client's "other" line, as season power (35003 "Season Power" on the panel; inferred).</summary>
+    public Func<GameSession, long>? ParagonPower { get; set; }
+
     public PowerService(GameData data, CharacterService character, SkillService skills, TotemService totems,
         EmblemService emblems, SeasonRefineService seasonRefine, RoleStore roles, SessionRegistry sessions, GameLoop loop,
         GmCommands gm, ILogger<PowerService> log)
@@ -135,7 +139,7 @@ public sealed class PowerService : IGameTicker
             TotemScore = Normal(TotemScore(s)),
             EmblemScore = _emblems.GenrePower(s, s.Emblems),
         };
-        var total = new PowerUnit { NormalPower = BasePower(s.Progress.Level) + PetPower(s) };
+        var total = new PowerUnit { NormalPower = BasePower(s.Progress.Level) + PetPower(s), SeasonPower = ParagonPower?.Invoke(s) ?? 0 };
         foreach (var unit in Units(package)) { total.NormalPower += unit.NormalPower; total.SeasonPower += unit.SeasonPower; }
         return (total, package);
     }
@@ -346,6 +350,11 @@ public sealed class PowerService : IGameTicker
         var history = History(s);
         if (Total(total) > Total(history)) history = total.Clone();
         var snapshot = new Snapshot(total, history, package);
+        var role = s.Role;
+        var attachment = s.Attachment;
+        // The client may disconnect as soon as it sees 31502. Persist before publishing or changing the cached score.
+        await SaveAsync(s, snapshot);
+        if (s.Role != role || !ReferenceEquals(s.Attachment, attachment)) return;
         s.Power = snapshot;
         s.PowerPublishedMs = MonsterService.NowMs;
         await s.SendGameAsync(ChangeNtf, new PlayerChangePowerNtf
@@ -356,7 +365,6 @@ public sealed class PowerService : IGameTicker
         });
         await s.SendGameAsync(PackageNtf, new PlayerPowerPackageNtf { PowerPackage = package.Clone() });
         await _character.SyncBaseInfoAsync(s);
-        await SaveAsync(s, snapshot);
     }
 
     /// <summary>

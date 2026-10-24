@@ -1,188 +1,188 @@
-using System.Text.Json;
+using Google.Protobuf;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using Romsg;
 using Ro3Emu.Bot;
 using Ro3Emu.Server;
 using Ro3Emu.Server.Accounts;
-using Ro3Emu.Server.Data;
+using Ro3Emu.Server.Economy;
 using Ro3Emu.Server.Game;
 
 namespace Ro3Emu.Tests;
+
 /// <summary>
-/// The Astral Level (ParagonService): the 5015 sync once the level cap opens function 71, Base EXP past the cap filling
-/// the Paragon level with the world-level bonus, points into stars in order, Star Cores socketed and returned, both
-/// resets, the attributes, and the saved state across relog.
+/// Astral Level (ParagonService, CharacterService.Paragon): Base EXP past level 99 feeds it, stars take points along
+/// _iPostTalentID inside an active constellation, and Star Cores move between the bag and their slot under one balanced
+/// receipt. Constellation 1 is nodes 1-12: 1 -> 2 -> 3 -> 5 -> {4, 6, 9}; node 6 is a Prism slot (_iType 920).
 /// </summary>
 public sealed class ParagonTests : IAsyncLifetime
 {
-    private readonly string _dataDir = Path.Combine(Path.GetTempPath(), "ro3emu-paragon-" + Guid.NewGuid().ToString("N"));
+    private const int PrismGray = 1201001, SunGray = 1201007;
     private static readonly TimeSpan Wait = TimeSpan.FromSeconds(15);
+    private readonly string _dataDir = Path.Combine(Path.GetTempPath(), "ro3emu-paragon-" + Guid.NewGuid().ToString("N"));
     private WebApplication _app = null!;
-    private string _httpUrl = "";
+    private string _http = "";
+
+    private T Service<T>() where T : notnull => _app.Services.GetRequiredService<T>();
+    private Task<T> Read<T>(Func<T> read) => Service<GameLoop>().InvokeAsync(() => Task.FromResult(read()));
 
     public async Task InitializeAsync()
     {
-        var (http, micro, game) = TestPorts.FreePorts();
+        var (httpPort, microPort, gamePort) = TestPorts.FreePorts();
         _app = ServerHost.Create([], o =>
         {
-            o.DataDir = _dataDir;
-            o.GameDataDir = Path.Combine(RepoRoot(), "data");
-            o.HttpPort = http;
-            o.MicroGatePort = micro;
-            o.GameGatePort = game;
+            o.DataDir = _dataDir; o.GameDataDir = Path.Combine(ClientData.RepoRoot, "data");
+            o.HttpPort = httpPort; o.MicroGatePort = microPort; o.GameGatePort = gamePort;
+            o.StarCoreDrops = false; // a lucky kill must not add a core to the counted bag
         });
         await _app.StartAsync();
-        _httpUrl = $"http://127.0.0.1:{http}";
+        _http = $"http://127.0.0.1:{httpPort}";
     }
 
     public async Task DisposeAsync()
     {
-        await _app.StopAsync();
-        await _app.DisposeAsync();
+        await _app.StopAsync(); await _app.DisposeAsync();
         Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
         try { Directory.Delete(_dataDir, true); } catch (IOException) { }
     }
 
-    private static string RepoRoot()
+    private async Task<BotClient> InWorld(string name)
     {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir != null && !File.Exists(Path.Combine(dir.FullName, "Ro3Emu.slnx"))) dir = dir.Parent;
-        return dir?.FullName ?? throw new InvalidOperationException("repo root not found");
-    }
-
-    private T Service<T>() where T : notnull => _app.Services.GetRequiredService<T>();
-
-    private async Task<BotClient> InWorld(string name, bool create = true)
-    {
-        var bot = new BotClient(_httpUrl, File.ReadAllText(Path.Combine(_dataDir, "gate_rsa_public.pem")));
-        await bot.LoginAsync(name.ToLowerInvariant(), "pw");
-        await bot.EnterGateAsync();
-        long id = create ? (await bot.CreateRoleAsync(name)).RoleBaseInfo.Id : bot.Roles.Single().Id;
-        await bot.EnterWorldAsync(id);
+        var bot = new BotClient(_http, File.ReadAllText(Path.Combine(_dataDir, "gate_rsa_public.pem")));
+        await bot.LoginAsync(name.ToLowerInvariant(), "pw"); await bot.EnterGateAsync();
+        await bot.EnterWorldAsync((await bot.CreateRoleAsync(name)).RoleBaseInfo.Id);
         return bot;
     }
 
-    private static async Task<T> Next<T>(BotClient bot, uint msgId, Google.Protobuf.MessageParser<T> parser, Func<T, bool>? match = null)
-        where T : Google.Protobuf.IMessage<T>
+    private static async Task<T> Next<T>(BotClient bot, uint id, MessageParser<T> parser, Func<T, bool>? match = null)
+        where T : IMessage<T>
     {
-        var e = await bot.Inbox.WaitAsync(e => e.IsGame(msgId) && (match == null || match(parser.ParseFrom(e.Body))), Wait);
+        var e = await bot.Inbox.WaitAsync(e => e.IsGame(id) && (match == null || match(parser.ParseFrom(e.Body))), Wait);
         return parser.ParseFrom(e.Body);
     }
 
-    private async Task Gm(string account, string command)
+    private async Task Gm(BotClient bot, string command)
     {
-        using var http = new HttpClient();
-        var response = await http.PostAsync($"{_httpUrl}/ro3emu/gm?account={account}", new StringContent(command));
-        response.EnsureSuccessStatusCode();
+        using var client = new HttpClient();
+        (await client.PostAsync($"{_http}/ro3emu/gm?account={bot.Account}", new StringContent(command))).EnsureSuccessStatusCode();
     }
 
-    private GameSession Session(string name) => Service<SessionRegistry>().All().Single(s => s.Role?.Name == name);
-    private Task<T> OnLoop<T>(string name, Func<GameSession, Task<T>> work) => Service<GameLoop>().InvokeAsync(() => work(Session(name)));
+    private GameSession Session(BotClient bot) => Service<SessionRegistry>().All().Single(s => s.Account == bot.Account && s.Role != null);
 
-    private GameData Data => Service<GameData>();
+    /// <summary>What the client was last sent on 5015.</summary>
+    private Task<DBParagonLevel?> Sent(BotClient bot) =>
+        Read(() => (Session(bot).Synced.GetValueOrDefault(ParagonService.Sync) as DBParagonLevel)?.Clone());
 
-    private static async Task<int> Ask<TReq, TResp>(BotClient bot, uint id, TReq req, Google.Protobuf.MessageParser<TResp> parser, Func<TResp, int> result)
-        where TReq : Google.Protobuf.IMessage<TReq> where TResp : Google.Protobuf.IMessage<TResp>
+    private static async Task<int> Allocate(BotClient bot, int slot)
     {
-        await bot.SendGameAsync(id, req);
-        return result(await Next(bot, id, parser));
+        await bot.SendGameAsync(ParagonService.Allocate, new ParagonLevelAllocatePointReq { Slot = slot, Points = 1 });
+        return (await Next(bot, ParagonService.Allocate, ParagonLevelAllocatePointResp.Parser)).Result;
     }
 
-    private static Task<int> Point(BotClient bot, int star, int points = 1) => Ask(bot, ParagonService.Allocate,
-        new ParagonLevelAllocatePointReq { Slot = star, Points = points }, ParagonLevelAllocatePointResp.Parser, r => r.Result);
+    private static async Task<int> Install(BotClient bot, int slot, long guid)
+    {
+        await bot.SendGameAsync(ParagonService.Install, new ParagonLevelRuneInstallReq { Slot = slot, RuneGuid = guid });
+        return (await Next(bot, ParagonService.Install, ParagonLevelRuneInstallResp.Parser)).Result;
+    }
 
-    private Task<DBParagonLevel> State() => OnLoop("Alice", s => Task.FromResult(Service<ParagonService>().Snapshot(s)));
+    private async Task MaxOut(BotClient bot, params int[] slots)
+    {
+        foreach (int slot in slots)
+            while (Session(bot).Paragon!.Runegroup.GetValueOrDefault(slot)?.Points is not { } p || p < MaxLevel(slot))
+                Assert.Equal(0, await Allocate(bot, slot));
+    }
 
-    private Task<long> Count(int entry) => OnLoop("Alice", s => Task.FromResult(s.Items.Where(i => i.Grid == 0 && i.Entry == entry).Sum(i => (long)i.Stack)));
+    private int MaxLevel(int slot) => (int)Ro3Emu.Server.Data.GameData.Int(Service<Ro3Emu.Server.Data.GameData>().Row("PatronTalentConfig", slot)!.Value, "_iMaxLevel");
+
+    private EconomySnapshot Cut() => EconomySnapshotReader.Read(Service<AccountStore>().DatabasePath,
+        EconomyCatalog.Load(Path.Combine(ClientData.RepoRoot, "data")), "auto");
+
+    private void Balanced(EconomySnapshot opening, EconomySnapshot closing)
+    {
+        var ledger = EconomyLedgerReader.Read(Service<AccountStore>().DatabasePath,
+            EconomyCatalog.Load(Path.Combine(ClientData.RepoRoot, "data")), "auto",
+            opening.Cut.CommitSequence!.Value, closing.Cut.CommitSequence!.Value);
+        Assert.DoesNotContain(closing.Issues, i => i.Kind is EconomyIssueKind.UnknownSchema or EconomyIssueKind.Corruption);
+        var check = EconomyExactnessChecker.Check(opening, closing, ledger);
+        Assert.DoesNotContain(check.Issues, issue => issue.Kind == EconomyIssueKind.Corruption);
+        Assert.All(check.Assets, asset => Assert.Equal("0", asset.Residual));
+    }
 
     [ClientDataFact]
-    public async Task AstralLevelFillsAtTheCapAndSpendsPointsOnStarsAndCores()
+    public async Task BaseExpPastTheLevelCapFeedsTheAstralLevel()
     {
-        long roleId;
-        await using (var alice = await InWorld("Alice"))
-        {
-            Assert.Equal(ErrorCodes.FeatureUnavailable, await Point(alice, 1));
-            await Gm("alice", "!lvl 99");
-            var first = await Next(alice, ParagonService.Sync, DBParagonLevelIncrement.Parser);
-            Assert.True(first.SyncAllMark);
-            Assert.Equal(1, first.Lv);
-            Assert.Equal(1, first.LeftPoints);
-            Assert.Equal(36, first.Runegroup.Count);
-            Assert.Equal(1, Assert.Single(first.ActiveGroup).Value.All);
-            // World Paragon level 100, the role 99 below: PatronExpAddConfig -10 -> 200000 (shown as 20.0%).
-            Assert.Equal(200000, first.ExtraAdd);
+        await using var alice = await InWorld("Alice");
+        await Gm(alice, "!lvl 99");
+        // 5000 Base EXP at the cap, +20% (PatronExpAddConfig: 10 or more levels under the server's Astral Level 100):
+        // 6000, of which level 1 takes its 3000 and 3000 stays toward level 2's 4200.
+        await Gm(alice, "!paragon exp 5000");
+        var p = Session(alice).Progress!;
+        Assert.Equal((99, 0L, 2, 3000L), (p.Level, p.Exp, p.ParagonLevel, p.ParagonExp));
+        var sent = (await Sent(alice))!;
+        Assert.Equal((2, 3000L, 2L, 200000d), (sent.Lv, sent.Exp, sent.LeftPoints, sent.ExtraAdd));
+        Assert.Equal([1], sent.ActiveGroup.Keys.Order());
+        // Every node travels, at 0 points too, and the missing ids between them as well.
+        Assert.Equal(Enumerable.Range(1, 40), sent.Runegroup.Keys.Order());
+        Assert.All(sent.Runegroup.Values, r => Assert.Equal(0, r.Points));
+    }
 
-            // 3000 Base EXP at the cap x 1.2 = 3600: level 2 (3000) with 600 over, and a second point.
-            await Gm("alice", "!exp 3000");
-            await Next(alice, ParagonService.Sync, DBParagonLevelIncrement.Parser, m => m.Lv == 2);
-            var two = await State();
-            Assert.Equal(600, two.Exp);
-            Assert.Equal(2, two.LeftPoints);
+    [ClientDataFact]
+    public async Task StarsTakePointsAlongTheirChainInsideAnActiveConstellation()
+    {
+        await using var alice = await InWorld("Alice");
+        await Gm(alice, "!lvl 99");
+        await Gm(alice, "!paragon level 40"); // 40 points
+        Assert.Equal(ErrorCodes.Parameter, await Allocate(alice, 2)); // node 1 (its predecessor) is not full
+        await MaxOut(alice, 1);
+        Assert.Equal(ErrorCodes.Parameter, await Allocate(alice, 1)); // capped at 3
+        Assert.Equal(0, await Allocate(alice, 2));
+        Assert.Equal(ErrorCodes.Parameter, await Allocate(alice, 13)); // constellation 2 is not active yet
+        Assert.Equal(36L, (await Sent(alice))!.LeftPoints);
+        // Completing constellation 1 (32 points) activates constellation 2.
+        await MaxOut(alice, 2, 3, 5, 4, 6, 9, 8, 7, 11, 12, 10);
+        var sent = (await Sent(alice))!;
+        Assert.Equal([1, 2], sent.ActiveGroup.Keys.Order());
+        Assert.Equal(8L, sent.LeftPoints);
+        Assert.Equal(0, await Allocate(alice, 13));
+        Assert.True(sent.LvPower > 0);
+    }
 
-            Assert.Equal(ParagonService.ErrPrerequisite, await Point(alice, 2));
-            Assert.Equal(ParagonService.ErrSlot, await Point(alice, 28));
-            Assert.Equal(0, await Point(alice, 1));
-            Assert.Equal(0, await Point(alice, 1));
-            Assert.Equal(ParagonService.ErrPoints, await Point(alice, 1));
-            var attrs = await OnLoop("Alice", s => Task.FromResult(Service<ParagonService>().Attributes(s).ToList()));
-            Assert.Equal(GameData.Pairs(Data.Row("PatronTalentAttrConfig", 2)!.Value, "_kAttrs").ToList(), attrs);
+    [ClientDataFact]
+    public async Task AStarCoreLeavesTheBagForItsSlotAndComesBackOnRemovalAndReset()
+    {
+        await using var alice = await InWorld("Alice");
+        await Gm(alice, "!lvl 99");
+        await Gm(alice, "!paragon level 20");
+        await MaxOut(alice, 1, 2, 3, 5, 6); // node 6, the Prism slot, needs its one point first
+        await Gm(alice, $"!item {PrismGray} 1");
+        await Gm(alice, $"!item {SunGray} 1");
+        var opening = Cut();
+        long prism = Session(alice).Items.Single(i => i.Entry == PrismGray).Guid;
+        long sun = Session(alice).Items.Single(i => i.Entry == SunGray).Guid;
+        Assert.Equal(ErrorCodes.Parameter, await Install(alice, 6, sun)); // a Sun core fits only a 921 star
+        Assert.Equal(ErrorCodes.Parameter, await Install(alice, 5, prism)); // not a slot
+        Assert.Equal(0, await Install(alice, 6, prism));
+        Assert.DoesNotContain(Session(alice).Items, i => i.Entry == PrismGray);
+        Assert.Equal(PrismGray, (await Sent(alice))!.Runegroup[6].Rune.ItemEntry);
 
-            // Star core node 6 (920) needs 1 -> 2 -> 3 -> 5 maxed.
-            await OnLoop("Alice", async s => { await Service<ParagonService>().SetLevelAsync(s, 20); return true; });
-            Assert.Equal(0, await Point(alice, 1));
-            foreach (int star in new[] { 2, 3, 5 }) Assert.Equal(0, await Point(alice, star, 3));
-            Assert.Equal(ParagonService.ErrMaxPoints, await Point(alice, 5));
-            Assert.Equal(0, await Point(alice, 6));
+        await alice.SendGameAsync(ParagonService.Remove, new ParagonLevelRuneRemoveReq { SlotId = 6 });
+        Assert.Equal(0, (await Next(alice, ParagonService.Remove, ParagonLevelRuneRemoveResp.Parser)).Result);
+        Assert.Single(Session(alice).Items, i => i.Entry == PrismGray);
+        Assert.Equal(0, (await Sent(alice))!.Runegroup[6].Rune.ItemEntry); // an empty slot's rune, so the client drops the core
+        Assert.Equal(1, Session(alice).Paragon!.Runegroup[6].Points); // its point stays
 
-            await Gm("alice", "!item 1201001 1");
-            await Gm("alice", "!item 1201007 1");
-            long Guid(GameSession s, int entry) => s.Items.First(i => i.Grid == 0 && i.Entry == entry).Guid;
-            long prism = await OnLoop("Alice", s => Task.FromResult(Guid(s, 1201001)));
-            long sun = await OnLoop("Alice", s => Task.FromResult(Guid(s, 1201007)));
-            Task<int> Install(int slot, long guid) => Ask(alice, ParagonService.Install, new ParagonLevelRuneInstallReq { Slot = slot, RuneGuid = guid },
-                ParagonLevelRuneInstallResp.Parser, r => r.Result);
-            Assert.Equal(ParagonService.ErrRuneType, await Install(6, sun));
-            Assert.Equal(ParagonService.ErrSlot, await Install(5, prism));
-            Assert.Equal(ParagonService.ErrSlotInactive, await Install(11, prism));
-            Assert.Equal(0, await Install(6, prism));
-            Assert.Equal(0, await Count(1201001));
-            Assert.Equal(1201001, (await State()).Runegroup[6].Rune.ItemEntry);
-            var withCore = await OnLoop("Alice", s => Task.FromResult(Service<ParagonService>().Attributes(s).ToList()));
-            Assert.Contains((103L, 10.0), withCore); // PatronRuneConfig 1201001 [[103, 10]]
-            Assert.Equal(0, await Ask(alice, ParagonService.Remove, new ParagonLevelRuneRemoveReq { SlotId = 6 },
-                ParagonLevelRuneRemoveResp.Parser, r => r.Result));
-            Assert.Equal(1, await Count(1201001));
-            Assert.Equal(0, (await State()).Runegroup[6].Rune.ItemEntry);
-            Assert.Equal(ParagonService.ErrNoRune, await Ask(alice, ParagonService.Remove, new ParagonLevelRuneRemoveReq { SlotId = 6 },
-                ParagonLevelRuneRemoveResp.Parser, r => r.Result));
+        // Back in, then a reset of star 3: 3, 5 and everything after them (4, 6, 9 ...) are emptied, the core returns.
+        Assert.Equal(0, await Install(alice, 6, Session(alice).Items.Single(i => i.Entry == PrismGray).Guid));
+        await alice.SendGameAsync(ParagonService.ResetSingle, new ParagonLevelResetSingleReq { SlotId = 3 });
+        Assert.Equal(0, (await Next(alice, ParagonService.ResetSingle, ParagonLevelResetSingleResp.Parser)).Result);
+        var sent = (await Sent(alice))!;
+        Assert.Equal((3, 3, 0, 0, 0), (sent.Runegroup[1].Points, sent.Runegroup[2].Points, sent.Runegroup[3].Points,
+            sent.Runegroup[5].Points, sent.Runegroup[6].Points));
+        Assert.Single(Session(alice).Items, i => i.Entry == PrismGray);
 
-            // Resetting star 3 clears 3, 5 and everything after 5 (4, 6, 9 ...) and returns the socketed core.
-            prism = await OnLoop("Alice", s => Task.FromResult(Guid(s, 1201001)));
-            Assert.Equal(0, await Install(6, prism));
-            long before = (await State()).LeftPoints;
-            Assert.Equal(0, await Ask(alice, ParagonService.ResetSingle, new ParagonLevelResetSingleReq { SlotId = 3 },
-                ParagonLevelResetSingleResp.Parser, r => r.Result));
-            var single = await State();
-            Assert.Equal(before + 3 + 3 + 1, single.LeftPoints);
-            Assert.Equal(3, single.Runegroup[2].Points);
-            Assert.Equal(0, single.Runegroup[5].Points);
-            Assert.Equal(0, single.Runegroup[6].Rune.ItemEntry);
-            Assert.Equal(1, await Count(1201001));
-
-            Assert.Equal(0, await Ask(alice, ParagonService.ResetAll, new ParagonLevelResetAllReq(), ParagonLevelResetAllResp.Parser, r => r.Result));
-            Assert.Equal(20, (await State()).LeftPoints);
-            Assert.Equal(ParagonService.ErrPoints, await Ask(alice, ParagonService.ResetAll, new ParagonLevelResetAllReq(), ParagonLevelResetAllResp.Parser, r => r.Result));
-            Assert.Equal(0, await Point(alice, 1, 2));
-            roleId = await OnLoop("Alice", s => Task.FromResult(s.Role!.Id));
-        }
-        var saved = ParagonService.Parse(Service<RoleStore>().LoadParagon(roleId));
-        Assert.Equal(20, saved.Lv);
-        Assert.Equal(2, saved.Points[1]);
-
-        await using var again = await InWorld("Alice", create: false);
-        var relog = await Next(again, ParagonService.Sync, DBParagonLevelIncrement.Parser);
-        Assert.Equal(20, relog.Lv);
-        Assert.Equal(18, relog.LeftPoints);
+        await alice.SendGameAsync(ParagonService.ResetAll, new ParagonLevelResetAllReq());
+        Assert.Equal(0, (await Next(alice, ParagonService.ResetAll, ParagonLevelResetAllResp.Parser)).Result);
+        Assert.Equal(20L, (await Sent(alice))!.LeftPoints);
+        Balanced(opening, Cut());
     }
 }

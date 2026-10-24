@@ -252,14 +252,13 @@ public sealed partial class TaskService
             TLeagueJoin => t[1] is >= 0 and <= 3,
             TLeagueScore => t[1] is >= 0 and <= 2 && t[2] >= 0,
             TSiegeScore => t[1] >= 0,
-            TTavernTime => t[1] >= 60,
             _ => true, // Only the explicit formatter cases above can reach here.
         };
     }
 
     /// <summary>Every target of the quest has a supported reader and a positive R (a quest without one never ends).</summary>
     internal bool TargetsSupported(long taskId) => Defs().TryGetValue(taskId, out var def) && def.Targets.Length > 0
-        && def.Targets.All(t => Supported(t) && Required(null, t) > 0);
+        && def.Targets.All(t => Supported(t) && Required(null, t) > 0 && (t[0] != TTavernTime || t[1] >= 60 || GuildEventTask(def.Id)));
 
     private bool ItemExists(long id) => id > 0 && id <= int.MaxValue && _data.Row("ItemConfig", id) != null;
 
@@ -284,7 +283,9 @@ public sealed partial class TaskService
         return t[0] switch
         {
             TBaseLevel => p.Level,
-            TTavernTime => TavernSecondsToday?.Invoke(s) ?? 0,
+            // 106010 [n >= 60]: today's Tavern seconds (TavernService); the guild To-Do stand-in [106010,5] is counted by
+            // TaskService.GuildEvents instead, so it is not a passive read.
+            TTavernTime => t[1] >= 60 ? TavernSecondsToday?.Invoke(s) ?? 0 : -1,
             // 500130 [106901,3600] displays whole consumed minutes. Reading the committed
             // daily counter also repairs a disconnect between 5035 persistence and the quest sync (inferred).
             TAfkSeconds => s.WildAfk is { } afk && s.Daily?.DailyEpoch == afk.DailyEpoch ? afk.ConsumedTodaySeconds : 0,

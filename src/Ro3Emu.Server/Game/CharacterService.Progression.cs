@@ -107,7 +107,6 @@ public sealed partial class CharacterService
             if (stillOwner?.Invoke() == false) return string.Empty;
             foreach (var handler in StateChanged) handler(session);
         }
-        await CapExpAsync(session);
         return $"Base {p.Level} ({p.Exp}/{BaseExpNeed(p.Level)}), job {p.JobLevel} ({p.JobExp}/{JobExpNeed(p.Career, p.JobLevel)}).";
     }
 

@@ -100,7 +100,7 @@ public sealed partial class TerritoryWarsService
         PublishCommitted(next);
         var personal = roleChanges.Keys.ToDictionary(id => id, id => r.Players[id].Score);
         var guildScores = new Dictionary<long, long>(r.Scores);
-        foreach (var handler in BattleSettled)
+        foreach (var handler in BattleScored)
             try { handler(personal, guildScores); }
             catch (Exception e) { _log.LogError(e, "Territory battle settlement hook failed for zone {Zone}", r.Zone); }
         await RoleFanout.EachAsync(_sessions.All().Where(s => s.Role != null && roleChanges.ContainsKey(s.Role.Id)), s =>
@@ -119,6 +119,8 @@ public sealed partial class TerritoryWarsService
             catch (Exception e) when (e is IOException or ObjectDisposedException or System.Net.Sockets.SocketException)
             { _log.LogDebug(e, "Territory settlement delivery deferred for disconnected role {Role}", s.Role?.Id); }
         });
+        foreach (var p in r.Players.Values.Where(p => p.Loaded))
+            foreach (var handler in BattleSettled) handler(p.Id, r.Round);
         await PublishAsync();
     }
     private void AddRankAward(List<Grant> grants, string table, int rank, GameSession s)

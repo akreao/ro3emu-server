@@ -8,7 +8,7 @@ namespace Ro3Emu.Server.Game;
 /// selection check), when it moves and when it leaves. RoleSessionService runs the selection around these; the order
 /// here is the client's, see the comments on each step.
 /// </summary>
-public sealed class RoleSystems(Maps.World world, ChatService chat, CharacterService character, SkillService skills, FunctionService functions, CombatService combat, BuffService buffs, SceneService scene, TaskService tasks, DailyActivityService daily, GuideService guides, EmojiService emoji, PersonalService personal, SocialOutfitService socialOutfit, TavernService tavern, TitleService titles, ParagonService paragon, AchievementService achievements, Micro.FriendService friends, MvpService mvps, CardService cards, ShopService shops, EmblemService emblems, SeasonService seasons, SeasonPageService seasonPage, SeasonRefineService seasonRefine, SeasonTalentService talents, PetService pets, TowerService tower, ValhallaService valhalla, MonsterHuntService monsterHunt, GrowthClassService growthClass, FirstHeartService firstHeart, MailService mail, AuctionService auctions, GuildService guilds, AdventureGroupService adventureGroups, GuildCaravanService caravan, GuildChallengeService guildChallenge, DungeonService dungeons, DungeonMatchService dungeonMatches, InstanceService instances, TradeService trade, StallsService stalls, LifeJobService life, GatheringService gathering, WildAfkService afk, WorldCoreService worldCore, WorldInteractionService interaction, NewActivityService activities, TimedEventService timedEvents, PronteraDefenseService defense, TimedBattleService timedBattles, CasualBattleService casual, FestivalService festival, TrainingService training, LotteryService lottery, MountService mounts, CareerSpecialService careerSpecial, WardrobeService wardrobe, TotemService totems, GenreService genre, PowerService power, TerritoryWarsService territory, TerritoryEscortService escort, Persistence.SettingsPersistence settings, ItemAutoUseService autoUse, GearPromptService gearPrompt, CustomContentService customContent, ILogger<RoleSystems> log)
+public sealed class RoleSystems(Maps.World world, ChatService chat, CharacterService character, SkillService skills, FunctionService functions, CombatService combat, BuffService buffs, SceneService scene, TaskService tasks, DailyActivityService daily, GuideService guides, EmojiService emoji, PersonalService personal, SocialOutfitService socialOutfit, TavernService tavern, AchievementService achievements, Micro.FriendService friends, MvpService mvps, CardService cards, ShopService shops, EmblemService emblems, SeasonService seasons, SeasonPageService seasonPage, SeasonRefineService seasonRefine, SeasonTalentService talents, PetService pets, TowerService tower, ValhallaService valhalla, FlyingDragonService dragon, MonsterHuntService monsterHunt, GrowthClassService growthClass, ParagonService paragon, TitleService titles, FirstHeartService firstHeart, MailService mail, AuctionService auctions, GuildService guilds, AdventureGroupService adventureGroups, GuildCaravanService caravan, GuildChallengeService guildChallenge, DungeonService dungeons, DungeonMatchService dungeonMatches, InstanceService instances, TradeService trade, StallsService stalls, LifeJobService life, GatheringService gathering, WildAfkService afk, WorldCoreService worldCore, WorldInteractionService interaction, NewActivityService activities, TimedEventService timedEvents, PronteraDefenseService defense, TimedBattleService timedBattles, CasualBattleService casual, FestivalService festival, TrainingService training, LotteryService lottery, MountService mounts, CareerSpecialService careerSpecial, WardrobeService wardrobe, TotemService totems, GenreService genre, PowerService power, TerritoryWarsService territory, TerritoryEscortService escort, Persistence.SettingsPersistence settings, ItemAutoUseService autoUse, GearPromptService gearPrompt, CustomContentService customContent, ILogger<RoleSystems> log)
 {
     internal async Task LoadAsync(GameSession session)
     {
@@ -20,6 +20,8 @@ public sealed class RoleSystems(Maps.World world, ChatService chat, CharacterSer
         valhalla.Load(session);
         monsterHunt.Load(session);
         growthClass.Load(session);
+        paragon.Load(session);
+        titles.Load(session);
         firstHeart.Load(session);
         mounts.Load(session);
         totems.Load(session);
@@ -33,8 +35,6 @@ public sealed class RoleSystems(Maps.World world, ChatService chat, CharacterSer
         await emblems.LoadAsync(session);
         talents.Load(session);
         seasonRefine.Load(session);
-        titles.Load(session); // before Prime: the title is part of the power package
-        paragon.Load(session); // before the first stat snapshot: stars and Star Cores add attributes
         power.Prime(session); // the login 5066 carries the computed power (pets join at the login publish)
         character.Refresh(session); // first entity/stats use this role's saved active talent plan
     }
@@ -67,10 +67,6 @@ public sealed class RoleSystems(Maps.World world, ChatService chat, CharacterSer
         // 5035 must precede To-Do/scene loading: LC_OnHookHelper calls Mathf.Max on its remaining seconds.
         await afk.LoginAsync(session);
         checkpoint();
-        await titles.LoginAsync(session); // 5031: the Title tab needs a nonzero titleId
-        checkpoint();
-        await paragon.LoginAsync(session); // 5015 once function 71 is open (the level cap)
-        checkpoint();
         await tavern.LoginAsync(session); // 5043 before 5027: the Daily Tavern quest (106010) reads today's seconds
         checkpoint();
         await tasks.LoginAsync(session); // 5027 before 5056: quest-gated functions (condition 4004)
@@ -94,6 +90,7 @@ public sealed class RoleSystems(Maps.World world, ChatService chat, CharacterSer
         checkpoint();
         await dungeons.LoginAsync(session); // 5062 before opening the Dungeon menu
         await valhalla.LoginAsync(session); // 5046 after 5062: cleared layers are dungeon records
+        await dragon.LoginAsync(session); // 82974 while a Starshatter ritual runs: the top button shows it
         await monsterHunt.LoginAsync(session); // 5053
         checkpoint();
         await emblems.LoginAsync(session); // after 5009: plan GUIDs refer to item instances
@@ -142,6 +139,8 @@ public sealed class RoleSystems(Maps.World world, ChatService chat, CharacterSer
         session.DeferTaskSync = false;
         checkpoint();
         await tasks.RefreshAsync(session); // all owner snapshots are now available for passive objectives; settles with the login's one full 5027
+        await paragon.LoginAsync(session); // 5015 once the Astral Level is open (base level 99)
+        await titles.LoginAsync(session); // 5031 in full once; a rank claimed later travels as an increment
         await growthClass.LoginAsync(session); // 5045 after the login's quest settlement: it reads the delivered growth quests
         checkpoint();
         await achievements.LoginAsync(session); // one full 5019 after every owner snapshot its conditions read; function 21 opens at level 1
