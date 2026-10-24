@@ -635,9 +635,9 @@ public sealed class StoryWalkTests(ITestOutputHelper output) : IAsyncLifetime
         while (!result.IsCompleted && DateTime.UtcNow < until)
         {
             // A scripted scene without a fight: play its current step the way the client does (see PlayStepAsync).
-            // A fight step (its Step has spawns) is cleared by the kills below, like any wave.
+            // A fight step (its Step has a fight) is cleared by the kills below, like any wave.
             var (wave, step) = await OnLoop(s => s.DungeonAttempt is { Settled: false } a && a.Wave < a.Plan.Waves.Count
-                && a.Plan.Waves[a.Wave].Step is { Fight: false } scripted ? (a.Wave, scripted) : (-1, null));
+                && a.Plan.Waves[a.Wave].Step is { Fight.Count: 0 } scripted ? (a.Wave, scripted) : (-1, (ReconstructedDungeons.ScriptedStep?)null));
             if (step != null)
             {
                 await PlayStepAsync(scene, wave, step, detail);

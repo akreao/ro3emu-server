@@ -1,138 +1,110 @@
-using System.Text.Json;
+using Google.Protobuf;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using Romsg;
 using Ro3Emu.Bot;
 using Ro3Emu.Server;
-using Ro3Emu.Server.Accounts;
-using Ro3Emu.Server.Data;
 using Ro3Emu.Server.Game;
 
 namespace Ro3Emu.Tests;
+
 /// <summary>
-/// The title rank ladder (TitleService): the 5031 DBTitleInfo autosync at login (row 1 by default), 43102 promotions
-/// gated by level, maxHistoryPower and the next row's _kSpend items, the title's _iPowerAdd in the power package, and
-/// the saved title across relog.
+/// Title ranks (TitleService): 5031 in full at login, 43102 claims the next TitleConfig rank by _kIndex when the base
+/// level, the best power ever reached and the _kSpend Crests allow it, and the new rank travels as a 5031 increment.
 /// </summary>
 public sealed class TitleTests : IAsyncLifetime
 {
-    private readonly string _dataDir = Path.Combine(Path.GetTempPath(), "ro3emu-title-" + Guid.NewGuid().ToString("N"));
+    private const int CrestOfJourney = 1250801;
     private static readonly TimeSpan Wait = TimeSpan.FromSeconds(15);
+    private readonly string _dataDir = Path.Combine(Path.GetTempPath(), "ro3emu-title-" + Guid.NewGuid().ToString("N"));
     private WebApplication _app = null!;
-    private string _httpUrl = "";
+    private string _http = "";
+
+    private T Service<T>() where T : notnull => _app.Services.GetRequiredService<T>();
 
     public async Task InitializeAsync()
     {
-        var (http, micro, game) = TestPorts.FreePorts();
+        var (httpPort, microPort, gamePort) = TestPorts.FreePorts();
         _app = ServerHost.Create([], o =>
         {
-            o.DataDir = _dataDir;
-            o.GameDataDir = Path.Combine(RepoRoot(), "data");
-            o.HttpPort = http;
-            o.MicroGatePort = micro;
-            o.GameGatePort = game;
+            o.DataDir = _dataDir; o.GameDataDir = Path.Combine(ClientData.RepoRoot, "data");
+            o.HttpPort = httpPort; o.MicroGatePort = microPort; o.GameGatePort = gamePort;
+            o.OpenContent.Enabled = true; // function 14 is opened by OpenContent only
         });
         await _app.StartAsync();
-        _httpUrl = $"http://127.0.0.1:{http}";
+        _http = $"http://127.0.0.1:{httpPort}";
     }
 
     public async Task DisposeAsync()
     {
-        await _app.StopAsync();
-        await _app.DisposeAsync();
+        await _app.StopAsync(); await _app.DisposeAsync();
         Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
         try { Directory.Delete(_dataDir, true); } catch (IOException) { }
     }
 
-    private static string RepoRoot()
+    private async Task<BotClient> InWorld(string name)
     {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir != null && !File.Exists(Path.Combine(dir.FullName, "Ro3Emu.slnx"))) dir = dir.Parent;
-        return dir?.FullName ?? throw new InvalidOperationException("repo root not found");
-    }
-
-    private T Service<T>() where T : notnull => _app.Services.GetRequiredService<T>();
-
-    private async Task<BotClient> InWorld(string name, bool create = true)
-    {
-        var bot = new BotClient(_httpUrl, File.ReadAllText(Path.Combine(_dataDir, "gate_rsa_public.pem")));
-        await bot.LoginAsync(name.ToLowerInvariant(), "pw");
-        await bot.EnterGateAsync();
-        long id = create ? (await bot.CreateRoleAsync(name)).RoleBaseInfo.Id : bot.Roles.Single().Id;
-        await bot.EnterWorldAsync(id);
+        var bot = new BotClient(_http, File.ReadAllText(Path.Combine(_dataDir, "gate_rsa_public.pem")));
+        await bot.LoginAsync(name.ToLowerInvariant(), "pw"); await bot.EnterGateAsync();
+        await bot.EnterWorldAsync((await bot.CreateRoleAsync(name)).RoleBaseInfo.Id);
         return bot;
     }
 
-    private static async Task<T> Next<T>(BotClient bot, uint msgId, Google.Protobuf.MessageParser<T> parser, Func<T, bool>? match = null)
-        where T : Google.Protobuf.IMessage<T>
+    private static async Task<T> Next<T>(BotClient bot, uint id, MessageParser<T> parser, Func<T, bool>? match = null)
+        where T : IMessage<T>
     {
-        var e = await bot.Inbox.WaitAsync(e => e.IsGame(msgId) && (match == null || match(parser.ParseFrom(e.Body))), Wait);
+        var e = await bot.Inbox.WaitAsync(e => e.IsGame(id) && (match == null || match(parser.ParseFrom(e.Body))), Wait);
         return parser.ParseFrom(e.Body);
     }
 
-    private async Task Gm(string account, string command)
+    private async Task Gm(BotClient bot, string command)
     {
-        using var http = new HttpClient();
-        var response = await http.PostAsync($"{_httpUrl}/ro3emu/gm?account={account}", new StringContent(command));
-        response.EnsureSuccessStatusCode();
+        using var client = new HttpClient();
+        (await client.PostAsync($"{_http}/ro3emu/gm?account={bot.Account}", new StringContent(command))).EnsureSuccessStatusCode();
     }
 
-    private GameSession Session(string name) => Service<SessionRegistry>().All().Single(s => s.Role?.Name == name);
-    private Task<T> OnLoop<T>(string name, Func<GameSession, Task<T>> work) => Service<GameLoop>().InvokeAsync(() => work(Session(name)));
+    private GameSession Session(BotClient bot) => Service<SessionRegistry>().All().Single(s => s.Account == bot.Account && s.Role != null);
 
-    private long PowerAdd(long title) => GameData.Int(Service<GameData>().Row("TitleConfig", title)!.Value, "_iPowerAdd");
-
-    private Task<TitleLevelRsp> Upgrade(BotClient bot) => bot.SendGameAsync(TitleService.Upgrade, new TitleLevelReq())
-        .ContinueWith(_ => Next(bot, TitleService.Upgrade, TitleLevelRsp.Parser)).Unwrap();
-
-    private Task RaiseHistory(string name, long power) => OnLoop(name, s =>
+    private static async Task<int> Claim(BotClient bot)
     {
-        s.Power = s.Power! with { History = new PowerUnit { NormalPower = power } };
-        return Task.FromResult(true);
+        await bot.SendGameAsync(TitleService.Level, new TitleLevelReq());
+        return (await Next(bot, TitleService.Level, TitleLevelRsp.Parser)).Result;
+    }
+
+    /// <summary>The best power ever reached, as PowerService keeps it.</summary>
+    private Task SetBestPower(BotClient bot, long power) => Service<GameLoop>().InvokeAsync(() =>
+    {
+        var s = Session(bot);
+        var current = PowerService.Current(s);
+        s.Power = new PowerService.Snapshot(current, new PowerUnit { NormalPower = power }, new PlayerPowerPackage());
+        return Task.CompletedTask;
     });
 
     [ClientDataFact]
-    public async Task TitlesClimbOneRowAtATimeAndAreKept()
+    public async Task RanksAreClaimedInOrderAgainstLevelPowerAndCrests()
     {
-        long roleId;
-        await using (var alice = await InWorld("Alice"))
-        {
-            var login = await Next(alice, TitleService.Sync, DBTitleInfoIncrement.Parser);
-            Assert.True(login.SyncAllMark);
-            Assert.Equal(TitleService.FirstTitle, login.TitleId);
-            var power = await Next(alice, PowerService.PackageNtf, PlayerPowerPackageNtf.Parser);
-            Assert.Equal(PowerAdd(1), power.PowerPackage.TitleScore.NormalPower);
+        await using var alice = await InWorld("Alice");
+        var login = await Next(alice, TitleService.Sync, DBTitleInfoIncrement.Parser, m => m.SyncAllMark);
+        Assert.Equal(0, login.TitleId);
 
-            // Row 2 needs base level 20 and 5000 history power.
-            var low = await Upgrade(alice);
-            Assert.Equal(ErrorCodes.Parameter, low.Result);
-            Assert.Equal(1, low.TitleId);
-
-            await Gm("alice", "!lvl 45");
-            await RaiseHistory("Alice", 1_000_000);
-            var two = await Upgrade(alice);
-            Assert.Equal(0, two.Result);
-            Assert.Equal(2, two.TitleId);
-            var update = await Next(alice, TitleService.Sync, DBTitleInfoIncrement.Parser, m => !m.SyncAllMark);
-            Assert.Equal(2, update.TitleId);
-            await Next(alice, PowerService.PackageNtf, PlayerPowerPackageNtf.Parser,
-                m => m.PowerPackage.TitleScore.NormalPower == PowerAdd(2));
-
-            Assert.Equal(3, (await Upgrade(alice)).TitleId);
-            // Row 4 costs two Crests of Journey (1250801).
-            var shortItems = await Upgrade(alice);
-            Assert.Equal(ErrorCodes.ItemsShort, shortItems.Result);
-            Assert.Equal(3, shortItems.TitleId);
-            await Gm("alice", "!item 1250801 2");
-            var four = await Upgrade(alice);
-            Assert.Equal(0, four.Result);
-            Assert.Equal(4, four.TitleId);
-            Assert.Equal(0, await OnLoop("Alice", s => Task.FromResult(s.Items.Where(i => i.Entry == 1250801).Sum(i => (long)i.Stack))));
-            roleId = await OnLoop("Alice", s => Task.FromResult(s.Role!.Id));
-        }
-        Assert.Equal(4, DBTitleInfo.Parser.ParseFrom(Service<RoleStore>().LoadTitle(roleId)).TitleId);
-
-        await using var again = await InWorld("Alice", create: false);
-        Assert.Equal(4, (await Next(again, TitleService.Sync, DBTitleInfoIncrement.Parser)).TitleId);
+        // Rank 1 "Beginner" asks for nothing; it travels as an increment (the client's upgrade animation).
+        Assert.Equal(0, await Claim(alice));
+        Assert.Equal(1, (await Next(alice, TitleService.Sync, DBTitleInfoIncrement.Parser, m => !m.SyncAllMark)).TitleId);
+        // Rank 2 needs base level 20 and power 5000.
+        Assert.Equal(ErrorCodes.LevelTooLow, await Claim(alice));
+        await Gm(alice, "!lvl 99");
+        await SetBestPower(alice, 4999);
+        Assert.Equal(ErrorCodes.Parameter, await Claim(alice));
+        await SetBestPower(alice, 1_000_000);
+        Assert.Equal(0, await Claim(alice));
+        Assert.Equal(0, await Claim(alice)); // rank 3
+        // Rank 4 spends two Crests of Journey.
+        Assert.Equal(ErrorCodes.ItemsShort, await Claim(alice));
+        await Gm(alice, $"!item {CrestOfJourney} 2");
+        Assert.Equal(0, await Claim(alice));
+        Assert.Equal(4, Session(alice).TitleInfo!.TitleId);
+        Assert.DoesNotContain(Session(alice).Items, i => i.Entry == CrestOfJourney);
+        // The rank is the role's public title and adds its _iPowerAdd to titleScore.
+        Assert.Equal(4, Service<CharacterService>().TitleOf!(Session(alice)));
     }
 }

@@ -183,6 +183,30 @@ public sealed class ParticipationTargetTests : IAsyncLifetime
         await bot.DisposeAsync();
     }
 
+    /// <summary>The guild To-Do tasks' stand-in target 106010 (TaskService.GuildEvents.cs): taking part completes them;
+    /// the Daily Tavern quest is counted by TavernService.</summary>
+    [ClientDataFact]
+    public async Task GuildEventToDoTasksCompleteOnTakingPart()
+    {
+        var bot = await InWorld();
+        var tasks = Service<TaskService>();
+        Assert.True(tasks.TargetsSupported(2000)); // Daily Tavern Quest, [106010,1200]: seconds in a Tavern room
+        foreach (long task in new long[] { 1602050, 1602060, 1602070, 1603011, 1603012, 1603013, 1603014 })
+            Assert.True(tasks.TargetsSupported(task), $"task {task}");
+        await Accept(1602060); // Stronghold War
+        await Accept(1602070); // Regional Capital War
+        await Accept(1602050); // Escort
+        await Read(() => { tasks.OnTerritoryBattleSettled(Session.Role!.Id, 1); return 0; });
+        await Done(1602060);
+        await At(1602070, 0);
+        await Read(() => { tasks.OnTerritoryBattleSettled(Session.Role!.Id, 2); return 0; });
+        await Done(1602070);
+        await At(1602050, 0);
+        await Read(() => { tasks.OnGuildEventJoined(Session, TaskService.GuildEvent.Escort); return 0; });
+        await Done(1602050);
+        await bot.DisposeAsync();
+    }
+
     [ClientDataFact]
     public async Task ActivityTargetReadsTodaysActivityPoints()
     {
@@ -249,7 +273,7 @@ public sealed class ParticipationTargetTests : IAsyncLifetime
     /// <summary>
     /// 106610 [n] (Realm Campaign 120001 "Reach 1000 Battle Merit") and 106609 [n] (120006 "Reach 10000 points in Guild
     /// Territory War"): a settled Territory War battle adds the role's personal score and its guild's battle score.
-    /// Hook level: TerritoryWarsService raises BattleSettled after the settlement commit (TerritoryWarsTests drive that
+    /// Hook level: TerritoryWarsService raises BattleScored after the settlement commit (TerritoryWarsTests drive that
     /// path). Another guild's score does not count; the counts survive a relogin.
     /// </summary>
     [ClientDataFact]
@@ -263,7 +287,7 @@ public sealed class ParticipationTargetTests : IAsyncLifetime
         var wars = Service<TerritoryWarsService>();
         Task Settle(long personal, long ownGuild, long otherGuild) => Service<GameLoop>().InvokeAsync(() =>
         {
-            foreach (var h in wars.BattleSettled)
+            foreach (var h in wars.BattleScored)
                 h(new Dictionary<long, long> { [role] = personal }, new Dictionary<long, long> { [77] = ownGuild, [78] = otherGuild });
             return Task.CompletedTask;
         });

@@ -110,7 +110,9 @@ public sealed class DungeonCatalog(GameData data, WorldData worldData, MonsterSe
         // plain lc_dungeon_base like an ordinary dungeon (GamePlayConfig.lua:136-140).
         else if (kind is not (1 or 2) || mode is not (6 or 24) && !(mode == 26 && reconstructed?.Scripted(req.SceneEntry) != null)
             || data.Table("TenGameplayBossConfig").Values.Any(r => GameData.Int(r, "_iDungeon") == req.SceneEntry)) return null;
-        var waves = mode == 24 && selected == null ? JourneySpawns(config) : Spawns(config, boss, worldData.Map(req.SceneEntry)!);
+        // A Journey scene (24) rebuilt as a scripted scene plays its steps instead of the bare point respawns.
+        var waves = mode == 24 && selected == null && reconstructed?.Scripted(req.SceneEntry) == null
+            ? JourneySpawns(config) : Spawns(config, boss, worldData.Map(req.SceneEntry)!);
         return max >= min && waves.Count > 0 ? new Plan(config, multi, boss, mark, min, max, waves) : null;
     }
 
@@ -343,7 +345,7 @@ public sealed class DungeonCatalog(GameData data, WorldData worldData, MonsterSe
             if (step.TeleportAfter != 0 && !map.Points.ContainsKey(step.TeleportAfter)) return [];
             if (step.Guide.Any(g => !map.GuidePoints.Contains(g))) return [];
             if (step.Slide is { } slide && !(slide.Side >= 0 && slide.Down > 0 && slide.Side < 100 && slide.Down < 100)) return [];
-            if (step.Fallback is { } fallback && (fallback.Ms <= 0 || step.Fight
+            if (step.Fallback is { } fallback && (fallback.Ms <= 0 || step.Fight.Count > 0
                 || fallback.Teleport != 0 && !map.Points.ContainsKey(fallback.Teleport)
                 || fallback.FromMount && !step.Actors.Any(a => Interactions(a.NpcId).Any(i => VehicleSeat(a.NpcId, i) != null)))) return [];
             foreach (var t in step.Complete.Concat(step.Ignore))
@@ -359,16 +361,25 @@ public sealed class DungeonCatalog(GameData data, WorldData worldData, MonsterSe
                 };
                 if (!known) return [];
             }
-            // A fight step: its monsters, at server spawn points of the scene, with a template the server knows.
-            var spawns = new List<Spawn>();
-            foreach (var spawn in step.Spawns)
+            if (step.Seek is { } seek && (step.Actors.Count == 0 || seek.Rounds <= 0 || seek.SearchedRadius < 0
+                    || step.Complete.Count == 0 || step.Complete.Any(t => t.Kind != ReconstructedDungeons.TriggerKind.Point)
+                    || seek.Opening.Append(seek.Round).Append(seek.Countdown).Append(seek.Longer).Append(seek.Won).Append(seek.Found)
+                        .Any(chat => data.Row("ChatConfig", chat) == null))) return [];
+            if (step.Shelter is { } shelter && (!step.Fight.Any(f => f.NpcId == shelter.Boss) || !step.Actors.Any(a => a.NpcId == shelter.Cover)
+                    || data.Row("ChatConfig", shelter.Tip) == null || data.Row("SkillConfig", shelter.Skill) == null
+                    || shelter.EveryMs <= shelter.WarnMs || shelter.WarnMs < 0 || shelter.Width <= 0 || shelter.Depth <= 0)) return [];
+            foreach (var (interaction, skill, shots) in step.Strikes ?? [])
+                if (step.Fight.Count == 0 || shots < 0 || data.Row("SkillConfig", skill) == null
+                    || !step.Actors.Any(a => Interactions(a.NpcId).Contains(interaction))) return [];
+            var fight = new List<Spawn>();
+            foreach (var spawn in step.Fight)
             {
-                if (monsters.Template(spawn.NpcId) == null || !map.Points.TryGetValue(spawn.Point, out var at)) return [];
-                spawns.Add(new Spawn(spawn.NpcId, at));
+                if (!map.Points.TryGetValue(spawn.Point, out var at) || monsters.Template(spawn.NpcId) == null) return [];
+                fight.Add(new Spawn(spawn.NpcId, at));
             }
             if (step.Lines.Concat(step.DoneLines).Any(l => data.Row("ChatConfig", l.Chat) == null
-                    || l.By != 0 && step.Actors.All(x => x.NpcId != l.By) && step.Spawns.All(x => x.NpcId != l.By))) return [];
-            waves.Add(new Wave(waves.Count + 1, spawns, step.Quest, step));
+                    || l.By != 0 && step.Actors.All(x => x.NpcId != l.By) && step.Fight.All(x => x.NpcId != l.By))) return [];
+            waves.Add(new Wave(waves.Count + 1, fight, step.Quest, step));
         }
         // An unplayed quest is one of the scene's own quests that no step shows.
         if (scene.Unplayed.Any(q => scene.Steps.Any(s => s.Quest == q) || !data.Table("DungeonQuestConfig").Values.Any(r =>
@@ -412,7 +423,7 @@ public sealed class DungeonCatalog(GameData data, WorldData worldData, MonsterSe
         Spawn? At(long point) => bound.TryGetValue(point, out int npc) && map.Points.TryGetValue(point, out var p)
             && monsters.Template(npc) != null ? new Spawn(npc, p) : null;
         ReconstructedDungeons.ScriptedStep Chase(long region) => new($"chase to region {region}", 0, (0, 1), [], 0,
-            [new(ReconstructedDungeons.TriggerKind.Region, region)], [], 0);
+            [new(ReconstructedDungeons.TriggerKind.Region, region)], [], 0, [], false);
         var waves = new List<Wave>();
         foreach (var (elite, region, groups) in DraculaFights)
         {
@@ -448,7 +459,7 @@ public sealed class DungeonCatalog(GameData data, WorldData worldData, MonsterSe
         waves.Add(new Wave(waves.Count + 1, [], 0, new ReconstructedDungeons.ScriptedStep("find the key", 0, (0, 1), actors, 0,
             [new(ReconstructedDungeons.TriggerKind.Interaction, DraculaUnlock)],
             DraculaBushes.SelectMany(Interactions).Select(i => new ReconstructedDungeons.StepTrigger(
-                ReconstructedDungeons.TriggerKind.Interaction, i)).ToArray(), 0)));
+                ReconstructedDungeons.TriggerKind.Interaction, i)).ToArray(), 0, [], false)));
         return new Plan(config, null, null, 0, 1, (int)GameData.Int(config, "_iRoleCntLimit"), waves);
     }
 

@@ -198,20 +198,4 @@ public sealed partial class CombatService
             await _buffs.RemoveAsync(s, buff);
     }
 
-    /// <summary>Ends every cooldown of a skill group (all its modes) and tells the client.</summary>
-    private async Task ResetCooldownAsync(GameSession s, int group)
-    {
-        if (s.Role == null) return;
-        long now = Now;
-        var notice = new SkillCdNotify { Uuid = s.Role.Id };
-        foreach (var key in s.SkillModeCds.Keys.Where(k => k.Item1 == group).ToArray())
-        {
-            if (s.SkillModeCds[key] > now)
-                notice.Infos.Add(new SkillCdInfo { SkillId = group, SkillMode = key.Item2, CdStartTimestampMs = now, CdEndTimestampMs = now });
-            s.SkillModeCds.Remove(key);
-        }
-        if (s.SkillCds.Remove(group, out long shared) && shared > now && notice.Infos.All(i => i.SkillId != group))
-            notice.Infos.Add(new SkillCdInfo { SkillId = group, CdStartTimestampMs = now, CdEndTimestampMs = now });
-        if (notice.Infos.Count > 0) await s.SendGameAsync(SkillCdUpdate, notice);
-    }
 }

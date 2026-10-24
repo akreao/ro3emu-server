@@ -10,7 +10,7 @@ public sealed partial class CharacterService
     internal Func<Task> CaptureEconomicItemsNotice(GameSession session, bool publishStateChanged = true)
     {
         var items = BuildItems(session);
-        ResendItemsWholeIfNeeded(session, items);
+        if (ResendItemsWholeIfNeeded(session, items)) items = BuildItems(session);
         var notices = new List<Func<Task>> { CaptureEconomicSync(session, ItemsSync, items) };
         if (PruneEquipmentPlans(session))
         {

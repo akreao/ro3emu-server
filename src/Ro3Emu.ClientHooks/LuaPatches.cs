@@ -22,6 +22,7 @@ namespace Ro3Emu.ClientHooks
     /// methods are C# delegates (SelfMethod) that xLua calls like Lua functions.</item>
     /// <item>The menu's Feedback entry gets a text panel that sends bug reports to the server (FeedbackButton).</item>
     /// <item>"/pass" in chat opens the season task panel with the pass challenges (PassChallenges).</item>
+    /// <item>The character window gets a Title button that hosts the title rank widget (TitleButton).</item>
     /// <item>For our open-content policy: the client's own server-day checks (season cards, guild challenge difficulties)
     /// follow what the server reports instead of the day count from the real opening time, and the season page opens in
     /// the season's hidden first week (ServerDayGates).</item>
@@ -117,6 +118,7 @@ namespace Ro3Emu.ClientHooks
                 var functionHelper = Module(manager, global, "lc_functionhelper");
                 FeedbackButton.Install(global, functionHelper);
                 PassChallenges.Install(global);
+                TitleButton.Install(manager, global);
                 ServerDayGates.Install(global, functionHelper, Module(manager, global, "lc_conditiondefine"),
                     global.Obf_RuA<Obf_R.Obf_ff>("LC_SeasonHelper") ?? Module(manager, global, "lc_seasonhelper"),
                     global.Obf_RuA<Obf_R.Obf_ff>("LC_SeasonExplorationHelper") ?? Module(manager, global, "lc_seasonexplorationhelper"));

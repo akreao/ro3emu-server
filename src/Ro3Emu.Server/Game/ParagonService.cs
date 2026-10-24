@@ -1,359 +1,373 @@
 using System.Text.Json;
+using Google.Protobuf;
 using Romsg;
 using Ro3Emu.Server.Accounts;
-using Ro3Emu.Server.Accounts.Persistence;
 using Ro3Emu.Server.Data;
+using Ro3Emu.Server.Data.Config;
+using Ro3Emu.Server.Maps;
 
 namespace Ro3Emu.Server.Game;
 
 /// <summary>
-/// The Astral Level (client "Patron", protocol "Paragon", function 71; LC_DAL_PatronLevel, UI_Sys_Personal_*): a second
-/// level that Base EXP fills once the role is at the level cap, Astral Points (one per level, PatronLevelConfig
-/// _iStatusPoint) spent one at a time on the stars of three constellations, and Star Core items socketed in the star-core
-/// nodes. Everything the client shows comes from the 5015 DBParagonLevel autosync; the five requests (83101-83105) answer
-/// only {result}. Attributes: a counted star gives PatronTalentAttrConfig[_kTalentAttrIds[points]] (rows are totals), a
-/// socketed core PatronRuneConfig[item]._kAttrs, counted only in active constellations.
+/// Astral Level (Paragon; client PatronLevel, function 71, open at base level 99): 5015 AUTO_SYNC DBParagonLevel and
+/// 83101-83105 (LC_DAL_PatronLevel, UI_Sys_Personal_* panels).
+/// <list type="bullet">
+/// <item>Level and EXP are RoleProgress.ParagonLevel / ParagonExp (CharacterService.Paragon): Base EXP past the level
+/// cap. lv is at least 1 once the function is open (the panel reads PatronLevelConfig[lv]).</item>
+/// <item>runegroup is keyed by PatronTalentConfig _iID and carries every configured node, at 0 points too (the panel
+/// reads runegroup[1].points unguarded). A node takes points while every node naming it in _iPostTalentID is at its
+/// _iMaxLevel and its constellation is active; the client always sends points = 1 and checks only the budget and the
+/// cap (UI_Sys_Personal_TalentistRunesWidgetCtrl).</item>
+/// <item>activeGroup is a set of PatronTalentGroupConfig ids, always a prefix: group 1, then each group whose previous
+/// one has every node at its _iMaxLevel (LC_PatronLevelHelper.IsTalentGroupCompleted; 16111 "unlocked after
+/// activating all Stars in the prerequisite Constellation"). Attributes count only in active groups (the overview).</item>
+/// <item>A Star Core (ItemConfig _iSubType 920-923, PatronRuneConfig) goes into a node whose _iType equals its subtype
+/// and that has its point. The core leaves the bag (16113: the list shows only cores not installed) and comes back on
+/// removal, a replacement or a reset (16103 "automatically unequip their Star Cores"), as one cd13b/paragon receipt.</item>
+/// </list>
+/// Inferred, the client never reads them: leftPoints = the _iStatusPoint of every reached level minus the allocated
+/// points; lvPower = the allocated levels' _iSeasonPower plus the installed cores' (in active groups); resets are free
+/// (no cost is shown); runeState is 0. Season resets (16084) are not applied: no season ends under the all-open policy.
+/// Refusals: function closed 2057, unknown node, inactive group, locked node, no points or capped 82, core missing 154,
+/// bag full 159.
 /// </summary>
 public sealed class ParagonService
 {
     public const uint Sync = 5015, Allocate = 83101, Install = 83102, Remove = 83103, ResetAll = 83104, ResetSingle = 83105;
-    public const long Function = 71;
-    public const int AttrType = 1;
+    public const int Function = 71;
 
-    // ErrorCodeConfig 5900-5909 (made for this system; the client shows them through the generic error path).
-    public const int ErrConfig = 5900, ErrPoints = 5901, ErrSlot = 5902, ErrSlotInactive = 5903, ErrNoRune = 5904,
-        ErrRuneMissing = 5905, ErrRuneType = 5906, ErrGroupInactive = 5907, ErrPrerequisite = 5908, ErrMaxPoints = 5909;
-
-    /// <summary>Role blob "paragon". Points: star id -> allocated points; Cores: star-core node id -> Star Core item id.</summary>
-    public sealed class State
-    {
-        public int Lv { get; set; } = 1;
-        public long Exp { get; set; }
-        public Dictionary<int, int> Points { get; set; } = new();
-        public Dictionary<int, int> Cores { get; set; } = new();
-    }
-
-    private sealed record Talent(int Id, int Group, int Type, int Max, int[] Children, int[] Attrs, int[] Power);
+    private sealed record Node(int Id, int Group, int Type, int MaxLevel, int[] Post, int[] Power, int[] AttrIds);
 
     private readonly GameData _data;
-    private readonly RoleStore _roles;
     private readonly CharacterService _character;
     private readonly FunctionService _functions;
-    private Dictionary<int, Talent>? _talents;
-    private List<int[]>? _groups;
+    private readonly RoleStore _roles;
+    private readonly ServerOptions _options;
+    private Dictionary<int, Node>? _nodes;
+    private Dictionary<int, int[]>? _predecessors;
+    private int[]? _groups;
 
-    public ParagonService(GameData data, RoleStore roles, CharacterService character, FunctionService functions)
+    public ParagonService(GameData data, CharacterService character, FunctionService functions, RoleStore roles,
+        PowerService power, RewardService rewards, GmCommands gm, Microsoft.Extensions.Options.IOptions<ServerOptions> options)
     {
-        this._data = data;
-        this._roles = roles;
-        this._character = character;
-        this._functions = functions;
+        this._data = data; this._character = character; this._functions = functions; this._roles = roles;
+        this._options = options.Value;
         character.ExtraAttributes.Add(Attributes);
-        character.CapExpGained = CreditAsync;
-        character.ProgressHandlers.Add(OnProgressAsync);
+        character.StateChanged.Add(s => _ = SyncIfOpenAsync(s));
+        power.ParagonPower = s => s.Paragon == null || s.Progress == null ? 0 : Power(s, s.Paragon);
+        rewards.ExtraKillDrops.Add(StarCoreDrops);
+        gm.Register("paragon", "exp <n> | level <n> | info (Astral Level test aid)", GmAsync);
     }
 
-    private static int[] Ints(JsonElement row, string field) =>
-        row.TryGetProperty(field, out var v) && v.ValueKind == JsonValueKind.Array
-            ? v.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.Number).Select(e => e.GetInt32()).ToArray() : [];
+    private Dictionary<int, Node> Nodes() => _nodes ??= BuildNodes();
 
-    private List<int[]> Groups => _groups ??= _data.Table("PatronTalentGroupConfig").Values
-        .OrderBy(r => GameData.Int(r, "_iID")).Select(r => Ints(r, "_kTanlentPoints")).ToList();
-
-    private Dictionary<int, Talent> Talents => _talents ??= BuildTalents();
-
-    private Dictionary<int, Talent> BuildTalents()
+    private Dictionary<int, Node> BuildNodes()
     {
-        var result = new Dictionary<int, Talent>();
+        var groupOf = new Dictionary<int, int>();
+        foreach (var row in _data.Table("PatronTalentGroupConfig").Values)
+            foreach (long id in new PatronTalentGroupConfig(row).TalentPoints) groupOf[(int)id] = (int)new PatronTalentGroupConfig(row).Id;
+        _groups = [.. groupOf.Values.Distinct().Order()];
+        var nodes = new Dictionary<int, Node>();
         foreach (var row in _data.Table("PatronTalentConfig").Values)
         {
-            int id = (int)GameData.Int(row, "_iID");
-            int group = Groups.FindIndex(g => g.Contains(id)) + 1;
-            result[id] = new Talent(id, group, (int)GameData.Int(row, "_iType"), (int)GameData.Int(row, "_iMaxLevel"),
-                Ints(row, "_iPostTalentID"), Ints(row, "_kTalentAttrIds"), Ints(row, "_iSeasonPower"));
+            var talent = new PatronTalentConfig(row);
+            int id = (int)talent.Id;
+            if (!groupOf.TryGetValue(id, out int group)) continue;
+            nodes[id] = new Node(id, group, (int)talent.Type, (int)talent.MaxLevel, Ints(talent.PostTalentId), Ints(talent.SeasonPower),
+                Ints(talent.TalentAttrIds));
         }
-        return result;
+        _predecessors = nodes.Keys.ToDictionary(id => id, id => nodes.Values.Where(n => n.Post.Contains(id)).Select(n => n.Id).ToArray());
+        return nodes;
     }
 
-    private IEnumerable<Talent> Parents(int id) => Talents.Values.Where(t => t.Children.Contains(id));
+    private static int[] Ints(long[]? values) => [.. (values ?? []).Select(v => (int)v)];
 
-    private int MaxLv => _data.Table("PatronLevelConfig").Values.Select(r => (int)GameData.Int(r, "_iPatronLv")).DefaultIfEmpty(1).Max();
+    private int[] Groups() { _ = Nodes(); return _groups!; }
+    private int[] Predecessors(int id) { _ = Nodes(); return _predecessors!.GetValueOrDefault(id) ?? []; }
 
-    private long Need(int lv) => _data.Row("PatronLevelConfig", lv) is { } row ? GameData.Int(row, "_iPatronExp") : 0;
-
-    /// <summary>Astral Points earned: every reached row's _iStatusPoint (inferred: a level's point comes on reaching it).</summary>
-    private long Earned(int lv) => _data.Table("PatronLevelConfig").Values
-        .Where(r => GameData.Int(r, "_iPatronLv") <= lv).Sum(r => GameData.Int(r, "_iStatusPoint"));
-
-    private static long Spent(State st) => st.Points.Values.Sum(v => (long)v);
-
-    private bool Completed(State st, int group) =>
-        group >= 1 && group <= Groups.Count && Groups[group - 1].All(id => Talents.TryGetValue(id, out var t) && st.Points.GetValueOrDefault(id) >= t.Max);
-
-    /// <summary>Constellation 1 is always active; the next one while the previous is active and complete (inferred).</summary>
-    private int ActiveGroups(State st)
+    public void Load(GameSession s)
     {
-        int n = Groups.Count > 0 ? 1 : 0;
-        while (n < Groups.Count && Completed(st, n)) n++;
-        return n;
+        var bytes = _roles.LoadParagon(s.Role!.Id);
+        s.Paragon = bytes is { Length: > 0 } ? DBParagonLevel.Parser.ParseFrom(bytes) : new DBParagonLevel();
     }
 
-    private bool Counted(State st, Talent t) => t.Group >= 1 && t.Group <= ActiveGroups(st);
+    public Task LoginAsync(GameSession s) => SyncIfOpenAsync(s);
 
-    public static State Parse(byte[]? blob) => blob is { Length: > 0 } ? JsonSerializer.Deserialize<State>(blob) ?? new State() : new State();
+    private Task SyncIfOpenAsync(GameSession s) =>
+        s.Paragon == null || s.Progress == null || s.Role == null || !_functions.IsOpen(s, Function) ? Task.CompletedTask
+            : CharacterService.SyncAsync(s, Sync, Build(s, s.Paragon));
 
-    public void Load(GameSession s) => s.Paragon = Parse(_roles.LoadParagon(s.Role!.Id));
-
-    public bool Open(GameSession s) => s.Progress != null && _functions.IsOpen(s, Function);
-
-    public Task LoginAsync(GameSession s) => Open(s) ? SyncAsync(s) : Task.CompletedTask;
-
-    /// <summary>The function opens at the level cap: send the first 5015 then (FunctionService progress hook).</summary>
-    public Task OnProgressAsync(GameSession s) => Open(s) && !s.Synced.ContainsKey(Sync) ? SyncAsync(s) : Task.CompletedTask;
-
-    private Task SyncAsync(GameSession s) => CharacterService.SyncAsync(s, Sync, Snapshot(s));
-
-    /// <summary>PatronExpAddConfig against the world Paragon level (PatronWordLvConfig by open day): the client shows
-    /// extraAdd / 10000 as a percent, so 100000 is +10% (inferred unit 1/1,000,000 of the EXP).</summary>
-    private double ExtraAdd(int lv)
+    /// <summary>The 5015 view: the stored nodes (every configured one), the progress columns and the derived fields.</summary>
+    private DBParagonLevel Build(GameSession s, DBParagonLevel stored)
     {
-        int day = _character.ServerDay?.Invoke() ?? 1;
-        var world = _data.Table("PatronWordLvConfig").Values.OrderBy(r => GameData.Int(r, "_iDay"))
-            .Select(r => (Day: GameData.Int(r, "_iDay"), Lv: GameData.Int(r, "_iServerPatronLv"))).ToList();
-        if (world.Count == 0) return 0;
-        long worldLv = world.LastOrDefault(w => w.Day <= day) is { Lv: > 0 } hit ? hit.Lv : world[^1].Lv;
-        long gap = lv - worldLv;
-        return _data.Table("PatronExpAddConfig").Values.Where(r => gap <= GameData.Int(r, "_iBaseLvGap"))
-            .Select(r => (double)GameData.Int(r, "_iPursueExpAdditionPercent")).DefaultIfEmpty(0).Max();
-    }
-
-    public DBParagonLevel Snapshot(GameSession s)
-    {
-        var st = s.Paragon ??= new State();
+        var p = s.Progress!;
         var info = new DBParagonLevel
         {
-            Lv = st.Lv, Exp = st.Exp, LeftPoints = Math.Max(0, Earned(st.Lv) - Spent(st)),
-            LvPower = (int)Power(s), ExtraAdd = ExtraAdd(st.Lv),
+            Lv = Math.Max(1, p.ParagonLevel), Exp = p.ParagonExp, LeftPoints = LeftPoints(p, stored),
+            LvPower = (int)Power(s, stored), ExtraAdd = _character.ParagonExpBonus(Math.Max(1, p.ParagonLevel)),
         };
-        // Every star needs an entry (the level page indexes runegroup[id].points unguarded), and `rune` is always set
-        // so that a removal reaches the client as itemEntry 0 (inferred: an increment cannot delete a message field).
-        foreach (var t in Talents.Values.OrderBy(t => t.Id))
-            info.Runegroup[t.Id] = new ParagonLevelRune
-            {
-                Points = st.Points.GetValueOrDefault(t.Id),
-                Rune = st.Cores.TryGetValue(t.Id, out int core) ? _character.ItemInfoOf(new InvItem { Guid = t.Id, Entry = core, Stack = 1 }) : new ItemBaseInfo(),
-            };
-        // OverviewWidget walks ipairs(activeGroup): the contiguous run 1..n.
-        for (int g = 1; g <= ActiveGroups(st); g++) info.ActiveGroup[g] = g;
+        // The reset-all refund walks the map in key order and stops at the first gap (inferred: ids 28/33/35/37 do not
+        // exist), so the gaps up to the highest node travel as empty entries too.
+        for (int id = 1; id <= Nodes().Keys.DefaultIfEmpty(0).Max(); id++)
+        {
+            var rune = new ParagonLevelRune { Points = stored.Runegroup.GetValueOrDefault(id)?.Points ?? 0 };
+            // A slot always carries its rune, empty as itemEntry 0: OnDecodeParagonLevelRune drops runeData only for
+            // that, and an increment cannot unset the field, so a removed core travels as itemEntry 0.
+            if (stored.Runegroup.GetValueOrDefault(id)?.Rune is { ItemEntry: > 0 } core) rune.Rune = core.Clone();
+            else if (Nodes().TryGetValue(id, out var node) && node.Type != 1) rune.Rune = new ItemBaseInfo();
+            info.Runegroup[id] = rune;
+        }
+        foreach (int group in ActiveGroups(stored)) info.ActiveGroup[group] = group;
         return info;
     }
 
-    /// <summary>lvPower: the counted stars' _iSeasonPower[points] plus the socketed cores' _iSeasonPower (inferred).</summary>
-    public long Power(GameSession s)
-    {
-        if (s.Paragon is not { } st) return 0;
-        long total = 0;
-        foreach (var (id, points) in st.Points)
-            if (points > 0 && Talents.TryGetValue(id, out var t) && Counted(st, t) && t.Power.Length > 0)
-                total += t.Power[Math.Min(points, t.Power.Length) - 1];
-        foreach (var (id, core) in st.Cores)
-            if (Talents.TryGetValue(id, out var t) && Counted(st, t) && _data.Row("PatronRuneConfig", core) is { } row)
-                total += GameData.Int(row, "_iSeasonPower");
-        return total;
-    }
+    private static int Points(DBParagonLevel state, int id) => state.Runegroup.GetValueOrDefault(id)?.Points ?? 0;
 
-    public IEnumerable<(long Id, double Value)> Attributes(GameSession s)
+    private bool Completed(DBParagonLevel state, int group) =>
+        Nodes().Values.Where(n => n.Group == group).All(n => Points(state, n.Id) >= n.MaxLevel);
+
+    /// <summary>Group 1, then every group whose previous one is completed (a prefix, as the overview walks it).</summary>
+    private List<int> ActiveGroups(DBParagonLevel state)
     {
-        if (s.Paragon is not { } st || !Open(s)) yield break;
-        foreach (var (id, points) in st.Points)
+        var active = new List<int>();
+        foreach (int group in Groups())
         {
-            if (points <= 0 || !Talents.TryGetValue(id, out var t) || !Counted(st, t) || t.Type != AttrType || t.Attrs.Length == 0) continue;
-            if (_data.Row("PatronTalentAttrConfig", t.Attrs[Math.Min(points, t.Attrs.Length) - 1]) is { } row)
-                foreach (var pair in GameData.Pairs(row, "_kAttrs")) yield return pair;
+            if (active.Count > 0 && !Completed(state, active[^1])) break;
+            active.Add(group);
         }
-        foreach (var (id, core) in st.Cores)
-            if (Talents.TryGetValue(id, out var t) && Counted(st, t) && _data.Row("PatronRuneConfig", core) is { } row)
-                foreach (var pair in GameData.Pairs(row, "_kAttrs")) yield return pair;
+        return active;
     }
 
-    private State Copy(State st) => new()
-    {
-        Lv = st.Lv, Exp = st.Exp, Points = new Dictionary<int, int>(st.Points), Cores = new Dictionary<int, int>(st.Cores),
-    };
+    private long LeftPoints(RoleProgress p, DBParagonLevel state) =>
+        _character.ParagonPointsEarned(Math.Max(1, p.ParagonLevel)) - state.Runegroup.Values.Sum(r => (long)r.Points);
 
-    private void Persist(RoleItemPlanBuilder tx, GameSession s, State st) =>
-        tx.RoleBlob(s.Role!.Id, "paragon", JsonSerializer.SerializeToUtf8Bytes(st));
-
-    private async Task SaveAsync(GameSession s, State next, string label)
+    private long Power(GameSession s, DBParagonLevel state)
     {
-        var tx = _roles.NewTransaction();
-        Persist(tx, s, next);
-        await _roles.CommitAsync(tx, label, _ => s.Paragon = next);
-    }
-
-    /// <summary>
-    /// Base EXP past the level cap fills the Paragon level, with the world-level catch-up bonus. Each reached level adds its
-    /// Astral Point; the last level keeps no EXP. The client's tips name quests and kills as the source (inferred: every
-    /// Base EXP source). Saved in its own commit after the EXP commit (inferred).
-    /// </summary>
-    private async Task CreditAsync(GameSession s)
-    {
-        if (!Open(s) || s.Paragon is not { } st || s.Progress is not { CapExp: > 0 } p) return;
-        var next = Copy(st);
-        long gained = (long)Math.Min(long.MaxValue / 2, p.CapExp * (1 + ExtraAdd(st.Lv) / 1_000_000));
-        int max = MaxLv;
-        next.Exp = st.Lv >= max ? 0 : checked(next.Exp + gained);
-        for (long need; next.Lv < max && (need = Need(next.Lv)) > 0 && next.Exp >= need;)
+        var active = ActiveGroups(state).ToHashSet();
+        long power = 0;
+        foreach (var node in Nodes().Values.Where(n => active.Contains(n.Group)))
         {
-            next.Exp -= need;
-            next.Lv++;
+            int points = Points(state, node.Id);
+            if (points > 0 && node.Power.Length > 0) power += node.Power[Math.Min(points, node.Power.Length) - 1];
+            if (state.Runegroup.GetValueOrDefault(node.Id)?.Rune is { ItemEntry: > 0 } core
+                && _data.Row("PatronRuneConfig", core.ItemEntry) is { } rune) power += new PatronRuneConfig(rune).SeasonPower;
         }
-        if (next.Lv >= max) next.Exp = 0;
-        if (next.Lv == st.Lv && next.Exp == st.Exp) return;
-        await SaveAsync(s, next, "paragon/exp");
-        await SyncAsync(s);
+        return power;
     }
 
-    /// <summary>GM: set the Paragon level (EXP 0); allocations stay.</summary>
-    public async Task SetLevelAsync(GameSession s, int lv)
+    /// <summary>The active groups' node attributes (_kTalentAttrIds at the node's level) and their cores' _kAttrs.</summary>
+    private IEnumerable<(long Id, double Value)> Attributes(GameSession s)
     {
-        using var _ = await CharacterService.Lock(s);
-        var next = Copy(s.Paragon ?? new State());
-        next.Lv = Math.Clamp(lv, 1, MaxLv);
-        next.Exp = 0;
-        await SaveAsync(s, next, "paragon/gm-level");
-        await SyncAsync(s);
+        if (s.Paragon is not { } state || s.Progress == null || s.Progress.Level < _character.MaxLevel) yield break;
+        var active = ActiveGroups(state).ToHashSet();
+        foreach (var node in Nodes().Values.Where(n => active.Contains(n.Group)))
+        {
+            int points = Points(state, node.Id);
+            if (points <= 0) continue;
+            if (node.AttrIds.Length > 0 && _data.Row("PatronTalentAttrConfig", node.AttrIds[Math.Min(points, node.AttrIds.Length) - 1]) is { } attr)
+                foreach (var (id, value) in Pairs(new PatronTalentAttrConfig(attr).Attrs)) yield return (id, value);
+            if (state.Runegroup.GetValueOrDefault(node.Id)?.Rune is { ItemEntry: > 0 } core && _data.Row("PatronRuneConfig", core.ItemEntry) is { } rune)
+                foreach (var (id, value) in Pairs(new PatronRuneConfig(rune).Attrs)) yield return (id, value);
+        }
     }
 
-    private int Check(GameSession s, int id, out Talent talent, out State st)
-    {
-        st = s.Paragon ??= new State();
-        talent = null!;
-        if (!Open(s)) return ErrorCodes.FeatureUnavailable;
-        if (!Talents.TryGetValue(id, out var t)) return ErrSlot;
-        talent = t;
-        return t.Group >= 1 && t.Group <= ActiveGroups(st) ? 0 : ErrGroupInactive;
-    }
+    private static IEnumerable<(long Id, double Value)> Pairs(long[][]? pairs) =>
+        (pairs ?? []).Where(p => p.Length >= 2).Select(p => (p[0], (double)p[1]));
 
-    /// <summary>83101: points into a star of an active constellation whose parent stars are all maxed.</summary>
+    // --- requests ---------------------------------------------------------------------------------------------------
+
     public async Task AllocateAsync(GameSession s, ParagonLevelAllocatePointReq req)
     {
         int result;
-        using (await CharacterService.Lock(s))
-        {
-            result = Check(s, req.Slot, out var t, out var st);
-            int have = result == 0 ? st.Points.GetValueOrDefault(t.Id) : 0;
-            if (result != 0) { }
-            else if (Parents(t.Id).Any(parent => st.Points.GetValueOrDefault(parent.Id) < parent.Max)) result = ErrPrerequisite;
-            else if (req.Points < 1 || have + req.Points > t.Max) result = ErrMaxPoints;
-            else if (Earned(st.Lv) - Spent(st) < req.Points) result = ErrPoints;
-            else
-            {
-                var next = Copy(st);
-                next.Points[t.Id] = have + req.Points;
-                await SaveAsync(s, next, "paragon/allocate");
-                await ChangedAsync(s);
-            }
-        }
+        using (await CharacterService.Lock(s)) result = await AllocateLockedAsync(s, req.Slot, req.Points);
         await s.SendGameAsync(Allocate, new ParagonLevelAllocatePointResp { Result = result });
     }
 
-    /// <summary>83102: socket a bag Star Core whose _iSubType is the node's _iType; a core already there goes back.</summary>
+    private async Task<int> AllocateLockedAsync(GameSession s, int slot, int points)
+    {
+        if (Gate(s) is int closed and not 0) return closed;
+        var state = s.Paragon!;
+        if (!Nodes().TryGetValue(slot, out var node) || points <= 0 || !ActiveGroups(state).Contains(node.Group)
+            || Predecessors(slot).Any(pre => Points(state, pre) < Nodes()[pre].MaxLevel)
+            || Points(state, slot) + points > node.MaxLevel || LeftPoints(s.Progress!, state) < points) return ErrorCodes.Parameter;
+        var next = state.Clone();
+        if (!next.Runegroup.TryGetValue(slot, out var rune)) next.Runegroup[slot] = rune = new ParagonLevelRune();
+        rune.Points += points;
+        await SaveAsync(s, next);
+        return 0;
+    }
+
     public async Task InstallAsync(GameSession s, ParagonLevelRuneInstallReq req)
     {
         int result;
-        using (await CharacterService.Lock(s))
-        {
-            result = Check(s, req.Slot, out var t, out var st);
-            var item = s.Items.FirstOrDefault(i => i.Guid == req.RuneGuid && i.Grid == 0 && i.Stack > 0
-                && !EmblemService.IsReserved(s, i) && !TotemService.IsReserved(s, i));
-            if (result != 0) { }
-            else if (t.Type == AttrType) result = ErrSlot;
-            else if (st.Points.GetValueOrDefault(t.Id) <= 0) result = ErrSlotInactive;
-            else if (item == null || _data.Row("PatronRuneConfig", item.Entry) == null) result = ErrRuneMissing;
-            else if (_data.Row("ItemConfig", item.Entry) is not { } config || GameData.Int(config, "_iSubType") != t.Type) result = ErrRuneType;
-            else
-            {
-                var next = Copy(st);
-                next.Cores[t.Id] = item.Entry;
-                var back = st.Cores.TryGetValue(t.Id, out int old) ? new List<(int, int)> { (old, 1) } : [];
-                var paid = await _character.ExchangeLockedAsync(s, [], back, new Dictionary<long, int> { [item.Guid] = 1 },
-                    popup: false, persist: tx => Persist(tx, s, next), committed: () => s.Paragon = next);
-                if (paid == null) result = ErrRuneMissing;
-                else await ChangedAsync(s);
-            }
-        }
+        using (await CharacterService.Lock(s)) result = await InstallLockedAsync(s, req.Slot, req.RuneGuid);
         await s.SendGameAsync(Install, new ParagonLevelRuneInstallResp { Result = result });
     }
 
-    /// <summary>83103: the socketed core goes back to the bag.</summary>
+    private async Task<int> InstallLockedAsync(GameSession s, int slot, long guid)
+    {
+        if (Gate(s) is int closed and not 0) return closed;
+        var state = s.Paragon!;
+        if (!Nodes().TryGetValue(slot, out var node) || node.Type == 1 || Points(state, slot) <= 0
+            || !ActiveGroups(state).Contains(node.Group)) return ErrorCodes.Parameter;
+        if (s.Items.FirstOrDefault(i => i.Guid == guid && i.Grid == 0) is not { } item
+            || EmblemService.IsReserved(s, item) || TotemService.IsReserved(s, item)) return ErrorCodes.ItemsShort;
+        if (_data.Row("ItemConfig", item.Entry) is not { } row || new ItemConfig(row).SubType != node.Type
+            || _data.Row("PatronRuneConfig", item.Entry) == null) return ErrorCodes.Parameter;
+        var next = state.Clone();
+        var installed = _character.ItemInfoOf(new InvItem { Entry = item.Entry, Stack = 1, BindType = item.BindType, BindExpire = item.BindExpire });
+        var previous = next.Runegroup[slot].Rune;
+        next.Runegroup[slot].Rune = installed;
+        return await CommitCoresAsync(s, next, "install", new Dictionary<long, int> { [guid] = 1 }, [item.Entry],
+            previous is { ItemEntry: > 0 } ? [previous] : []);
+    }
+
     public async Task RemoveAsync(GameSession s, ParagonLevelRuneRemoveReq req)
     {
         int result;
         using (await CharacterService.Lock(s))
         {
-            result = Check(s, req.SlotId, out var t, out var st);
-            if (result == ErrGroupInactive) result = 0; // a core in a constellation that dropped out can still come out
-            if (result != 0) { }
-            else if (!st.Cores.ContainsKey(t.Id)) result = ErrNoRune;
-            else result = await ResetAsync(s, st, [], [t.Id], "paragon/remove") ? 0 : ErrConfig;
+            result = Gate(s) is int closed and not 0 ? closed
+                : !Nodes().ContainsKey(req.SlotId) || s.Paragon!.Runegroup.GetValueOrDefault(req.SlotId)?.Rune is not { ItemEntry: > 0 } core
+                    ? ErrorCodes.Parameter
+                    : await CommitCoresAsync(s, Without(s.Paragon!, [req.SlotId], keepPoints: true), "remove", null, [], [core]);
         }
         await s.SendGameAsync(Remove, new ParagonLevelRuneRemoveResp { Result = result });
     }
 
-    /// <summary>83105: this star and every star after it (through _iPostTalentID) back to 0, their points refunded and
-    /// their cores returned. Free, as the client's refund popup shows.</summary>
+    /// <summary>83105: the star and every star after it along _iPostTalentID lose their points and cores (16103).</summary>
     public async Task ResetSingleAsync(GameSession s, ParagonLevelResetSingleReq req)
     {
         int result;
         using (await CharacterService.Lock(s))
         {
-            result = Check(s, req.SlotId, out var t, out var st);
-            if (result == ErrGroupInactive) result = 0;
-            if (result == 0)
+            if (Gate(s) is int closed and not 0) result = closed;
+            else if (!Nodes().ContainsKey(req.SlotId) || Points(s.Paragon!, req.SlotId) <= 0) result = ErrorCodes.Parameter;
+            else
             {
-                var stars = new HashSet<int>();
-                var queue = new Queue<int>([t.Id]);
-                while (queue.TryDequeue(out int id))
-                    if (stars.Add(id) && Talents.TryGetValue(id, out var star)) foreach (int child in star.Children) queue.Enqueue(child);
-                if (!stars.Any(id => st.Points.GetValueOrDefault(id) > 0 || st.Cores.ContainsKey(id))) result = ErrSlotInactive;
-                else result = await ResetAsync(s, st, stars, stars, "paragon/reset-single") ? 0 : ErrConfig;
+                var subtree = new List<int>();
+                var open = new Stack<int>([req.SlotId]);
+                while (open.TryPop(out int id))
+                    if (!subtree.Contains(id) && Nodes().TryGetValue(id, out var node))
+                    {
+                        subtree.Add(id);
+                        foreach (int post in node.Post) open.Push(post);
+                    }
+                result = await ResetAsync(s, subtree, "reset-single");
             }
         }
         await s.SendGameAsync(ResetSingle, new ParagonLevelResetSingleResp { Result = result });
     }
 
-    /// <summary>83104: every star back to 0 and every core returned.</summary>
     public async Task ResetAllAsync(GameSession s)
     {
         int result;
         using (await CharacterService.Lock(s))
-        {
-            var st = s.Paragon ??= new State();
-            if (!Open(s)) result = ErrorCodes.FeatureUnavailable;
-            else if (st.Points.Values.All(v => v <= 0) && st.Cores.Count == 0) result = ErrPoints;
-            else result = await ResetAsync(s, st, st.Points.Keys.ToList(), st.Cores.Keys.ToList(), "paragon/reset-all") ? 0 : ErrConfig;
-        }
+            result = Gate(s) is int closed and not 0 ? closed
+                : s.Paragon!.Runegroup.Values.All(r => r.Points == 0) ? ErrorCodes.Parameter
+                : await ResetAsync(s, [.. Nodes().Keys], "reset-all");
         await s.SendGameAsync(ResetAll, new ParagonLevelResetAllResp { Result = result });
     }
 
-    private async Task<bool> ResetAsync(GameSession s, State st, IEnumerable<int> stars, IEnumerable<int> cores, string label)
+    private async Task<int> ResetAsync(GameSession s, IReadOnlyList<int> ids, string action)
     {
-        var next = Copy(st);
-        foreach (int id in stars) next.Points.Remove(id);
-        var back = new List<(int, int)>();
-        foreach (int id in cores)
-            if (next.Cores.Remove(id, out int core)) back.Add((core, 1));
-        if (back.Count == 0) await SaveAsync(s, next, label);
-        else if (await _character.ExchangeLockedAsync(s, [], back, popup: false,
-            persist: tx => Persist(tx, s, next), committed: () => s.Paragon = next) == null) return false;
-        await ChangedAsync(s);
-        return true;
+        var cores = ids.Select(id => s.Paragon!.Runegroup.GetValueOrDefault(id)?.Rune).Where(c => c is { ItemEntry: > 0 }).Select(c => c!).ToList();
+        var next = Without(s.Paragon!, ids, keepPoints: false);
+        if (cores.Count == 0)
+        {
+            await SaveAsync(s, next);
+            return 0;
+        }
+        return await CommitCoresAsync(s, next, action, null, [], cores);
     }
 
-    private async Task ChangedAsync(GameSession s)
+    private static DBParagonLevel Without(DBParagonLevel state, IReadOnlyList<int> ids, bool keepPoints)
     {
-        await SyncAsync(s);
+        var next = state.Clone();
+        foreach (int id in ids)
+            if (next.Runegroup.TryGetValue(id, out var rune))
+            {
+                if (keepPoints && rune.Points > 0) rune.Rune = null;
+                else next.Runegroup.Remove(id);
+            }
+        return next;
+    }
+
+    private int? Gate(GameSession s) =>
+        s.Paragon == null || s.Progress == null ? ErrorCodes.Unknown
+        : !_functions.IsOpen(s, Function) ? ErrorCodes.FunctionLocked : 0;
+
+    /// <summary>A points-only change: the blob alone, then 5015 and the stats.</summary>
+    private async Task SaveAsync(GameSession s, DBParagonLevel next)
+    {
+        _roles.SaveParagon(s.Role!.Id, next.ToByteArray());
+        s.Paragon = next;
+        await PublishAsync(s);
+    }
+
+    /// <summary>Cores in and out with the blob in one cd13b/paragon receipt: the paid core is a cost, a returned one a good
+    /// with its binding.</summary>
+    private async Task<int> CommitCoresAsync(GameSession s, DBParagonLevel next, string action, IReadOnlyDictionary<long, int>? paid,
+        IReadOnlyList<int> costEntries, IReadOnlyList<ItemBaseInfo> returned)
+    {
+        long role = s.Role!.Id;
+        byte[] bytes = next.ToByteArray();
+        var result = await _character.ExchangeLockedAsync(s, [], [], paid, popup: false,
+            boundGoods: [.. returned.Select(c => (c.ItemEntry, 1, (int)(c.ItemBindInfo?.ItemBindType ?? 0)))],
+            persist: tx =>
+            {
+                tx.RoleBlob(role, "paragon", bytes);
+                tx.WithEconomy(_character.FamilyEconomy(s, "cd13b/paragon-" + action, [.. costEntries.Select(e => (e, 1L))],
+                    [.. returned.Select(c => (c.ItemEntry, 1))], new { Action = action, State = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)) }));
+            },
+            committed: () => s.Paragon = next);
+        if (result == null) return returned.Count > 0 ? ErrorCodes.BagFull : ErrorCodes.ItemsShort;
+        await PublishAsync(s);
+        return 0;
+    }
+
+    private async Task PublishAsync(GameSession s)
+    {
+        await SyncIfOpenAsync(s);
         await _character.RefreshStatsAsync(s);
+    }
+
+    // --- Star Core drops (inferred) ---------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Star Cores have no source in the client data (ItemConfig _iAcquire and _kItemSource are empty). Reconstructed as a
+    /// rare drop for a role whose Astral Level is open: 1 in 2000 per monster, 1 in 5 per boss (NPCConfig _iNPCSubType 3, 4
+    /// or 6, the boss kinds), one of the four slot types at random and a quality weighted 50/25/13/7/4/1 from Gray to Red. The Cross cores
+    /// (subtype 924) fit no star and do not drop.
+    /// </summary>
+    private IEnumerable<(int Entry, int Count)> StarCoreDrops(GameSession s, MonsterUnit monster)
+    {
+        if (!_options.StarCoreDrops || s.Progress == null || !_functions.IsOpen(s, Function)) yield break;
+        bool boss = _data.Row("NPCConfig", monster.Template.NpcId) is { } npc && new NPCConfig(npc).NPCSubType is 3 or 4 or 6;
+        if (Random.Shared.Next(boss ? 5 : 2000) != 0) yield break;
+        int[] weights = [50, 25, 13, 7, 4, 1];
+        int roll = Random.Shared.Next(weights.Sum()), quality = 1;
+        for (int i = 0; i < weights.Length; i++) { if (roll < weights[i]) { quality = i + 1; break; } roll -= weights[i]; }
+        var candidates = _data.Table("PatronRuneConfig").Values
+            .Select(r => (int)new PatronRuneConfig(r).Id)
+            .Where(id => _data.Row("ItemConfig", id) is { } item && new ItemConfig(item) is { SubType: >= 920 and <= 923 } config
+                && config.Quality == quality).ToArray();
+        if (candidates.Length > 0) yield return (candidates[Random.Shared.Next(candidates.Length)], 1);
+    }
+
+    // --- test aid ---------------------------------------------------------------------------------------------------
+
+    private async Task GmAsync(GameSession s, string[] a)
+    {
+        if (a.Length >= 2 && a[0] is "exp" or "level" && long.TryParse(a[1], out long n))
+        {
+            string reply = a[0] == "exp" ? await _character.AddExpAsync(s, n, 0) : await _character.SetParagonLevelAsync(s, (int)n);
+            await SyncIfOpenAsync(s);
+            await GmCommands.ReplyAsync(s, reply);
+            return;
+        }
+        var p = s.Progress!;
+        await GmCommands.ReplyAsync(s, $"Astral Level {p.ParagonLevel} ({p.ParagonExp} EXP), {LeftPoints(p, s.Paragon!)} points left, "
+            + $"groups [{string.Join(',', ActiveGroups(s.Paragon!))}], power {Power(s, s.Paragon!)}, open {_functions.IsOpen(s, Function)}");
     }
 }

@@ -4,337 +4,302 @@ using Ro3Emu.Server.Accounts;
 namespace Ro3Emu.Server.Game;
 
 /// <summary>
-/// Guild merging (Manage > Merge tab, right 21). The inviter asks a target guild to merge into it (32319). The target
-/// accepts or refuses (32318) and, once accepted, picks which of its members move (32317), up to the inviter's free
-/// places. At the next 05:00 the chosen members join the inviter as regular members and the target is disbanded
-/// (170288-170290, 170349). 32314 lists the invites, 32315 recommends guilds and 32316 compares the two guilds
-/// (docs/systems/guild-merge.md).
+/// Merging guilds (the guild window's Merge Guild tab, UI_Sys_Guild_Manage_MergeWidget, GuildPermissionConfig 21). A guild
+/// invites another to merge into it (32319, announcement up to GuildMergeNoticeLimitNew), from the recommended list (32315);
+/// the invited guild sees it among its invitations (32314) and accepts or refuses it (32318). An accepted merge runs at the
+/// next 05:00 (UIWords 170349): the invited guild is disbanded and the members it chose (32317, at most the inviter's free
+/// places, 10053) join the inviter; 32316 shows both guilds and the result. Invitations lapse after GuildMergeLapseTimeLimit
+/// hours (10050), each side holds at most GuildMergeListNumLimit (10051/10052), a guild under impeachment cannot merge
+/// (10060/10075), and a merge starts GuildMergeTimeCD seconds of cooldown for the guild that absorbed (10063/10078). The
+/// pending partner reaches the client as pendingMergeGuildId in 32213 and in 32231 Change_Base. The absorbing guild's
+/// members get mail GuildMail21 (1121) with the merged guild's name.
+/// (inferred) Moved members join as ordinary members (170290: positions must be reassigned) and keep their contribution;
+/// the absorbed guild's treasury, stalls and buildings go to recovery as in a disband (no client text moves them); without
+/// a choice saved, every member comes along while there is room; a merge that no longer fits at 05:00 is dropped; a
+/// refusal or a cancel before 05:00 (32318 with isAgree false) needs no cooldown; the new-guild and weekly-activity grounds
+/// (10064/10065) are not checked; the recommended list is every other guild free to merge, largest first.
 /// </summary>
 public sealed partial class GuildService
 {
-    public const uint MergeLists = 32314, MergeRecommend = 32315, MergeDetail = 32316, MergeSaveMembers = 32317,
-        MergeAnswer = 32318, MergeInvite = 32319;
-    private const int MergeRight = 21; // GuildPermissionConfig 21 "Merge Guild"
-    private const int MergeDoneMail = 1121; // GuildMail21: "Guild 【${1}】 has successfully completed a Merge Guild with this guild"
+    public const uint MergePull = 32314, MergeRecommend = 32315, MergeDetail = 32316, MergeMembers = 32317, MergeOpe = 32318,
+        MergeAsk = 32319;
+    private const int MergeRight = 21;
 
-    public Task MergeListsAsync(GameSession s) => RunGuildAsync(s, [], [], () => MergeListsCoreAsync(s));
+    private long MergeLapseSec => Setting("GuildMergeLapseTimeLimit", 24)[0] * 3600;
+    private long MergeListLimit => Setting("GuildMergeListNumLimit", 5)[0];
+
+    private bool MergeCooling(GuildStore.State g) => NowSec() < g.MergeCooldownSec;
+    private List<GuildStore.MergeInvite> LiveInvites(GuildStore.State g) =>
+        [.. g.MergeInvites.Where(i => NowSec() - i.RecvSec < MergeLapseSec && store.Get(i.From) != null)];
+    private IEnumerable<GuildStore.State> InvitedBy(GuildStore.State g) =>
+        store.List().Where(o => o.Id != g.Id && LiveInvites(o).Any(i => i.From == g.Id));
+
+    public Task MergePullAsync(GameSession s) => RunGuildAsync(s, [], [], () => MergePullCoreAsync(s));
     public Task MergeRecommendAsync(GameSession s) => RunGuildAsync(s, [], [], () => MergeRecommendCoreAsync(s));
     public Task MergeDetailAsync(GameSession s, MergeGuildDetailDataReq req) =>
         RunGuildAsync(s, [req.Guildid, Own(s)?.PendingMergeGuildId ?? 0], [], () => MergeDetailCoreAsync(s, req));
-    public Task MergeSaveMembersAsync(GameSession s, SaveMergeMemberReq req) =>
-        RunGuildAsync(s, [req.Guildid], [], () => MergeSaveMembersCoreAsync(s, req));
-    public Task MergeAnswerAsync(GameSession s, MergeGuildOpeReq req) =>
-        RunGuildAsync(s, [req.Guildid], [], () => MergeAnswerCoreAsync(s, req));
-    public Task MergeInviteAsync(GameSession s, InviteMergeGuildReq req) =>
-        RunGuildAsync(s, [req.Guildid], [], () => MergeInviteCoreAsync(s, req));
+    public Task MergeMembersAsync(GameSession s, SaveMergeMemberReq req) =>
+        RunGuildAsync(s, [req.Guildid, Own(s)?.PendingMergeGuildId ?? 0], [], () => MergeMembersCoreAsync(s, req));
+    public Task MergeOpeAsync(GameSession s, MergeGuildOpeReq req) => RunGuildAsync(s, [req.Guildid], [], () => MergeOpeCoreAsync(s, req));
+    public Task MergeAskAsync(GameSession s, InviteMergeGuildReq req) => RunGuildAsync(s, [req.Guildid], [], () => MergeAskCoreAsync(s, req));
 
-    private long MergeNowMs => clock.GetUtcNow().ToUnixTimeMilliseconds();
-    private long MergeInviteLifeMs => Setting("GuildMergeLapseTimeLimit", 24)[0] * 3600_000;
-    private bool LiveInvite(GuildStore.MergeInvite invite) => invite.SentMs + MergeInviteLifeMs > MergeNowMs;
-    private long MergeRoom(GuildStore.State inviter) => Math.Max(0, MaxMembers(inviter) - inviter.Members.Count);
-
-    private IEnumerable<GuildStore.State> SentInvites(GuildStore.State g) => store.List()
-        .Where(o => o.Id != g.Id && o.MergeInvites.TryGetValue(g.Id, out var i) && LiveInvite(i));
-
-    private int MergeActor(GameSession s, out GuildStore.State g)
+    /// <summary>32314: invitations received and sent.</summary>
+    private Task MergePullCoreAsync(GameSession s)
     {
-        g = Own(s)!;
-        return g == null ? ErrorCodes.NotInGuild : g.Status != (int)GuildStatus.Normal || !HasRight(g, s.Role!.Id, MergeRight)
-            ? ErrorCodes.GuildPermission : 0;
-    }
-
-    /// <summary>The refusals both sides share: an impeachment, the merge cooldown, a merge already agreed.
-    /// (inferred) The "new guild" (10064/10076) and "low activity" (10065/10077) refusals are not applied: the client
-    /// names no threshold.</summary>
-    private int MergeBlocked(GuildStore.State own, GuildStore.State other)
-    {
-        long now = MergeNowMs / 1000, cd = Setting("GuildMergeTimeCD", 604800)[0];
-        return other.Status != (int)GuildStatus.Normal ? ErrorCodes.GuildMissing
-            : own.Impeach != null ? ErrorCodes.MergeOwnImpeach
-            : other.Impeach != null ? ErrorCodes.MergeOtherImpeach
-            : own.LastMergeSec > 0 && now < own.LastMergeSec + cd ? ErrorCodes.MergeOwnCooldown
-            : other.LastMergeSec > 0 && now < other.LastMergeSec + cd ? ErrorCodes.MergeOtherCooldown
-            // (inferred) a guild with an agreed merge takes part in no other.
-            : own.PendingMergeGuildId != 0 || other.PendingMergeGuildId != 0 ? ErrorCodes.GuildPermission : 0;
-    }
-
-    private async Task MergeListsCoreAsync(GameSession s)
-    {
-        int code = MergeActor(s, out var g);
-        var resp = new PullMergeGuildDataRes { Result = code };
-        if (code == 0)
+        var rsp = new PullMergeGuildDataRes();
+        if (Own(s) is not { } g) rsp.Result = ErrorCodes.NotInGuild;
+        else
         {
-            resp.RecvInvite.AddRange(g.MergeInvites.Where(i => LiveInvite(i.Value)).OrderByDescending(i => i.Value.SentMs)
-                .Select(i => store.Get(i.Key)).OfType<GuildStore.State>().Select(o => Snapshot(o)));
-            resp.SendInvite.AddRange(SentInvites(g).OrderByDescending(o => o.MergeInvites[g.Id].SentMs).Select(o => Snapshot(o)));
+            // The accepted invitation stays for its announcement (32316) but is no longer a choice.
+            rsp.RecvInvite.AddRange(LiveInvites(g).Where(i => i.From != g.PendingMergeGuildId).Select(i => Snapshot(store.Get(i.From)!)));
+            rsp.SendInvite.AddRange(InvitedBy(g).Select(o => Snapshot(o)));
         }
-        await s.SendGameAsync(MergeLists, resp);
+        return s.SendGameAsync(MergePull, rsp);
     }
 
-    /// <summary>(inferred) other open guilds without an agreed merge that fit into this one's free places, by level, then
-    /// last week's activity (the panel sorts the same way), at most GuildRecommendRankNum.</summary>
-    private async Task MergeRecommendCoreAsync(GameSession s)
+    /// <summary>32315: the other normal guilds free to merge.</summary>
+    private Task MergeRecommendCoreAsync(GameSession s)
     {
-        int code = MergeActor(s, out var g);
-        var resp = new PullRecommendMergeGuildDataRes { Result = code };
-        if (code == 0)
-        {
-            long room = MergeRoom(g);
-            resp.Data.AddRange(store.List()
-                .Where(o => o.Id != g.Id && o.Status == (int)GuildStatus.Normal && o.PendingMergeGuildId == 0 && room > 0)
-                .OrderByDescending(o => o.Level).ThenByDescending(o => LastWeekActivity(o)).ThenBy(o => o.Id)
-                .Take((int)Setting("GuildRecommendRankNum", 20)[0]).Select(o => Snapshot(o)));
-        }
-        await s.SendGameAsync(MergeRecommend, resp);
+        var rsp = new PullRecommendMergeGuildDataRes();
+        if (Own(s) is not { } g) rsp.Result = ErrorCodes.NotInGuild;
+        else rsp.Data.AddRange(store.List().Where(o => o.Id != g.Id && o.Status == (int)GuildStatus.Normal && o.PendingMergeGuildId == 0
+                && o.Members.Values.Any(m => m.Official == 1))
+            .OrderByDescending(o => o.Members.Count).ThenBy(o => o.Id).Take(20).Select(o => Snapshot(o)));
+        return s.SendGameAsync(MergeRecommend, rsp);
     }
 
-    /// <summary>One guild's column. The three columns are compared building by building by index, so every column lists
-    /// the same buildings in the same order.</summary>
-    private static GuildMergeInfo MergeColumn(GuildStore.State g, long[] buildings, long memberCount, long activity)
+    /// <summary>The absorbing and the absorbed guild of a request: guildid 0 is the pending merge; isInvite means the
+    /// requester invites (absorbs) the other.</summary>
+    private (GuildStore.State Absorber, GuildStore.State Absorbed)? MergePair(GuildStore.State g, long other, bool isInvite)
+    {
+        if (other == 0)
+        {
+            if (g.PendingMergeGuildId == 0 || store.Get(g.PendingMergeGuildId) is not { } partner) return null;
+            return g.MergeAbsorbs ? (g, partner) : (partner, g);
+        }
+        if (other == g.Id || store.Get(other) is not { } o) return null;
+        return isInvite ? (g, o) : (o, g);
+    }
+
+    private int MergeRoom(GuildStore.State absorber) => (int)Math.Max(0, MaxMembers(absorber) - absorber.Members.Count);
+
+    /// <summary>Who the absorbed guild brings: its saved choice, else everyone while there is room (master first).</summary>
+    private List<long> MergeMembersOf(GuildStore.State absorbed, GuildStore.State absorber)
+    {
+        List<long> chosen = absorbed.PendingMergeGuildId == absorber.Id && absorbed.MergeMemberIds.Count > 0
+            ? [.. absorbed.MergeMemberIds.Where(absorbed.Members.ContainsKey)]
+            : [.. absorbed.Members.Values.OrderBy(m => m.Official).ThenBy(m => m.EnterTime).Select(m => m.RoleId)];
+        return absorbed.MergeMemberIds.Count > 0 && absorbed.PendingMergeGuildId == absorber.Id ? chosen : [.. chosen.Take(MergeRoom(absorber))];
+    }
+
+    private GuildMergeInfo MergeInfo(GuildStore.State g, int members)
     {
         var info = new GuildMergeInfo
         {
-            Guid = g.Id, Name = g.Name, Level = g.Level, MemberCount = (int)memberCount,
-            Activity = (int)Math.Min(int.MaxValue, activity), IconInfo = Icon(g)
+            Guid = g.Id, Name = g.Name, Level = g.Level, MemberCount = members,
+            Activity = (int)Math.Min(int.MaxValue, CurActivity(g)), IconInfo = Icon(g),
         };
-        info.Buildind.AddRange(buildings.Select(b => new GuildBuilding { BuildingID = b, Level = g.Buildings.GetValueOrDefault(b) }));
+        info.Buildind.AddRange(g.Buildings.Select(b => BuildingInfo(g, b.Key)));
         return info;
     }
 
-    private async Task MergeDetailCoreAsync(GameSession s, MergeGuildDetailDataReq req)
+    /// <summary>32316: both guilds, the merged result and the absorbed guild's choice.</summary>
+    private Task MergeDetailCoreAsync(GameSession s, MergeGuildDetailDataReq req)
     {
-        int code = MergeActor(s, out var g);
-        GuildStore.State? inviter = null, target = null;
+        var rsp = new MergeGuildDetailDataRes();
+        var g = Own(s);
+        if (g == null) rsp.Result = ErrorCodes.NotInGuild;
+        else if (MergePair(g, req.Guildid, req.IsInvite) is not var (absorber, absorbed)) rsp.Result = ErrorCodes.GuildMissing;
+        else
+        {
+            var moving = MergeMembersOf(absorbed, absorber);
+            rsp.TargetGuildData = MergeInfo(absorbed, absorbed.Members.Count);
+            rsp.InvitedGuildData = MergeInfo(absorber, absorber.Members.Count);
+            rsp.NewGuildData = MergeInfo(absorber, absorber.Members.Count + moving.Count);
+            rsp.CanMergeCount = MergeRoom(absorber);
+            rsp.Announce = absorbed.MergeInvites.FirstOrDefault(i => i.From == absorber.Id)?.Announce ?? "";
+            rsp.Memberids.AddRange(moving);
+            rsp.LastMergeTime = absorber.PendingMergeGuildId == absorbed.Id ? absorber.MergeAtSec : 0;
+        }
+        return s.SendGameAsync(MergeDetail, rsp);
+    }
+
+    /// <summary>32317: the absorbed guild chooses who comes along, at most the absorber's free places.</summary>
+    private async Task MergeMembersCoreAsync(GameSession s, SaveMergeMemberReq req)
+    {
+        var g = Own(s);
+        var partner = g == null || g.PendingMergeGuildId == 0 ? null : store.Get(g.PendingMergeGuildId);
+        var ids = req.Memberids.Distinct().ToList();
+        int code = g == null ? ErrorCodes.NotInGuild : !HasRight(g, s.Role!.Id, MergeRight) ? ErrorCodes.GuildPermission
+            : partner == null || g.MergeAbsorbs ? ErrorCodes.MergeImpossible
+            : ids.Count == 0 || ids.Any(id => !g.Members.ContainsKey(id)) ? ErrorCodes.Parameter
+            : ids.Count > MergeRoom(partner) ? ErrorCodes.MergeTooMany : 0;
         if (code == 0)
         {
-            if (req.Guildid == 0)
-            {
-                // The merging state: the agreed pair.
-                var other = g.PendingMergeGuildId != 0 ? store.Get(g.PendingMergeGuildId) : null;
-                if (other == null) code = ErrorCodes.MergeInviteMissing;
-                else (inviter, target) = g.MergeInviter ? (g, other) : (other, g);
-            }
-            else if (store.Get(req.Guildid) is not { } other || other.Id == g.Id) code = ErrorCodes.GuildMissing;
-            // A sent invite or a recommended guild: this guild invites. A received invite: the other guild does.
-            else (inviter, target) = req.IsInvite ? (g, other) : (other, g);
-        }
-        var resp = new MergeGuildDetailDataRes { Result = code };
-        if (code == 0)
-        {
-            bool agreed = target!.PendingMergeGuildId == inviter!.Id;
-            long room = MergeRoom(inviter);
-            long[] buildings = inviter.Buildings.Keys.Union(target.Buildings.Keys).Order().ToArray();
-            resp.TargetGuildData = MergeColumn(target, buildings, target.Members.Count, LastWeekActivity(target));
-            resp.InvitedGuildData = MergeColumn(inviter, buildings, inviter.Members.Count, LastWeekActivity(inviter));
-            // (inferred) the result keeps the inviter's level and buildings and adds the members moving in.
-            long moving = agreed ? target.MergeMembers.Count(target.Members.ContainsKey) : Math.Min(room, target.Members.Count);
-            resp.NewGuildData = MergeColumn(inviter, buildings, inviter.Members.Count + moving, LastWeekActivity(inviter));
-            resp.CanMergeCount = (int)room;
-            resp.Announce = agreed ? target.MergeAnnounce : target.MergeInvites.GetValueOrDefault(inviter.Id)?.Announce ?? "";
-            if (agreed)
-            {
-                resp.Memberids.AddRange(target.MergeMembers.Where(target.Members.ContainsKey));
-                resp.LastMergeTime = target.MergeExecuteSec; // "After ${1}, the Merge Guild process will be complete" (s)
-            }
-        }
-        await s.SendGameAsync(MergeDetail, resp);
-    }
-
-    private async Task MergeInviteCoreAsync(GameSession s, InviteMergeGuildReq req)
-    {
-        int code = MergeActor(s, out var g);
-        var target = code == 0 ? store.Get(req.Guildid) : null;
-        if (code == 0 && (target == null || target.Id == g.Id)) code = ErrorCodes.GuildMissing;
-        string announce = req.Announce.Trim();
-        if (code == 0 && !req.IsAgree)
-            code = target!.MergeInvites.Remove(g.Id) ? 0 : ErrorCodes.MergeInviteMissing;
-        else if (code == 0)
-        {
-            long now = MergeNowMs;
-            code = MergeBlocked(g, target!);
-            if (code == 0)
-                code = target!.MergeInvites.TryGetValue(g.Id, out var prior) && LiveInvite(prior) ? ErrorCodes.MergeInviteRepeat
-                    : target.MergeRefusals.TryGetValue(g.Id, out long refused) && now < refused + MergeRefusalMs ? ErrorCodes.MergeRefused
-                    : SentInvites(g).Count() >= Setting("GuildMergeListNumLimit", 5)[0] ? ErrorCodes.MergeSentLimit
-                    : target.MergeInvites.Values.Count(LiveInvite) >= Setting("GuildMergeListNumLimit", 5)[0] ? ErrorCodes.MergeReceivedLimit
-                    : announce.Length > Setting("GuildMergeNoticeLimitNew", 0, 50)[1] || Sensitive(announce) ? ErrorCodes.MergeAnnounce
-                    // (inferred) an inviter with no free place has nobody to take in.
-                    : MergeRoom(g) == 0 ? ErrorCodes.GuildFull : 0;
-            if (code == 0) target!.MergeInvites[g.Id] = new GuildStore.MergeInvite { SentMs = now, Announce = announce };
-        }
-        if (code == 0 && !await SaveGuildAsync(target!)) code = ErrorCodes.GuildMissing;
-        await s.SendGameAsync(MergeInvite, new InviteMergeGuildRes { Guildid = req.Guildid, IsAgree = req.IsAgree, Result = code });
-    }
-
-    /// <summary>ErrorCodeConfig 10058 "will not accept your invites for @{1} minutes" carries 30.</summary>
-    private long MergeRefusalMs => 30 * 60_000;
-
-    private async Task MergeAnswerCoreAsync(GameSession s, MergeGuildOpeReq req)
-    {
-        int code = MergeActor(s, out var g);
-        var inviter = code == 0 ? store.Get(req.Guildid) : null;
-        if (code == 0 && (inviter == null || inviter.Id == g.Id)) code = ErrorCodes.MergeInviteMissing;
-        bool cancel = false;
-        if (code == 0 && !req.IsAgree)
-        {
-            // (inferred) "Cancel Merge" (170311) has no request of its own; a refusal of the agreed guild cancels it.
-            if (g.PendingMergeGuildId == inviter!.Id) cancel = true;
-            else if (!g.MergeInvites.Remove(inviter.Id)) code = ErrorCodes.MergeInviteMissing;
-            else g.MergeRefusals[inviter.Id] = MergeNowMs;
-        }
-        else if (code == 0)
-        {
-            code = !g.MergeInvites.TryGetValue(inviter!.Id, out var invite) ? ErrorCodes.MergeAcceptMissing
-                : !LiveInvite(invite) ? ErrorCodes.MergeInviteExpired : MergeBlocked(g, inviter);
-            if (code == 0)
-            {
-                long room = MergeRoom(inviter);
-                if (room == 0) code = ErrorCodes.GuildFull;
-                else
-                {
-                    g.MergeInvites.Clear();
-                    g.MergeAnnounce = invite!.Announce;
-                    (g.PendingMergeGuildId, g.MergeInviter) = (inviter.Id, false);
-                    (inviter.PendingMergeGuildId, inviter.MergeInviter) = (g.Id, true);
-                    inviter.MergeInvites.Remove(g.Id);
-                    // "the guilds will be merged at 5:00 the following morning"
-                    g.MergeExecuteSec = inviter.MergeExecuteSec = DayStart + 86400;
-                    // (inferred) preselected: officers first, then by join time, up to the free places.
-                    g.MergeMembers = g.Members.Values.OrderBy(m => m.Official).ThenBy(m => m.EnterTime)
-                        .Take((int)room).Select(m => m.RoleId).ToList();
-                }
-            }
-        }
-        if (cancel) ClearMerge(g, inviter!);
-        if (code == 0 && !await SavePairAsync(g, req.IsAgree || cancel ? inviter : null)) code = ErrorCodes.GuildMissing;
-        await s.SendGameAsync(MergeAnswer, new MergeGuildOpeRes { Result = code, Guildid = req.Guildid });
-        if (code == 0 && (req.IsAgree || cancel))
-        {
-            await PushBase(g, BaseInfoChange(g));
-            await PushBase(inviter!, BaseInfoChange(inviter!));
-        }
-    }
-
-    private async Task MergeSaveMembersCoreAsync(GameSession s, SaveMergeMemberReq req)
-    {
-        int code = MergeActor(s, out var g);
-        var inviter = code == 0 && g.PendingMergeGuildId == req.Guildid && !g.MergeInviter ? store.Get(req.Guildid) : null;
-        var chosen = req.Memberids.Distinct().ToList();
-        if (code == 0 && inviter == null) code = ErrorCodes.MergeInviteMissing;
-        if (code == 0 && chosen.Any(id => !g.Members.ContainsKey(id))) code = ErrorCodes.GuildMemberMissing;
-        if (code == 0 && chosen.Count > MergeRoom(inviter!)) code = ErrorCodes.MergeTooMany;
-        if (code == 0)
-        {
-            var prior = g.MergeMembers;
-            g.MergeMembers = chosen;
-            if (!await SaveGuildAsync(g)) { g.MergeMembers = prior; code = ErrorCodes.GuildMissing; }
-        }
-        var resp = new SaveMergeMemberRes { Guildid = req.Guildid, Result = code };
-        resp.Memberids.AddRange(code == 0 ? chosen : req.Memberids);
-        await s.SendGameAsync(MergeSaveMembers, resp);
-    }
-
-    private static void ClearMerge(params GuildStore.State[] guilds)
-    {
-        foreach (var g in guilds)
-        {
-            g.PendingMergeGuildId = 0; g.MergeInviter = false; g.MergeMembers = new(); g.MergeExecuteSec = 0; g.MergeAnnounce = "";
-        }
-    }
-
-    private async Task<bool> SavePairAsync(GuildStore.State g, GuildStore.State? other)
-    {
-        if (other == null) return await SaveGuildAsync(g);
-        var transaction = roles.NewTransaction();
-        store.EnlistSave(g, transaction);
-        store.EnlistSave(other, transaction);
-        try { await roles.CommitAsync(transaction, "guild/merge-state"); return true; }
-        catch (Microsoft.Data.Sqlite.SqliteException e) when (e.SqliteExtendedErrorCode is 1555 or 2067) { return false; }
-    }
-
-    /// <summary>Heartbeat: expired invites leave, and agreed merges whose 05:00 has come run.</summary>
-    private async Task MergeDueAsync()
-    {
-        long now = MergeNowMs;
-        foreach (var g in store.List().Where(g => g.MergeInvites.Values.Any(i => !LiveInvite(i))
-            || g.MergeRefusals.Values.Any(t => now >= t + MergeRefusalMs)))
-        {
-            foreach (long id in g.MergeInvites.Where(i => !LiveInvite(i.Value)).Select(i => i.Key).ToArray()) g.MergeInvites.Remove(id);
-            foreach (long id in g.MergeRefusals.Where(r => now >= r.Value + MergeRefusalMs).Select(r => r.Key).ToArray())
-                g.MergeRefusals.Remove(id);
+            g!.MergeMemberIds = ids;
             await SaveGuildAsync(g);
         }
-        foreach (var inviter in store.List().Where(g => g.MergeInviter && g.PendingMergeGuildId != 0 && now / 1000 >= g.MergeExecuteSec))
+        var rsp = new SaveMergeMemberRes { Guildid = req.Guildid, Result = code };
+        rsp.Memberids.AddRange(code == 0 ? ids : g?.MergeMemberIds ?? []);
+        await s.SendGameAsync(MergeMembers, rsp);
+    }
+
+    /// <summary>32319: invite a guild to merge into ours (isAgree), or withdraw the invitation.</summary>
+    private async Task MergeAskCoreAsync(GameSession s, InviteMergeGuildReq req)
+    {
+        var g = Own(s);
+        var target = req.Guildid == 0 || req.Guildid == g?.Id ? null : store.Get(req.Guildid);
+        var limit = Setting("GuildMergeNoticeLimitNew", 0, 50);
+        int code = g == null ? ErrorCodes.NotInGuild : !HasRight(g, s.Role!.Id, MergeRight) ? ErrorCodes.GuildPermission
+            : target == null || target.Status != (int)GuildStatus.Normal ? ErrorCodes.GuildMissing : 0;
+        if (code == 0 && req.IsAgree)
+            code = (req.Announce ?? "").Length > limit[^1] || Sensitive(req.Announce ?? "") ? ErrorCodes.MergeAnnounce
+                : g!.PendingMergeGuildId != 0 || target!.PendingMergeGuildId != 0 ? ErrorCodes.MergeImpossible
+                : Impeaching(g) ? ErrorCodes.MergeOurImpeach : Impeaching(target) ? ErrorCodes.MergeTheirImpeach
+                : MergeCooling(g) ? ErrorCodes.MergeOurCooldown : MergeCooling(target) ? ErrorCodes.MergeTheirCooldown
+                : LiveInvites(target).Any(i => i.From == g.Id) ? ErrorCodes.MergeRepeat
+                : InvitedBy(g).Count() >= MergeListLimit ? ErrorCodes.MergeOurInvitesFull
+                : LiveInvites(target).Count >= MergeListLimit ? ErrorCodes.MergeTheirInvitesFull : 0;
+        else if (code == 0 && !target!.MergeInvites.Any(i => i.From == g!.Id)) code = ErrorCodes.MergeNoInvite;
+        if (code == 0)
         {
-            var target = store.Get(inviter.PendingMergeGuildId);
-            if (target == null || target.PendingMergeGuildId != inviter.Id)
+            target!.MergeInvites = [.. LiveInvites(target).Where(i => i.From != g!.Id)];
+            if (req.IsAgree) target.MergeInvites.Add(new GuildStore.MergeInvite { From = g!.Id, RecvSec = NowSec(), Announce = req.Announce ?? "" });
+            await SaveGuildAsync(target);
+        }
+        await s.SendGameAsync(MergeAsk, new InviteMergeGuildRes { Guildid = req.Guildid, IsAgree = req.IsAgree, Result = code });
+    }
+
+    /// <summary>32318: the invited guild accepts (the merge runs at the next 05:00) or refuses an invitation, or cancels
+    /// the merge it accepted (isAgree false for its partner).</summary>
+    private async Task MergeOpeCoreAsync(GameSession s, MergeGuildOpeReq req)
+    {
+        var g = Own(s);
+        var inviter = req.Guildid == 0 || req.Guildid == g?.Id ? null : store.Get(req.Guildid);
+        int code = g == null ? ErrorCodes.NotInGuild : !HasRight(g, s.Role!.Id, MergeRight) ? ErrorCodes.GuildPermission
+            : inviter == null ? ErrorCodes.GuildMissing : 0;
+        var invite = code == 0 ? g!.MergeInvites.FirstOrDefault(i => i.From == inviter!.Id) : null;
+        bool cancel = code == 0 && !req.IsAgree && g!.PendingMergeGuildId == inviter!.Id;
+        if (code == 0 && !cancel)
+            code = invite == null ? ErrorCodes.MergeNoInvite
+                : !req.IsAgree ? 0
+                : NowSec() - invite.RecvSec >= MergeLapseSec ? ErrorCodes.MergeExpired
+                : g!.PendingMergeGuildId != 0 || inviter!.PendingMergeGuildId != 0 ? ErrorCodes.MergeImpossible
+                : Impeaching(g) ? ErrorCodes.MergeOurImpeach : Impeaching(inviter!) ? ErrorCodes.MergeTheirImpeach
+                : MergeCooling(g) ? ErrorCodes.MergeOurCooldown : MergeCooling(inviter!) ? ErrorCodes.MergeTheirCooldown : 0;
+        if (code == 0)
+        {
+            if (cancel)
             {
-                ClearMerge(inviter);
-                if (await SaveGuildAsync(inviter)) await PushBase(inviter, BaseInfoChange(inviter));
-                continue;
+                g!.MergeInvites.RemoveAll(i => i.From == inviter!.Id);
+                ClearMerge(g); ClearMerge(inviter!);
+                await SaveGuildAsync(inviter!);
             }
-            var moving = target.MergeMembers.Where(target.Members.ContainsKey).Distinct().ToArray();
-            // "If too many members are selected, the merge fails and nothing changes" (inferred: the agreement ends).
-            if (inviter.Members.Count + moving.Length > MaxMembers(inviter) || moving.Length == 0)
+            else if (!req.IsAgree) g!.MergeInvites.Remove(invite!);
+            else
             {
-                log.LogInformation("Guild merge {Target} into {Inviter} failed: {Moving} members for {Room} places",
-                    target.Id, inviter.Id, moving.Length, MergeRoom(inviter));
-                ClearMerge(inviter, target);
-                if (await SavePairAsync(inviter, target))
-                {
-                    await PushBase(inviter, BaseInfoChange(inviter));
-                    await PushBase(target, BaseInfoChange(target));
-                }
-                continue;
+                long at = DayStart + 86400; // the next 05:00 (170349 "completed at five o'clock tomorrow morning")
+                g!.PendingMergeGuildId = inviter!.Id; g.MergeAbsorbs = false; g.MergeAtSec = at;
+                g.MergeMemberIds = MergeMembersOf(g, inviter);
+                inviter.PendingMergeGuildId = g.Id; inviter.MergeAbsorbs = true; inviter.MergeAtSec = at;
+                await SaveGuildAsync(inviter);
             }
-            await ExecuteMergeAsync(inviter, target, moving);
+            await SaveGuildAsync(g!);
+        }
+        await s.SendGameAsync(MergeOpe, new MergeGuildOpeRes { Guildid = req.Guildid, Result = code });
+        if (code == 0 && (cancel || req.IsAgree))
+        {
+            await PushBase(g!, BaseChangeOf(g!));
+            await PushBase(inviter!, BaseChangeOf(inviter!));
         }
     }
 
-    /// <summary>One commit: the target is disbanded (its treasury and market stock go to recovery, as for any disband),
-    /// the moving members join the inviter as regular members (inferred: "each new Member's position must be
-    /// reassigned"), the others are left without a guild.</summary>
-    private async Task ExecuteMergeAsync(GuildStore.State inviter, GuildStore.State target, long[] moving)
+    private static void ClearMerge(GuildStore.State g)
     {
-        long nowMs = NowMs();
-        foreach (long id in moving)
+        g.PendingMergeGuildId = 0; g.MergeAbsorbs = false; g.MergeAtSec = 0; g.MergeMemberIds = [];
+    }
+
+    /// <summary>32231 Change_Base: the client resets every field it carries, pendingMergeGuildId included.</summary>
+    private GuildBaseInfoChangeNtf BaseChangeOf(GuildStore.State g)
+    {
+        var change = new GuildBaseInfoChangeNtf
         {
-            var from = target.Members[id];
-            inviter.Members[id] = new GuildStore.Member
+            Tp = GuildBaseInfoChangeNtf.Types.ChangeType.ChangeBase,
+            Base = new GuildBaseInfoChangeNtf.Types.BaseChangeInfo
             {
-                RoleId = id, Name = from.Name, Level = from.Level, Career = from.Career, Official = 20, EnterTime = nowMs,
-                OfflineTime = Online(id) != null ? -1 : from.OfflineTime, HistoryContribute = from.HistoryContribute,
-            };
-            Journal(inviter, EvJoined, [id], Str(from.Name));
-        }
-        ClearMerge(inviter);
-        inviter.LastMergeSec = MergeNowMs / 1000;
-        long leader = target.Members.Values.Single(m => m.Official == 1).RoleId;
-        long[] prior = target.Members.Keys.OrderBy(id => id != leader).ToArray();
-        var transaction = roles.NewTransaction();
-        var economy = EnlistDisband(target, transaction, prior, "guild-merge", keepViews: moving);
-        store.EnlistSave(inviter, transaction);
-        EnlistViews(inviter, transaction);
-        transaction.WithEconomy(economy);
-        try { await roles.CommitAsync(transaction, "guild/merge"); }
-        catch (Exception e) when (e is not OperationCanceledException)
-        {
-            log.LogError(e, "Guild merge {Target} into {Inviter} failed to commit", target.Id, inviter.Id);
-            return;
-        }
-        log.LogInformation("Guild {Target} merged into {Inviter} with {Count} members", target.Id, inviter.Id, moving.Length);
-        foreach (long id in prior.Except(moving))
-            if (Online(id) is { } left) { await SyncRole(left); await SendMemberClear(left, target); }
-        foreach (long id in moving)
-            if (Online(id) is { } moved) { await SyncRole(moved); await SendFull(moved, inviter, true); }
-        await RefreshMembers(inviter);
-        foreach (long role in inviter.Members.Keys.Order().ToArray())
-        {
-            try { await mail.SendTemplateAsync(role, MergeDoneMail, [], contentParams: [target.Name]); }
-            catch (Exception e) when (e is not OperationCanceledException)
-            {
-                log.LogError(e, "Guild merge mail to role {Role} failed", role);
+                Name = g.Name, Level = g.Level,
+                Announce = g.Announce, Notice = g.Notice, Status = (GuildStatus)g.Status,
+                MaxMemberCount = MaxMembers(g), LastChangeNameTime = g.LastChangeNameTime,
+                LastChangeNoticeTime = (int)g.LastChangeNoticeTime, PendingMergeGuildId = g.PendingMergeGuildId,
             }
+        };
+        change.Base.HistoryNames.AddRange(g.HistoryNames.Count > 0 ? g.HistoryNames : [g.Name]);
+        return change;
+    }
+
+    /// <summary>Heartbeat: lapsed invitations go, and accepted merges run once their 05:00 has come.</summary>
+    private async Task RunMergesAsync()
+    {
+        long now = NowSec();
+        foreach (var g in store.List().Where(g => g.MergeInvites.Any(i => now - i.RecvSec >= MergeLapseSec || store.Get(i.From) == null)).ToArray())
+        {
+            g.MergeInvites = LiveInvites(g);
+            await SaveGuildAsync(g);
         }
+        foreach (var absorber in store.List().Where(g => g.MergeAbsorbs && g.PendingMergeGuildId != 0 && g.MergeAtSec <= now).ToArray())
+        {
+            var absorbed = store.Get(absorber.PendingMergeGuildId);
+            var moving = absorbed == null || absorbed.PendingMergeGuildId != absorber.Id ? null : MergeMembersOf(absorbed, absorber);
+            if (moving == null || moving.Count == 0 || moving.Count > MergeRoom(absorber))
+            {
+                // The partner is gone or the chosen members no longer fit: nothing changes (10960000033 item 6).
+                ClearMerge(absorber);
+                await SaveGuildAsync(absorber);
+                await PushBase(absorber, BaseChangeOf(absorber));
+                if (absorbed != null && absorbed.PendingMergeGuildId == absorber.Id)
+                {
+                    ClearMerge(absorbed);
+                    await SaveGuildAsync(absorbed);
+                    await PushBase(absorbed, BaseChangeOf(absorbed));
+                }
+                continue;
+            }
+            await MergeAsync(absorber, absorbed!, moving);
+        }
+    }
+
+    /// <summary>
+    /// One transaction: the absorbed guild is disbanded (its rows first, so the membership index stays exclusive), the
+    /// members who stay lose their guild view, and the moving members join the absorber as ordinary members.
+    /// </summary>
+    private async Task MergeAsync(GuildStore.State absorber, GuildStore.State absorbed, List<long> moving)
+    {
+        var staying = absorbed.Members.Keys.Where(id => !moving.Contains(id)).ToArray();
+        var movers = moving.Select(id => absorbed.Members[id]).ToArray();
+        long nowMs = NowMs();
+        var transaction = roles.NewTransaction();
+        var disband = EnlistDisband(absorbed, transaction, staying, absorber.Members.Values.First(m => m.Official == 1).RoleId);
+        foreach (var m in movers)
+        {
+            absorber.Members[m.RoleId] = new GuildStore.Member
+            {
+                RoleId = m.RoleId, Name = m.Name, Level = m.Level, Career = m.Career, Official = 20, EnterTime = nowMs,
+                OfflineTime = m.OfflineTime, CurContribute = m.CurContribute, HistoryContribute = m.HistoryContribute,
+            };
+            Journal(absorber, EvJoined, [m.RoleId], Str(m.Name));
+        }
+        ClearMerge(absorber);
+        absorber.MergeCooldownSec = NowSec() + Setting("GuildMergeTimeCD", 604800)[0];
+        absorber.MergeInvites = [.. LiveInvites(absorber).Where(i => i.From != absorbed.Id)];
+        store.EnlistSave(absorber, transaction, "Guild merge roster write failed");
+        EnlistViews(absorber, transaction);
+        transaction.WithEconomy(disband);
+        await roles.CommitAsync(transaction, "guild/merge");
+
+        await RefreshMembers(absorber);
+        foreach (long id in staying)
+            if (Online(id) is { } s) await ClearMember(s, absorbed);
+        await GuildMailAsync(absorber.Members.Keys, (int)Setting("GuildMail21", 1121)[0], $"guild-merge:{absorber.Id}:{absorbed.Id}",
+            absorbed.Name);
     }
 }

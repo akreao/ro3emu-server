@@ -368,6 +368,10 @@ public static partial class EconomySnapshotReader
                                             throw new FormatException("Invalid rank reward winner.");
                                 }
                             break;
+                        case "flying_dragon":
+                            // Starshatter ritual (FlyingDragonService): progress and helpers; the ritual's mail carries the goods.
+                            ValidateProto(Convert.FromBase64String(value), DBFlyingDragonProduceInfo.Descriptor);
+                            break;
                         default:
                             Issue(EconomyIssueKind.UnknownSchema, key, "Unclassified server_state key.");
                             break;

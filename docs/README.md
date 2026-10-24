@@ -1,5 +1,12 @@
 # Documentation
 
+## Guides: playing
+
+- [Play on your own PC](guide/play.md): RO3Emu.exe, its commands, what it changes in the game folder
+- [Play with friends and host a server](guide/hosting.md): Windows and Linux hosting, ports, backups, hardware
+- [What works](features.md): every playable system
+- [For developers](development.md): running from source, layout, tests, releases, architecture
+
 ## Guides: running a server
 
 - [GM access](guide/gm-access.md): who may use GM commands (`Ro3Emu:GmAccounts`) and what the client's GM panel can do
@@ -23,12 +30,12 @@
 | Area | Notes |
 |---|---|
 | Combat and skills | [skill protocol](systems/skill-protocol.md) · [buffs and resources](systems/skill-buffs.md) · [skill growth](systems/skill-growth.md) · [remaining skill messages](systems/skills-rest.md) · [totem effects](systems/totem-effects.md) |
-| Character and items | [equipment affixes](systems/equipment-affixes.md) · [titles](systems/titles.md) · [social outfits](systems/social-outfits.md) · [Astral Level](systems/astral-level.md) · [build presets](systems/genre.md) · [season talents](systems/season-talents.md) · [wardrobe](systems/wardrobe.md) · [mounts and totems](systems/mount-totem.md) |
+| Character and items | [Astral Level (Paragon)](systems/paragon.md) · [Starshatter ritual](systems/starshatter.md) · [title ranks](systems/titles.md) · [equipment affixes](systems/equipment-affixes.md) · [social outfits](systems/social-outfits.md) · [season talents](systems/season-talents.md) · [build presets](systems/genre.md) · [wardrobe](systems/wardrobe.md) · [mounts and totems](systems/mount-totem.md) |
 | Pets | [pets](systems/pet.md) · [ordinary guardian skills](systems/pet-guardian-skills.md) · [pets in the world](systems/pet-world-follow.md) · [tower companions and Bonus Time](systems/tower-pets-afk.md) |
 | Life jobs | [life jobs and production](systems/lifejob.md) · [gathering](systems/gathering.md) |
 | Economy | [cash shop and Top Up](systems/cash-shop.md) · [Fashion gifts](systems/fashion-gifts.md) · [trade and stalls](systems/trade-stalls.md) · [auctions](systems/auction.md) · [mail](systems/mail.md) · [durable activity settlement](systems/durable-settlement.md) |
 | Social | [the Tavern](systems/tavern.md) · [profile card](systems/profile-card.md) · [leaderboards and rank rewards](systems/leaderboards.md) · [Connect Quests and activity Intimacy](systems/connect-quests.md) |
-| Guilds | [guilds](systems/guild.md) · [group mail](systems/guild-group-mail.md) · [impeachment](systems/guild-impeachment.md) · [merging](systems/guild-merge.md) · [territory wars](systems/territory-wars.md) · [escort and guild trading](systems/territory-escort.md) |
+| Guilds | [guilds](systems/guild.md) · [territory wars](systems/territory-wars.md) · [escort and guild trading](systems/territory-escort.md) |
 | Instances | [dungeons](systems/dungeon.md) · [story dungeon inventory](systems/dungeon-inventory.md) |
 | Activities | [overview](systems/activities.md) · [timed activities](systems/activities-timed-events.md) · [Survivor Battle NPCs](systems/survivor-battle-npcs.md) · [adventures](systems/activities-adventures.md) · [battle pass and month card](systems/activities-battlepass-monthcard.md) · [guild campfire](systems/activities-guild-campfire.md) · [lottery](systems/activities-lottery.md) |
 

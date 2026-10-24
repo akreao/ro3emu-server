@@ -164,13 +164,9 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
     /// <summary>Transient configured energy meters; BuffService sends each change as 31334.</summary>
     public Dictionary<int, PlayerEnergyState> Energy { get; } = new();
     public int EnergyCareer { get; set; }
-    /// <summary>A live stealth buff (BuffConfig category 31) hides the player from monsters (BuffService.Stealth).</summary>
-    public bool Stealthed { get; set; }
     /// <summary>No other player shows this one (World): a Survivor Battle spectator whose view follows the watched
     /// teammate. Set through World.SetHiddenAsync; a scene join clears it.</summary>
     public bool AoiHidden { get; internal set; }
-    /// <summary>Hits taken under the current stealth buff (its GUID), toward its "revealed after taking damage N times".</summary>
-    internal (long Guid, int Hits) StealthHits { get; set; }
     /// <summary>Lasting buffs the falcon, wolf or Madogear grant right now (CombatService.Companions).</summary>
     internal HashSet<int> CompanionBuffs { get; set; } = new();
     /// <summary>The battle mount ridden when companions were last synced: a change resends the normal attack.</summary>
@@ -340,12 +336,6 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
     /// barRoomId is the room the role is in now (rooms live in memory).</summary>
     public Romsg.DBBarRoomInfo? Tavern { get; set; }
 
-    /// <summary>The title rank (5031, role blob "title"); TitleService.</summary>
-    public Romsg.DBTitleInfo? Title { get; set; }
-
-    /// <summary>The Astral Level: Paragon level, EXP, stars and Star Cores (5015, role blob "paragon"); ParagonService.</summary>
-    public ParagonService.State? Paragon { get; set; }
-
     /// <summary>When this role's tavern seconds were last counted (unix seconds; 0 when not in a room); TavernService.</summary>
     public long TavernCountedAt { get; set; }
 
@@ -389,6 +379,13 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
 
     /// <summary>Leased Special Class Items (5002, role blob "career_special"); CareerSpecialService.</summary>
     public Romsg.DBCareerSpecial? CareerSpecial { get; set; }
+
+    /// <summary>The title rank (role blob "title", 5031); TitleService.</summary>
+    public Romsg.DBTitleInfo? TitleInfo { get; set; }
+
+    /// <summary>Astral Level stars and Star Cores (role blob "paragon", runegroup only; level and EXP are progress
+    /// columns); ParagonService.</summary>
+    public Romsg.DBParagonLevel? Paragon { get; set; }
 
     /// <summary>Valhalla Trials Blessing statue (role blob "heroic_spirit"); ValhallaService. Cleared layers live in <see cref="Dungeons"/>.</summary>
     public Romsg.DBOdinStatue? OdinStatue { get; set; }
