@@ -142,8 +142,9 @@ public sealed partial class TerritoryEscortService
         _lastStageType = _clock.Current.Type;
         await RefreshCartActorsAsync();
         await RefreshCargoActorsAsync();
+        // Only to players in the world: one still on the role screen or loading gets the current stage from LoginAsync (#295).
         if (stageChanged)
-            await RoleFanout.EachAsync(_sessions.All().Where(x => x.Role != null),
+            await RoleFanout.EachAsync(_sessions.All().Where(x => x.Role != null && !x.SceneLoading),
                 peer => peer.SendGameAsync(InfoNtf, StageData())); // (inferred) 83078 uses the 83085 three-field wire shape.
         await PublishSceneCountsAsync();
     }

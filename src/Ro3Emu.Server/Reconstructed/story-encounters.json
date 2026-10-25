@@ -1,111 +1,206 @@
 {
   "version": 1,
-  "about": "Story boss encounters rebuilt from what the client holds (docs/systems/dungeon.md, 'Story encounters'). The original server's encounter scripts and boss behaviour trees (NPCConfig _iAISpecial MainStory_*) are not in the client. What is real: the boss and companion templates (NPCConfig), their skill kits (SkillConfig, named by _kScriptLogic), the skill timelines (data/skills, m_kShows effects and timings), the dialogue (ChatConfig 53xxxxx), the scene-editor points and the quest stages (DungeonQuestConfig). What is chosen here and marked as such: which skills a boss uses and in which order, every hit area and hit time, the stage triggers, the companions' rotations (except the priest, whose tree MainStory_MuShi ships) and when each line is said.",
+  "about": "Story boss encounters rebuilt from what the client holds (docs/systems/dungeon.md, 'Story encounters'). The original server's encounter scripts and boss behaviour trees (NPCConfig _iAISpecial MainStory_*) are not in the client. What is real: the boss and companion templates (NPCConfig), their skill kits (SkillConfig, named by _kScriptLogic), the skill timelines (data/skills, m_kShows effects and timings), the dialogue (ChatConfig 53xxxxx), the scene-editor points and the quest stages (DungeonQuestConfig). What is chosen here and marked as such: which skills a boss uses and in which order, every hit area and hit time, the stage triggers, the companions' rotations (except the priest, whose tree MainStory_MuShi ships) and when each line is said. An encounter with a 'source' was retimed from a capture of another private server (Genesis, which differs from the official beta); that source says which values it gave. Fields: 'airWalls' (scene-editor air walls raised for the run, var 133), a boss skill's 'fromStage', an ally's 'ms' (arrival after its stage starts), a kit with no skills (a bystander the boss leaves alone), and a stage end's 'blackScreenMs', 'cast' and 'castMs' (the boss's self-cast after the end). A boss skill's 'marks' place ground warnings the client draws from EffectData m_kWarningRange (Genesis sends them as 31109): 'ms' into the cast, 'warn' (and the damage effect 'show'), 'distance'/'angle' from the boss or from mark 'around', a strip's 'dir', all relative to 'aim' (facing, target or random) unless 'world', repeated 'count' times turning 'step' degrees; the hit lands in the warning's shape when it ends or at 'hitMs'. 'moves' dash the boss toward a placed mark on 'moveEffect'.",
   "encounters": {
     "1022001": {
       "name": "Payon Forest: Eddga",
       "confidence": "medium",
+      "source": "Genesis capture 2026-10-25 (one run; Genesis is a private server that differs from the official beta): the cast, its points and arrival times, which lines are said by whom and when, the stage-1 end (black screen, Eddga's self-buff), the skills Eddga used and the closing lines' timing. Hit areas, rotations and target choice are still chosen.",
       "boss": 5300001,
-      "bossSkillGapMs": 6000,
+      "bossSkillGapMs": 4000,
       "retargetMs": 8000,
-      "why": "Scene 1022001 (sc_pay_fild10_001_pl01): boss point 20 (boss位置, NpcLevelPointRespawnConfig 5300001 Eddga), Wule at 21 (唔勒), Boya at 23 (保亚), two groups of six adventurer points 24 and 40 labelled 战 猎 奶 商 刺 法 (swordman, hunter, priest, merchant, thief, mage). Two DungeonQuestConfig stages: 1 'Cover Boya and Wule', 2 'Join the Adventurers and defeat Eddga'. The client has two sets of six story adventurers (5300007-09 + 5300070-72, and the '2' variants 5300073-78) and the fighting Wule/Boya templates 5300086/87 with their own skills.",
+      "airWalls": [32],
+      "why": "Scene 1022001 (sc_pay_fild10_001_pl01): boss point 20 (boss位置, NpcLevelPointRespawnConfig 5300001 Eddga), Wule at 21 (唔勒), Boya at 23 (保亚), two groups of six adventurer points 24 and 40 labelled 战 猎 奶 商 刺 法 (swordman, hunter, priest, merchant, thief, mage). Two DungeonQuestConfig stages: 1 'Cover Boya and Wule', 2 'Join the Adventurers and defeat Eddga'. The client has two sets of six story adventurers (5300007-09 + 5300070-72, and the '2' variants 5300073-78) and the fighting Wule/Boya templates 5300086/87 with their own skills. Genesis raised air wall 32 (dungeon var 133) for the whole run and brought in the non-fighting Boya 5300080 and Wule 5300081 (camp 3, no AI, no skills), not the fighting 5300086/87.",
       "bossSkills": [
         {
-          "skill": 5300201,
-          "why": "MainStory_HuWangSkill1, timeline 53002: Skill1_1 animation, fx_eddga_skill01_flame_xuli charge at 2.5 s. A flame claw in front; the 120 degree, 6 m cone and the hit at 2.6 s are chosen.",
-          "hits": [ { "ms": 2600, "shape": "cone", "radius": 6, "angle": 120 } ],
-          "line": 5300006
-        },
-        {
-          "skill": 5300501,
-          "why": "MainStory_HuWangSkill4, timeline 53005: fx_eddga_skill_impact_xuli at 1.67 s, fx_eddga_skill_impact 4 m in front (scale 2) and a camera shake at 3.33 s: the jump and landing. A 5 m circle centred 4 m in front at 3.33 s (chosen from that offset).",
-          "hits": [ { "ms": 3333, "shape": "circle", "radius": 5, "forward": 4 } ],
-          "line": 5300007
-        },
-        {
-          "skill": 5300301,
-          "why": "MainStory_HuWangSkill2, timeline 53003: fx_eddga_skill_shootfire_xuli then fx_eddga_skill_shootfire from the head, two hit marks: a fire breath. A 12 x 4 m strip in front, hit at 3.2 s and 4.4 s, half the damage each (chosen).",
-          "hits": [
-            { "ms": 3200, "shape": "rect", "length": 12, "width": 4, "share": 5000 },
-            { "ms": 4400, "shape": "rect", "length": 12, "width": 4, "share": 5000 }
-          ]
-        },
-        {
           "skill": 5300401,
-          "why": "MainStory_HuWangSkill3, timeline 53004: Skill1_6 three times, fx_eddga_skill_groundflame_xuli at 2.83 s, mark groups at 0, 2.52 and 5.1 s: ground flames around Eddga. A 7 m circle at 2.9, 5.4 and 7.6 s, a third of the damage each (chosen).",
-          "hits": [
-            { "ms": 2900, "shape": "circle", "radius": 7, "share": 3333 },
-            { "ms": 5400, "shape": "circle", "radius": 7, "share": 3333 },
-            { "ms": 7600, "shape": "circle", "radius": 7, "share": 3334 }
+          "fromStage": 2,
+          "why": "MainStory_HuWangSkill3, timeline 53004 (three Skill1_6 rounds). Genesis: three rounds of 5 m warning rings (EffectData 5300403) at 0, 2.52 and 5.11 s, 6, 8 and 10 of them, 4-22 m around Eddga; each erupts (5300406) 1.86 s after it shows. The ring positions are Genesis's, turned with Eddga's facing (one run: how Genesis chooses them is not known). First used 3 s into stage 2.",
+          "marks": [
+            { "ms": 0, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 12.0, "angle": 76.5 },
+            { "ms": 0, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 12.0, "angle": 154.4 },
+            { "ms": 0, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 4.0, "angle": 0 },
+            { "ms": 0, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 4.0, "angle": 180 },
+            { "ms": 0, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 12.0, "angle": 115.4 },
+            { "ms": 0, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 12.0, "angle": 358.6 },
+            { "ms": 2518, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 22.0, "angle": 286.1 },
+            { "ms": 2518, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 22.0, "angle": 265.2 },
+            { "ms": 2518, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 22.0, "angle": 13.7 },
+            { "ms": 2518, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 22.0, "angle": 223.2 },
+            { "ms": 2518, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 22.0, "angle": 352.8 },
+            { "ms": 2518, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 14.0, "angle": 189.3 },
+            { "ms": 2518, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 22.0, "angle": 331.8 },
+            { "ms": 2518, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 22.0, "angle": 55.6 },
+            { "ms": 5108, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 20.0, "angle": 159.6 },
+            { "ms": 5108, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 20.0, "angle": 113.4 },
+            { "ms": 5108, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 20.0, "angle": 182.7 },
+            { "ms": 5108, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 12.0, "angle": 232.2 },
+            { "ms": 5108, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 20.0, "angle": 275.0 },
+            { "ms": 5108, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 20.0, "angle": 90.4 },
+            { "ms": 5108, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 12.0, "angle": 271.2 },
+            { "ms": 5108, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 12.0, "angle": 37.5 },
+            { "ms": 5108, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 4.0, "angle": 180 },
+            { "ms": 5108, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 20.0, "angle": 311.9 }
           ],
           "line": 5300009
         },
         {
-          "skill": 5300701,
-          "why": "MainStory_HuWangShouting, timeline 53007: fx_mainstoryeddga_buff_roar at 1.5 s and a camera shake. An 8 m roar around Eddga at 1.5 s (chosen); 240% of ATK.",
-          "hits": [ { "ms": 1500, "shape": "circle", "radius": 8 } ]
+          "skill": 5300801,
+          "fromStage": 2,
+          "why": "MainStory_HuWangSkill5, timeline 53008 (10.35 s). Genesis: a 25 x 6 m strip (5300841) at one fighter, a dash (5300851) onto its start at 2.1 s; a strip (5300842) at the target at 2.97 s, a dash at 3.97 s and the hit as it ends (the player was hit at 4.57 s); then a 12 m ring (5300844) 10.4 m ahead with eight strips (5300843) wheeling out 10 m around it at 5.85 s, a 5.4 m dash toward it at 8.25 s and the blast (5300862, 5300861) at 8.85 s (the player was hit again). Which fighter the first strip and the ring aim at is not known: a random one (inferred). Used once in stage 2.",
+          "moveEffect": 5300851,
+          "marks": [
+            { "ms": 0, "warn": 5300841, "aim": "random", "distance": 0.87 },
+            { "ms": 2970, "warn": 5300842, "aim": "target", "distance": -2.15 },
+            { "ms": 5850, "warn": 5300844, "show": 5300862, "aim": "random", "distance": 10.4 },
+            {
+              "ms": 5850,
+              "warn": 5300843,
+              "show": 5300861,
+              "around": 2,
+              "distance": 10,
+              "angle": 45,
+              "dir": 90,
+              "count": 8,
+              "step": 45
+            }
+          ],
+          "moves": [ { "ms": 2100, "to": 0 }, { "ms": 3970, "to": 1 }, { "ms": 8250, "to": 2, "distance": 5.4 } ]
+        },
+        {
+          "skill": 5300501,
+          "why": "MainStory_HuWangSkill4, timeline 53005: the jump. Genesis: an 8 m warning ring (5300504) 14.4 m in front of Eddga, then at 1.87 s eight 5 m rings (5300505) 15 m around it at the compass points, erupting (5300513) 1 s later. Genesis sent no damage effect for the centre ring; it hits when its warning ends (inferred). Used in both stages, with line 5300007.",
+          "marks": [
+            { "ms": 0, "warn": 5300504, "distance": 14.4 },
+            {
+              "ms": 1873,
+              "warn": 5300505,
+              "show": 5300513,
+              "hitMs": 1010,
+              "around": 0,
+              "world": true,
+              "distance": 15,
+              "count": 8,
+              "step": 45
+            }
+          ],
+          "line": 5300007
+        },
+        {
+          "skill": 5300601,
+          "why": "MainStory_HuWangNormalAttack, timeline 53006: Eddga's second swing (CD 2 s, 1.066 s action, attack point 0.517 s); his other swing 5300101 is the template's normal attack. Genesis mixed the two in both stages. A 5 m, 90 degree cone at 0.517 s (area chosen).",
+          "hits": [ { "ms": 517, "shape": "cone", "radius": 5, "angle": 90 } ]
         }
       ],
+      "bossSkillsLeftOut": "5300201, 5300301 and 5300701 are in the client's kit, but Genesis's Eddga never used them in the captured run.",
       "kits": {
-        "5300007": { "skills": [5330101, 5330201, 5330301, 5330401], "why": "MainStory_ZhanShi: the swordman kit AttackSword, Bash, Magnum Break, Provoke (SkillConfig 53301xx-53304xx)." },
-        "5300073": { "skills": [5330101, 5330201, 5330301, 5330401], "why": "MainStory_ZhanShi2: same swordman kit." },
-        "5300008": { "skills": [5330901, 5331001, 5331101, 5331201], "why": "MainStory_FaShi: the mage kit Attack, Fire/Lightning/Cold Bolt. Safety Wall 5331301 is left out (no ground protection for monsters here)." },
-        "5300074": { "skills": [5330901, 5331001, 5331101, 5331201], "why": "MainStory_FaShi2: same mage kit." },
-        "5300009": { "skills": [5330501, 5330601, 5330701, 5330801], "support": true, "why": "MainStory_MuShi: behaviour tree 10803 ships in the client: Blessing 5330501, Increase AGI 5330601, then Sanctuary 5330701 / Heal 5330801 on camp-1 allies below 95% HP." },
-        "5300075": { "skills": [5330501, 5330601, 5330701, 5330801], "support": true, "why": "MainStory_MuShi2: same priest kit and rules." },
-        "5300070": { "skills": [5331401, 5331501, 5331601, 5331701], "why": "MainStory_LieRen: the hunter kit HunterAttack, Double Strafe, Arrow Shower, Wind Walker." },
-        "5300076": { "skills": [5331401, 5331501, 5331601, 5331701], "why": "MainStory_LieRen2: same hunter kit." },
-        "5300071": { "skills": [5332201, 5332301, 5332401, 5332501], "why": "MainStory_DaoZei: the thief kit ThiefAttack, Sonic Blow, Envenom, Enchant Poison." },
-        "5300077": { "skills": [5332201, 5332301, 5332401, 5332501], "why": "MainStory_DaoZei2: same thief kit." },
-        "5300072": { "skills": [5331801, 5331901, 5332001, 5332101], "why": "MainStory_ShangRen: the merchant kit NormalAttack, Cart Revolution, Adrenaline Rush, Power Thrust." },
-        "5300078": { "skills": [5331801, 5331901, 5332001, 5332101], "why": "MainStory_ShangRen2: same merchant kit." },
-        "5300086": { "skills": [5353601, 5353901], "why": "Wule: NPCConfig _kSkills [5353901 MainStory_WuLe, 5353601 swing]." },
-        "5300087": { "skills": [5353701, 5354001], "why": "Boya: NPCConfig _kSkills [5354001 MainStory_BaoYa, 5353701 swing]." }
+        "5300080": {
+          "skills": [],
+          "why": "Boya (保亚, name 10470000386): camp 3, no AI and no skills in NPCConfig. Genesis: stands at point 23 for the whole fight and only talks."
+        },
+        "5300081": {
+          "skills": [],
+          "why": "Wule (唔勒, name 10470000385): camp 3, no AI and no skills. Genesis: stands at point 21 and only talks."
+        },
+        "5300007": {
+          "skills": [5330101, 5330401, 5330301, 5330201],
+          "why": "MainStory_ZhanShi: AttackSword, then Provoke, Magnum Break, Bash. Order as Genesis's adventurers cast them."
+        },
+        "5300073": {
+          "skills": [5330101, 5330401, 5330301, 5330201],
+          "why": "MainStory_ZhanShi2: same swordman kit."
+        },
+        "5300008": {
+          "skills": [5330901, 5331201, 5331101, 5331001],
+          "why": "MainStory_FaShi: Attack, then Cold, Lightning, Fire Bolt. Order as Genesis's adventurers cast them."
+        },
+        "5300074": {
+          "skills": [5330901, 5331201, 5331101, 5331001],
+          "why": "MainStory_FaShi2: same mage kit."
+        },
+        "5300009": {
+          "skills": [5330501, 5330601, 5330701, 5330801],
+          "support": true,
+          "why": "MainStory_MuShi: behaviour tree 10803 ships in the client: Blessing 5330501, Increase AGI 5330601, then Sanctuary 5330701 / Heal 5330801 on camp-1 allies below 95% HP. Genesis's priest also cast Safety Wall 5331301 (CD 5 s, 1.5 m); it is left out here (no ground protection against monsters)."
+        },
+        "5300075": {
+          "skills": [5330501, 5330601, 5330701, 5330801],
+          "support": true,
+          "why": "MainStory_MuShi2: same priest kit and rules."
+        },
+        "5300070": {
+          "skills": [5331401, 5331701, 5331601, 5331501],
+          "why": "MainStory_LieRen: HunterAttack, then Wind Walker, Arrow Shower, Double Strafe. Order as Genesis's adventurers cast them."
+        },
+        "5300076": {
+          "skills": [5331401, 5331701, 5331601, 5331501],
+          "why": "MainStory_LieRen2: same hunter kit."
+        },
+        "5300071": {
+          "skills": [5332201, 5332501, 5332401, 5332301],
+          "why": "MainStory_DaoZei: ThiefAttack, then Enchant Poison, Envenom, Sonic Blow. Order as Genesis's adventurers cast them."
+        },
+        "5300077": {
+          "skills": [5332201, 5332501, 5332401, 5332301],
+          "why": "MainStory_DaoZei2: same thief kit."
+        },
+        "5300072": {
+          "skills": [5331801, 5332101, 5332001, 5331901],
+          "why": "MainStory_ShangRen: NormalAttack, then Power Thrust, Adrenaline Rush, Cart Revolution. Order as Genesis's adventurers cast them."
+        },
+        "5300078": {
+          "skills": [5331801, 5332101, 5332001, 5331901],
+          "why": "MainStory_ShangRen2: same merchant kit."
+        }
       },
       "stages": [
         {
           "quest": 1,
-          "why": "'Cover Boya and Wule': Wule and Boya are already fighting Eddga. Wule asks the player to hold Eddga off while the flare is readied (5300017). Eddga opens on Boya (chosen).",
-          "allies": [ { "npc": 5300086, "point": 21 }, { "npc": 5300087, "point": 23 } ],
-          "firstTarget": 5300087,
+          "why": "'Cover Boya and Wule'. Genesis: Boya and Wule stand by and the player holds Eddga alone; after 15 s the screen goes black for a second, the quest shows done (var 10003 [1,1]) and a second later Eddga roars a self-buff (5300901, SkillConfig _kBuff1: buff 5301001, permanent); stage 2 starts 2.5 s after the end.",
+          "allies": [ { "npc": 5300080, "point": 23 }, { "npc": 5300081, "point": 21 } ],
           "lines": [
-            { "chat": 5300018, "by": 5300087, "ms": 500 },
-            { "chat": 5300019, "ms": 3000 },
-            { "chat": 5300016, "by": 5300087, "ms": 6000 },
-            { "chat": 5300017, "by": 5300086, "ms": 9000 },
-            { "chat": 5300020, "ms": 12000 }
+            { "chat": 5300019, "ms": 0 },
+            { "chat": 5300018, "by": 5300080, "ms": 2200 },
+            { "chat": 5300021, "by": 5300081, "ms": 5200 },
+            { "chat": 5300025, "ms": 10200 }
           ],
-          "end": { "bossHpPct": 60, "ms": 45000, "why": "Chosen: the stage ends when Eddga is down to 60% or after 45 s, whichever comes first." },
-          "endLines": [
-            { "chat": 5300021, "by": 5300087, "ms": 0 },
-            { "chat": 5300022, "by": 5300087, "ms": 2500 },
-            { "chat": 5300023, "by": 5300086, "ms": 5000 },
-            { "chat": 5300024, "by": 5300087, "ms": 7500 },
-            { "chat": 5300025, "ms": 10000 }
-          ],
-          "endDelayMs": 12500
+          "end": {
+            "ms": 15000,
+            "blackScreenMs": 1000,
+            "cast": 5300901,
+            "castMs": 1000,
+            "why": "Genesis: 15.3 s after entry, whatever Eddga's HP; he cannot fall before stage 2."
+          },
+          "endDelayMs": 2500
         },
         {
           "quest": 2,
-          "why": "'Join the Adventurers and defeat Eddga': the flare brings two parties of six (groups 24 and 40), each a full set of the story adventurer templates.",
+          "why": "'Join the Adventurers and defeat Eddga'. Genesis: the swordman and priest arrive with the stage, the mage, hunter, thief and merchant 3.65 s later, then the six '2' adventurers 5.7 s in, each at its own point; the swordman draws Eddga first (chosen).",
           "allies": [
-            { "npc": 5300007, "point": 34 }, { "npc": 5300070, "point": 35 }, { "npc": 5300009, "point": 36 },
-            { "npc": 5300072, "point": 37 }, { "npc": 5300071, "point": 38 }, { "npc": 5300008, "point": 39 },
-            { "npc": 5300073, "point": 41 }, { "npc": 5300076, "point": 42 }, { "npc": 5300075, "point": 43 },
-            { "npc": 5300078, "point": 44 }, { "npc": 5300077, "point": 45 }, { "npc": 5300074, "point": 46 }
+            { "npc": 5300007, "point": 34 },
+            { "npc": 5300009, "point": 35 },
+            { "npc": 5300008, "point": 36, "ms": 3650 },
+            { "npc": 5300070, "point": 37, "ms": 3650 },
+            { "npc": 5300071, "point": 38, "ms": 3650 },
+            { "npc": 5300072, "point": 39, "ms": 3650 },
+            { "npc": 5300073, "point": 41, "ms": 5700 },
+            { "npc": 5300074, "point": 42, "ms": 5700 },
+            { "npc": 5300075, "point": 43, "ms": 5700 },
+            { "npc": 5300076, "point": 44, "ms": 5700 },
+            { "npc": 5300077, "point": 45, "ms": 5700 },
+            { "npc": 5300078, "point": 46, "ms": 5700 }
           ],
+          "firstTarget": 5300007,
           "lines": [
-            { "chat": 5300026, "by": 5300007, "ms": 0 },
-            { "chat": 5300033, "by": 5300073, "ms": 2500 },
-            { "chat": 5300027, "by": 5300009, "ms": 5000 },
-            { "chat": 5300028, "by": 5300007, "ms": 7500 },
-            { "chat": 5300030, "by": 5300008, "ms": 10000 },
-            { "chat": 5350105, "ms": 16000 },
-            { "chat": 5300032, "ms": 22000 }
+            { "chat": 5300026, "by": 5300007, "ms": 500 },
+            { "chat": 5300028, "by": 5300007, "ms": 2500 },
+            { "chat": 5300020, "ms": 5000 },
+            { "chat": 5300030, "by": 5300008, "ms": 7000 },
+            { "chat": 5300032, "ms": 9800 }
           ]
         }
       ],
-      "winLines": [ { "chat": 5300012 } ]
+      "winLines": [ { "chat": 5300012, "ms": 6000 }, { "chat": 5300013, "ms": 9000 } ]
     }
   }
 }

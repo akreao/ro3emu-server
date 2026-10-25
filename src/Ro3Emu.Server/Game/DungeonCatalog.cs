@@ -119,8 +119,15 @@ public sealed class DungeonCatalog(GameData data, WorldData worldData, MonsterSe
             ? JourneySpawns(config) : Spawns(config, boss, worldData.Map(req.SceneEntry)!);
         return max >= min && waves.Count > 0 ? new Plan(config, multi, boss, mark, min, max, waves)
         {
-            AirWalls = boss == null && reconstructed?.Scripted(req.SceneEntry) is { } scripted ? scripted.AirWalls : [],
+            AirWalls = boss == null ? SceneAirWalls(req.SceneEntry) : [],
         } : null;
+    }
+
+    /// <summary>The air walls a reconstructed scene or story encounter raises, when the scene editor has them all.</summary>
+    private IReadOnlyList<long> SceneAirWalls(long scene)
+    {
+        var walls = reconstructed?.Scripted(scene)?.AirWalls ?? reconstructed?.EncounterFor(scene)?.AirWalls ?? [];
+        return worldData.Map(scene) is { } map && walls.All(map.AirWalls.Contains) ? walls : [];
     }
 
     /// <summary>

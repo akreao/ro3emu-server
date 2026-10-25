@@ -18,23 +18,49 @@ public sealed partial class ReconstructedDungeons
     public sealed record EncounterHit(int Ms, HitShape Shape, float Radius, float Angle, float Length, float Width,
         float Forward, int ShareBp);
 
-    public sealed record EncounterSkill(int Skill, IReadOnlyList<EncounterHit> Hits, int Line);
+    /// <summary>A boss skill with its hits and the line said on its first cast; used from stage <paramref name="FromStage"/>
+    /// (1-based; 0 or 1: the whole fight).</summary>
+    public sealed record EncounterSkill(int Skill, IReadOnlyList<EncounterHit> Hits, int Line, int FromStage = 0)
+    {
+        /// <summary>Ground marks placed during the cast; when there are any, they decide the hits instead of
+        /// <see cref="Hits"/>.</summary>
+        public IReadOnlyList<EncounterMark> Marks { get; init; } = [];
+        public IReadOnlyList<EncounterMove> Moves { get; init; } = [];
+        /// <summary>The displacement effect a move plays (EffectData m_kPoint.m_bMovement).</summary>
+        public int MoveEffect { get; init; }
+    }
 
     /// <summary>A line of ChatConfig said <paramref name="Ms"/> into its stage (or its stage's end); <paramref name="By"/>
     /// names the NPC whose bubble shows a type-2 line.</summary>
     public sealed record EncounterLine(int Chat, int By, int Ms);
 
-    public sealed record EncounterAlly(int NpcId, long Point);
+    /// <summary>A companion of a stage, arriving <paramref name="Ms"/> after the stage starts.</summary>
+    public sealed record EncounterAlly(int NpcId, long Point, int Ms = 0);
 
-    public sealed record EncounterKit(IReadOnlyList<int> Skills, bool Support);
+    /// <summary>A companion's skills; without any it is a bystander that never fights and that the boss leaves alone.</summary>
+    public sealed record EncounterKit(IReadOnlyList<int> Skills, bool Support)
+    {
+        public bool Idle => Skills.Count == 0;
+    }
 
     /// <summary>A stage: its tracker quest, the companions that join, its lines, and (all but the last) when it ends.</summary>
     public sealed record EncounterStage(int Quest, IReadOnlyList<EncounterAlly> Allies, int FirstTarget,
-        IReadOnlyList<EncounterLine> Lines, int EndBossHpPct, int EndMs, IReadOnlyList<EncounterLine> EndLines, int EndDelayMs);
+        IReadOnlyList<EncounterLine> Lines, int EndBossHpPct, int EndMs, IReadOnlyList<EncounterLine> EndLines, int EndDelayMs)
+    {
+        /// <summary>As the stage ends: the screen goes black this long (LC_DunGeon_Actions.BlackScreenMs; 0: not).</summary>
+        public int EndBlackScreenMs { get; init; }
+        /// <summary>As the stage ends: the boss casts this skill on itself <see cref="EndCastMs"/> later (0: none).</summary>
+        public int EndCast { get; init; }
+        public int EndCastMs { get; init; }
+    }
 
     public sealed record Encounter(long Scene, string Name, string Confidence, int Boss, int BossSkillGapMs, int RetargetMs,
         IReadOnlyList<EncounterSkill> BossSkills, IReadOnlyDictionary<int, EncounterKit> Kits,
-        IReadOnlyList<EncounterStage> Stages, IReadOnlyList<EncounterLine> WinLines);
+        IReadOnlyList<EncounterStage> Stages, IReadOnlyList<EncounterLine> WinLines)
+    {
+        /// <summary>Scene-editor air walls raised for the whole run (dungeon var 133 CAirWallList).</summary>
+        public IReadOnlyList<long> AirWalls { get; init; } = [];
+    }
 
     private readonly Dictionary<long, Encounter> _encounters = new();
 
@@ -57,25 +83,35 @@ public sealed partial class ReconstructedDungeons
             long scene = long.Parse(entry.Name, CultureInfo.InvariantCulture);
             var e = entry.Value;
             var skills = e.GetProperty("bossSkills").EnumerateArray().Select(s => new EncounterSkill(Int(s, "skill"),
-                s.GetProperty("hits").EnumerateArray().Select(h => new EncounterHit(Int(h, "ms"),
+                s.TryGetProperty("hits", out var hits) ? hits.EnumerateArray().Select(h => new EncounterHit(Int(h, "ms"),
                     Enum.Parse<HitShape>(h.GetProperty("shape").GetString()!, ignoreCase: true), Float(h, "radius"), Float(h, "angle"),
-                    Float(h, "length"), Float(h, "width"), Float(h, "forward"), Int(h, "share", 10000))).ToArray(),
-                Int(s, "line"))).ToArray();
+                    Float(h, "length"), Float(h, "width"), Float(h, "forward"), Int(h, "share", 10000))).ToArray() : [],
+                Int(s, "line"), Int(s, "fromStage"))
+            { Marks = Marks(s), Moves = Moves(s), MoveEffect = Int(s, "moveEffect") }).ToArray();
             var kits = e.GetProperty("kits").EnumerateObject().ToDictionary(k => int.Parse(k.Name, CultureInfo.InvariantCulture),
                 k => new EncounterKit(k.Value.GetProperty("skills").EnumerateArray().Select(v => v.GetInt32()).ToArray(),
                     k.Value.TryGetProperty("support", out var support) && support.GetBoolean()));
             var stages = e.GetProperty("stages").EnumerateArray().Select(s =>
             {
                 var end = s.TryGetProperty("end", out var x) ? x : default;
+                int End(string name) => end.ValueKind == JsonValueKind.Object ? Int(end, name) : 0;
                 return new EncounterStage(Int(s, "quest"),
-                    s.GetProperty("allies").EnumerateArray().Select(a => new EncounterAlly(Int(a, "npc"), a.GetProperty("point").GetInt64())).ToArray(),
+                    s.GetProperty("allies").EnumerateArray().Select(a => new EncounterAlly(Int(a, "npc"), a.GetProperty("point").GetInt64(), Int(a, "ms"))).ToArray(),
                     Int(s, "firstTarget"), Lines(s, "lines"),
-                    end.ValueKind == JsonValueKind.Object ? Int(end, "bossHpPct") : 0, end.ValueKind == JsonValueKind.Object ? Int(end, "ms") : 0,
-                    Lines(s, "endLines"), Int(s, "endDelayMs"));
+                    End("bossHpPct"), End("ms"),
+                    Lines(s, "endLines"), Int(s, "endDelayMs"))
+                {
+                    EndBlackScreenMs = End("blackScreenMs"),
+                    EndCast = End("cast"),
+                    EndCastMs = End("castMs"),
+                };
             }).ToArray();
             if (stages.Length == 0) throw new InvalidOperationException($"Story encounter {scene} has no stages.");
             _encounters[scene] = new Encounter(scene, e.GetProperty("name").GetString() ?? "", e.GetProperty("confidence").GetString() ?? "",
-                Int(e, "boss"), Int(e, "bossSkillGapMs", 6000), Int(e, "retargetMs", 8000), skills, kits, stages, Lines(e, "winLines"));
+                Int(e, "boss"), Int(e, "bossSkillGapMs", 6000), Int(e, "retargetMs", 8000), skills, kits, stages, Lines(e, "winLines"))
+            {
+                AirWalls = e.TryGetProperty("airWalls", out var walls) ? [.. walls.EnumerateArray().Select(w => w.GetInt64())] : [],
+            };
         }
     }
 }
