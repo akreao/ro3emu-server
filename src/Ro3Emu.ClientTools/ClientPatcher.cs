@@ -200,6 +200,13 @@ public static class ClientPatcher
         }
     }
 
+    /// <summary>Whether the client's login DLL is our rewritten one (it talks to an RO3Emu server).</summary>
+    public static bool IsPatchedForServer(string clientDir)
+    {
+        using var assembly = AssemblyDefinition.ReadAssembly(Path.Combine(ManagedDir(clientDir), "Happyengine.Network.dll"), new ReaderParameters { InMemory = true });
+        return IsMarked(assembly.MainModule);
+    }
+
     internal static bool IsMarked(ModuleDefinition module) => module.GetType(MarkerNamespace, MarkerType) != null;
 
     /// <summary>Adds the marker type (an empty static class) unless the module has it.</summary>
@@ -220,7 +227,7 @@ public static class ClientPatcher
     }
 
     /// <summary>Copies through a temporary name, so the target is either the old file or a complete copy.</summary>
-    private static void CopyAtomically(string source, string target)
+    internal static void CopyAtomically(string source, string target)
     {
         var temp = target + ".tmp";
         File.Copy(source, temp, overwrite: true);
@@ -251,6 +258,8 @@ public static class ClientPatcher
             File.Copy(saved, Path.Combine(managed, file), overwrite: true);
             Console.WriteLine($"restored {file}");
         }
+        // Before the hooks DLL goes: a capture-patched Phonest.Rpc.dll calls into it.
+        CapturePatch.Remove(clientDir);
         foreach (var extra in new[] { HooksFile, LocFile })
         {
             var installed = Path.Combine(managed, extra);
@@ -490,7 +499,7 @@ public static class ClientPatcher
     }
 
     /// <summary>The hooks DLL ships inside this tool (EmbeddedResource); a repo build is the fallback for development.</summary>
-    private static string DefaultHooksDll() => Embedded(HooksFile, "Ro3Emu.ClientHooks");
+    internal static string DefaultHooksDll() => Embedded(HooksFile, "Ro3Emu.ClientHooks");
 
     /// <summary>A client-side DLL embedded in this tool, extracted to a temp file; a repo build is the fallback.</summary>
     private static string Embedded(string fileName, string project)
@@ -577,7 +586,7 @@ public static class ClientPatcher
 
     private static string Shorten(string s, int max) => s.Length > max ? s[..max] + "…" : s;
 
-    private static string ManagedDir(string clientDir)
+    internal static string ManagedDir(string clientDir)
     {
         var managed = Path.Combine(clientDir, "ro3_Data", "Managed");
         if (!File.Exists(Path.Combine(clientDir, "ro3.exe")) || !Directory.Exists(managed))
@@ -585,5 +594,5 @@ public static class ClientPatcher
         return managed;
     }
 
-    private static string BackupDir(string clientDir) => Path.Combine(clientDir, "ro3emu-backup");
+    internal static string BackupDir(string clientDir) => Path.Combine(clientDir, "ro3emu-backup");
 }
