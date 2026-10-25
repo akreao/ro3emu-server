@@ -27,6 +27,9 @@ client: tests of rules use an invented data set, and tests of real content are s
 dotnet test tests/Ro3Emu.Tests/Ro3Emu.Tests.csproj -c Release --filter "Category!=Slow"
 ```
 
+That is the whole suite. While you work, `tools/test-changed.sh` (bash, or Git Bash on Windows) runs only the tests
+of what you changed and leaves the rest to CI ([running tests while you work](docs/guide/testing.md#running-tests-while-you-work)).
+
 Compiler and analyzer warnings fail the build (`Directory.Build.props`) in every project. `Ro3Emu.ClientHooks` and
 `Ro3Emu.Loc` keep a few named rules as warnings (`WarningsNotAsErrors` in their project files, with the reason); they
 build only against a local client, so CI does not compile them. CI checks the C# layout set in `.editorconfig`.

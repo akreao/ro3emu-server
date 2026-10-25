@@ -32,6 +32,9 @@
   <ItemGroup>
     <!-- The synthetic game data (SyntheticData.Dir, docs/guide/testing.md): hand-written, every value invented. -->
     <None Include="Fixtures\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Two test classes per core: most tests wait on game time (ticks, cooldowns, casts) and leave the cores idle
+         (docs/guide/testing.md). -->
+    <None Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

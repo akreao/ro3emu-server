@@ -7,10 +7,16 @@ Rules for anyone changing this repository, people and coding agents alike. [CONT
 
 ```bash
 dotnet build src/Ro3Emu.Server/Ro3Emu.Server.csproj -c Release
-dotnet test tests/Ro3Emu.Tests -c Release --filter "Category!=Slow"
+tools/test-changed.sh
 dotnet format whitespace --folder
 ```
 
+- `tools/test-changed.sh` builds and runs the tests of what you changed since `origin/main`: the test classes of
+  the files you touched and of the types they declare, or the CI set when a change can reach every test. Pass
+  `--no-build` when you just built. Don't run the whole suite for each change: CI runs every test on Linux and
+  Windows for each push. Run it (`dotnet test tests/Ro3Emu.Tests -c Release --filter "Category!=Slow"`, ~7.5 min with
+  client data) when a change reaches most of the server, such as the game loop, sessions or persistence.
+  [Running tests while you work](docs/guide/testing.md#running-tests-while-you-work) has the details.
 - Warnings fail the build (`Directory.Build.props`). Fix the cause; don't add `#pragma warning disable`, `NoWarn` or
   a `!` that only silences the compiler.
 - Package versions live in `Directory.Packages.props`; a `PackageReference` has no `Version`.
