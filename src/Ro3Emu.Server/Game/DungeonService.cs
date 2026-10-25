@@ -501,7 +501,9 @@ public sealed partial class DungeonService
             v.Vi64.Add(step.All ? [a.StepSeen.Count, step.Complete.Count] : [step.Goal.Done, step.Goal.Total]);
             return v;
         }
-        v.Vi64.Add([Math.Clamp(a.Killed.Count - a.WaveBase, 0, size), size]);
+        // A story encounter's stage shows done as it ends (Genesis capture: var 10003 [1,1] with the black screen).
+        int done = a.Encounter is { Ending: true, Done: false } ? size : Math.Clamp(a.Killed.Count - a.WaveBase, 0, size);
+        v.Vi64.Add([done, size]);
         return v;
     }
 
@@ -684,13 +686,17 @@ public sealed partial class DungeonService
     /// A spawned monster's line (a scripted fight's "say"). Genesis capture 2026-10-25: SYSTEM_BOARDCAST_MSG_NTF 1022 from
     /// MsgSource_npc with the monster's uid and CHAT_PARAM_NPC_NAME its NPCConfig id, about 850 ms after it appears.
     /// </summary>
-    private Task SpawnSayAsync(Attempt a, MonsterUnit monster, int chat)
+    private Task SpawnSayAsync(Attempt a, MonsterUnit monster, int chat) =>
+        a.Settled || a.Room.Closed || monster.Dead || !a.Room.Monsters.Contains(monster) ? Task.CompletedTask : NpcSayAsync(a, monster, chat);
+
+    /// <summary>A monster's ChatConfig line over its head, as Genesis sends one: 1022 SYSTEM_BOARDCAST_MSG_NTF from
+    /// MsgSource_npc with the speaker's uid and CHAT_PARAM_NPC_NAME its NPCConfig id.</summary>
+    private Task NpcSayAsync(Attempt a, MonsterUnit speaker, int chat)
     {
-        if (a.Settled || a.Room.Closed || monster.Dead || !a.Room.Monsters.Contains(monster)) return Task.CompletedTask;
-        var ntf = new SystemBoardCastMsgNtf { Source = MsgSource.Npc, ChatId = chat, PlayerId = monster.Uid };
+        var ntf = new SystemBoardCastMsgNtf { Source = MsgSource.Npc, ChatId = chat, PlayerId = speaker.Uid };
         ntf.ParamList[1] = new ChatParameter
         {
-            Params = { monster.Template.NpcId.ToString(System.Globalization.CultureInfo.InvariantCulture) },
+            Params = { speaker.Template.NpcId.ToString(System.Globalization.CultureInfo.InvariantCulture) },
             Type = ChatParamType.ChatParamNpcName,
         };
         return BroadcastAsync(a, SystemBroadcast, ntf);

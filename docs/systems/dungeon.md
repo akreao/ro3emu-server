@@ -172,24 +172,29 @@ Story encounters (`Reconstructed/story-encounters.json`, same switch; `DungeonSe
   encounter scripts, the boss behaviour trees (`_iAISpecial` MainStory_HuWang etc.; only MainStory_MuShi ships) and
   any hit shape (`_kRange` is empty). Every rotation, hit area, hit time, stage trigger and line timing in the file is
   chosen and says so.
-- First encounter: Payon Forest Eddga (1022001). Stage 1 "Cover Boya and Wule": the fighting Wule and Boya (5300086/87)
-  are at points 21 and 23 and Eddga opens on Boya. At 60% boss HP or after 45 s, the flare lines play and stage 2
-  "Join the Adventurers" brings two parties of six story adventurers (points 34-39 and 41-46) with their class kits.
-  Eddga casts his own kit (flame claw cone, jump impact, fire breath strip, ground flames, roar) between swings,
-  hitting players and companions in the area fixed at the cast start; he retargets every 8 s (a player weighs twice a
-  companion), and the swordman's Provoke pulls him.
+- First encounter: Payon Forest Eddga (1022001), retimed from one Genesis run (traffic capture 2026-10-25; Genesis is a
+  private server that differs from the official beta, and the entry's `source` says which values came from it). Air
+  wall 32 is up for the whole run. Stage 1 "Cover Boya and Wule": the non-fighting Boya and Wule (5300080/81, camp 3,
+  no skills) stand at points 23 and 21 and only talk; the boss leaves them alone. After 15 s the screen goes black for
+  a second (`LC_DunGeon_Actions.BlackScreenMs`), the quest shows done (var 10003 [1,1]) and a second later Eddga casts
+  5300901 on himself (its `_kBuff1`, buff 5301001). Stage 2 "Join the Adventurers" starts 2.5 s later: the swordman
+  and priest at points 34-35, the mage, hunter, thief and merchant at 36-39 3.65 s in, and the six '2' adventurers at
+  41-46 5.7 s in. Eddga casts the skills Genesis showed (jump impact and a second swing in both stages; ground flames
+  and 5300801 from stage 2) between swings, hitting players and companions in the area fixed at the cast start; he
+  retargets every 8 s (a player weighs twice a companion), and the swordman's Provoke pulls him. His closing lines
+  come 6 s and 9 s after the win.
 - Companions are camp-1 monsters with scripted targeting: their normal swing is the kit's first damaging row
   (`MonsterService.FightMonster`), the rest is cast when ready (`CombatService.Allies`, same damage formula as other
   hits). The priest follows tree 10803: Blessing and Increase AGI, then Sanctuary when three are below 95% HP, else
   Heal. Companions stop at 1 HP; a companion's killing blow settles as the first loaded player's kill.
-- Lines go out as 30404 EventType 6: `ShowShoutingChatBubble(chat, speaker uid)` for type-2 bubbles, `Shouting(chat)`
-  otherwise. Unverified live: whether the bubble's second argument is the speaker, and whether a cast shows a
-  telegraph. `!encounter` shows the stage and HPs; `!encounter next` starts the next stage (test aid).
-- Eddga cannot fall in stage 1: hits stop at 60% of his HP until stage 2 starts (`MonsterUnit.HpFloor`). His HP
+- Type-2 (Bubbling) lines go out as Genesis sends them: 1022 from MsgSource_npc with the speaker's uid and
+  CHAT_PARAM_NPC_NAME its NPC id. Other lines are 30404 EventType 6 `Shouting(chat)`. Unverified live: whether a cast
+  shows a telegraph. `!encounter` shows the stage and HPs; `!encounter next` starts the next stage (test aid).
+- Eddga cannot fall in stage 1: hits stop at 1 HP until stage 2 starts (`MonsterUnit.HpFloor`). His HP
   is the client's again (`soloTuning` hp 10000; attack keeps the solo 1500): the twelve adventurers take about 300 HP/s
   off him, so stage 2 lasts about a minute.
-- `DungeonTests.Encounter` checks every named row, the hit shapes, and the Eddga run: companions, lines, both stages
-  and a companion kill settling the win.
+- `DungeonTests.Encounter` checks every named row, the hit shapes, and the Eddga run as Genesis played it: bystanders,
+  bubbles, the stage-1 end, the staggered arrivals and a companion kill settling the win.
 
 Reconstructed scripted scenes (`Reconstructed/scripted-scenes.json`, same switch):
 

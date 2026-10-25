@@ -11,7 +11,7 @@ namespace Ro3Emu.Tests;
 public sealed partial class DungeonTests
 {
     private const long Eddga = 1022001;
-    private const int EddgaNpc = 5300001, Wule = 5300086, Boya = 5300087;
+    private const int EddgaNpc = 5300001, Wule = 5300081, Boya = 5300080;
 
     [ClientDataFact]
     public void EveryStoryEncounterNamesClientRows()
@@ -73,7 +73,7 @@ public sealed partial class DungeonTests
     }
 
     [ClientDataFact]
-    public async Task EddgaFightBringsItsCompanionsLinesAndStages()
+    public async Task EddgaFightPlaysAsTheGenesisCaptureShowsIt()
     {
         await using var alice = await InWorld("Alice");
         await Gm(alice, "!lvl 60"); // Eddga's skills should not end the run before the companions do their part
@@ -81,48 +81,53 @@ public sealed partial class DungeonTests
         Assert.Equal(0, await Enter(alice, new EnterDungeonReq { SceneEntry = Eddga }));
         long instance = await Load(alice, Eddga);
         var boss = await BossIn(instance, EddgaNpc);
+        // 830 x 26.052 = 21623.16: Genesis showed 21624 (rounded up), this server rounds to the nearest.
+        Assert.InRange(boss.Template.MaxHp, 21623, 21624);
         var boya = await BossIn(instance, Boya);
-        var wule = await BossIn(instance, Wule);
-        Assert.True(boya.ScriptedTargeting && wule.ScriptedTargeting && boss.ScriptedTargeting);
-        // Eddga cannot fall in stage 1: hits stop at 60% until the adventurers arrive.
-        Assert.Equal(boss.Template.MaxHp * 60 / 100, boss.HpFloor);
-        Assert.Equal(boss.HpFloor, boss.HpAfter(boss.HpFloor + 10, 1_000_000));
-
-        // Stage 1: the tracker shows "Cover Boya and Wule"; Boya's first line is her own bubble.
+        await BossIn(instance, Wule);
+        Assert.Equal(1, boss.HpFloor); // he cannot fall before the adventurers arrive
         await Next(alice, DungeonService.BaseInfo, DungeonBaseInfoNotify.Parser,
-            info => info.Vars.Any(v => v.VarId == 10001 && v.Vi64.LastOrDefault() == 1));
-        var bubble = await Next(alice, DungeonService.Event, DungeonEventNotify.Parser, e => e.CliFuncname == "ShowShoutingChatBubble");
-        Assert.Equal(5300018, bubble.Params[0].IntParams.Single());
-        Assert.Equal(boya.Uid, bubble.Params[1].IntParams.Single());
+            info => info.Vars.Any(v => v.VarId == DungeonService.AirWallVar && v.Vi64.SequenceEqual([32L])));
+
+        // Stage 1 "Cover Boya and Wule": the narrator's line, then Boya's bubble (1022 with her uid).
         await Next(alice, DungeonService.Event, DungeonEventNotify.Parser,
             e => e.CliFuncname == "Shouting" && e.Params[0].IntParams.Single() == 5300019);
-        // Wule and Boya fight Eddga with their own swings.
-        await Next(alice, CombatService.SkillHit, SkillHitInfo.Parser,
-            hit => (hit.SrcID == boya.Uid || hit.SrcID == wule.Uid) && hit.Dsts.Any(d => d.DstID == boss.Uid && d.Damage > 0));
+        await Next(alice, 1022, SystemBoardCastMsgNtf.Parser, m => m.ChatId == 5300018 && m.PlayerId == boya.Uid);
 
-        // Stage 2: the flare brings the two parties of six; the tracker moves on.
-        Assert.True(await Service<GameLoop>().InvokeAsync(() =>
-            Service<DungeonService>().SkipEncounterStageAsync(Session(alice).DungeonAttempt!)));
+        // The stage ends at 15 s (moved forward here): black screen, quest done, Eddga's self-buff a second later.
+        await OnLoop(() => { Session(alice).DungeonAttempt!.Encounter!.StageStartMs -= 15_000; return Task.CompletedTask; });
+        var dark = await Next(alice, DungeonService.Event, DungeonEventNotify.Parser, e => e.CliFuncname == "BlackScreenMs");
+        Assert.Equal(1000, dark.Params[0].IntParams.Single());
+        await Next(alice, DungeonService.BaseInfo, DungeonBaseInfoNotify.Parser,
+            info => info.Vars.Any(v => v.VarId == 10003 && v.Vi64.SequenceEqual([1L, 1L])));
+        await Next(alice, BuffService.BuffUpdate, BuffUpdateNotify.Parser,
+            b => b.UnitId == boss.Uid && b.Buffs.Any(x => x.ConfigId == 5301001));
+
+        // Stage 2: the swordman and priest come with it, the other ten after them.
         await Next(alice, DungeonService.BaseInfo, DungeonBaseInfoNotify.Parser,
             info => info.Vars.Any(v => v.VarId == 10001 && v.Vi64.LastOrDefault() == 2));
-        var party = await Service<GameLoop>().InvokeAsync(() => Task.FromResult(Service<World>().AllUnits().OfType<MonsterUnit>()
-            .Where(m => m.InstanceId == instance && m.Template.NpcId is >= 5300007 and <= 5300009 or >= 5300070 and <= 5300078)
-            .ToArray()));
-        Assert.Equal(12, party.Length);
         Assert.Equal(0, boss.HpFloor); // the last stage can be won
+        Assert.Equal(2, (await Party(instance)).Length);
+        await Next(alice, 1022, SystemBoardCastMsgNtf.Parser, m => m.ChatId == 5300030); // the mage's line, 7 s in
+        var party = await Party(instance);
+        Assert.Equal(12, party.Length);
         var uids = party.Select(m => m.Uid).ToHashSet();
         await Next(alice, CombatService.SkillHit, SkillHitInfo.Parser,
             hit => uids.Contains(hit.SrcID) && hit.Dsts.Any(d => d.DstID == boss.Uid && d.Damage > 0));
 
-        // A companion's last hit settles the run as the player's win.
+        // A companion's last hit settles the run as the player's win; the closing lines come 6 s and 9 s later.
         await OnLoop(() => { boss.Hp = 1; return Task.CompletedTask; });
         Assert.Equal((DungeonRes)1, (await Next(alice, DungeonService.Result, DungeonResNotify.Parser)).Res);
         Assert.True(boss.Dead);
         await Next(alice, DungeonService.Event, DungeonEventNotify.Parser,
             e => e.CliFuncname == "Shouting" && e.Params[0].IntParams.Single() == 5300012);
 
-        // The won story run sends the player back out a moment after its closing line, without a countdown (Genesis).
+        // The won story run sends the player back out about 3 s after its last line, without a countdown (Genesis).
         Assert.Equal(0, (await Next(alice, DungeonService.Leave, LeaveDungeonRsp.Parser)).Result);
         await Next(alice, MsgId.SwitchSceneLine, SwitchSceneLineResp.Parser, m => m.SceneEntry != Eddga); // back where the run began
     }
+
+    private Task<MonsterUnit[]> Party(long instance) => Service<GameLoop>().InvokeAsync(() => Task.FromResult(Service<World>().AllUnits()
+        .OfType<MonsterUnit>().Where(m => m.InstanceId == instance && m.Template.NpcId is >= 5300007 and <= 5300009 or >= 5300070 and <= 5300078)
+        .ToArray()));
 }

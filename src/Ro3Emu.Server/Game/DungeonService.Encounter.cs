@@ -12,7 +12,7 @@ namespace Ro3Emu.Server.Game;
 /// the scene's ordinary plan: the plan still spawns the boss and settles the run on its death. This adds the boss's own
 /// skill kit with chosen hit areas, the allied companions (camp-1 story templates with their SkillConfig kits) who fight
 /// beside the player, the stages that move the quest tracker, and the scene's ChatConfig lines through the client's
-/// dungeon actions (30404 DungeonEventInvokeClientFunc: LC_DunGeon_Actions.Shouting / ShowShoutingChatBubble).
+/// dungeon actions (30404 DungeonEventInvokeClientFunc: LC_DunGeon_Actions.Shouting) and 1022 bubbles over the speaker.
 /// Every rotation, target choice and timing here is (inferred): the server's scripts are not in the client.
 /// </summary>
 public sealed partial class DungeonService
@@ -103,15 +103,25 @@ public sealed partial class DungeonService
         bool more = run.Stage + 1 < run.Def.Stages.Count;
         run.Boss.HpFloor = more && stage.EndBossHpPct > 0 ? Math.Max(1, run.Boss.Template.MaxHp * stage.EndBossHpPct / 100)
             : more ? 1 : 0;
-        foreach (var spec in stage.Allies)
+        int index = run.Stage;
+        foreach (var spec in stage.Allies.Where(x => x.Ms > 0))
+            _loop.ScheduleLegacy(TimeSpan.FromMilliseconds(spec.Ms), () => run.Done || run.Stage != index || a.Settled || a.Room.Closed
+                ? Task.CompletedTask : JoinAllyAsync(a, run, stage, spec));
+        foreach (var spec in stage.Allies.Where(x => x.Ms <= 0))
         {
             if (a.Settled || a.Room.Closed) return;
-            if (await SpawnAllyAsync(a, run, spec) is { } ally && ally.Unit.Template.NpcId == stage.FirstTarget)
-                _monsters.Engage(run.Boss, ally.Unit);
+            await JoinAllyAsync(a, run, stage, spec);
         }
         run.NextRetargetMs = MonsterService.NowMs + run.Def.RetargetMs;
         if (run.Stage > 0) await BroadcastAsync(a, BaseInfo, Snapshot(a)); // the tracker moves to the next quest
         SayLines(a, run, stage.Lines);
+    }
+
+    /// <summary>A companion arrives; the stage's first target draws the boss at once.</summary>
+    private async Task JoinAllyAsync(Attempt a, EncounterRun run, EncounterStage stage, EncounterAlly spec)
+    {
+        if (await SpawnAllyAsync(a, run, spec) is { } ally && ally.Unit.Template.NpcId == stage.FirstTarget)
+            _monsters.Engage(run.Boss, ally.Unit);
     }
 
     private async Task<AllyState?> SpawnAllyAsync(Attempt a, EncounterRun run, EncounterAlly spec)
@@ -157,7 +167,7 @@ public sealed partial class DungeonService
                 || stage.EndMs > 0 && now - run.StageStartMs >= stage.EndMs))
         {
             run.Ending = true;
-            SayLines(a, run, stage.EndLines);
+            await EndStageAsync(a, run, stage);
             _loop.ScheduleLegacy(TimeSpan.FromMilliseconds(stage.EndDelayMs), async () =>
             {
                 if (run.Done || a.Settled || a.Room.Closed || boss.Dead) return;
@@ -167,6 +177,41 @@ public sealed partial class DungeonService
         }
         await TickBossAsync(a, run, now);
         foreach (var ally in run.Allies.ToArray()) await TickAllyAsync(a, run, ally, now);
+    }
+
+    /// <summary>
+    /// A stage's end: its lines, its quest shown done (var 10003), the black screen and the boss's own cast, as the Genesis
+    /// capture of Payon Forest shows them (BlackScreenMs 1000, then Eddga's 5300901 on himself a second later).
+    /// </summary>
+    private async Task EndStageAsync(Attempt a, EncounterRun run, EncounterStage stage)
+    {
+        SayLines(a, run, stage.EndLines);
+        await BroadcastAsync(a, BaseInfo, Snapshot(a));
+        if (stage.EndBlackScreenMs > 0) await ClientFuncAsync(a, "BlackScreenMs", stage.EndBlackScreenMs);
+        if (stage.EndCast != 0)
+            _loop.ScheduleLegacy(TimeSpan.FromMilliseconds(stage.EndCastMs), () => run.Done || a.Settled || a.Room.Closed || run.Boss.Dead
+                ? Task.CompletedTask : CastBossSelfAsync(run, stage.EndCast));
+    }
+
+    /// <summary>The boss casts a skill on itself; its _kBuff1 buffs land on it at the timeline's hit mark.</summary>
+    private async Task CastBossSelfAsync(EncounterRun run, int skill)
+    {
+        if (_data.Row("SkillConfig", skill) is not { } row) return;
+        var boss = run.Boss;
+        long now = MonsterService.NowMs;
+        int actionMs = (int)Math.Max(500, new SkillConfig(row).ActionTime);
+        if (boss.Moving) { boss.Advance(now); boss.Moving = false; }
+        boss.BusyUntilMs = now + actionMs;
+        boss.NextSwingMs = Math.Max(boss.NextSwingMs, boss.BusyUntilMs + 300);
+        run.BossNextCastMs = Math.Max(run.BossNextCastMs, boss.BusyUntilMs + run.Def.BossSkillGapMs);
+        long castId = Interlocked.Increment(ref _encounterCasts);
+        await _combat.SendMonsterTimelineAsync(boss, new UseInSkillInfo
+        {
+            SrcID = boss.Uid, SkillID = skill, TargetId = boss.Uid, TargetPos = boss.Pos, Face = boss.Face, SessionId = castId,
+            SkillMs = actionMs, StartTime = now,
+        }, highLevel: true);
+        _loop.ScheduleLegacy(TimeSpan.FromMilliseconds(HitMs(row, actionMs)), () => boss.Dead || run.Done
+            ? Task.CompletedTask : _combat.MonsterBuffsAsync(boss, row, [], [boss]));
     }
 
     /// <summary>TEST AID, not the original: start the next stage now (its end lines and delay are skipped).</summary>
@@ -200,7 +245,8 @@ public sealed partial class DungeonService
         var boss = run.Boss;
         if (now < boss.BusyUntilMs) return;
         var players = Present(a).Where(p => p.Role != null && !p.Dead && !p.SceneLoading && p.WorldScene == boss.WorldScene).ToArray();
-        var allies = run.Allies.Select(s => s.Unit).Where(u => !u.Dead && MonsterService.Distance(boss.X, boss.Z, u.X, u.Z) <= AllyReach).ToArray();
+        var allies = run.Allies.Where(s => !s.Kit.Idle).Select(s => s.Unit)
+            .Where(u => !u.Dead && MonsterService.Distance(boss.X, boss.Z, u.X, u.Z) <= AllyReach).ToArray();
         bool targetLost = boss.Target is { } t ? t.Dead || !players.Contains(t) : boss.MonsterTarget is not { Dead: false };
         if (now >= run.NextRetargetMs || targetLost)
         {
@@ -227,7 +273,8 @@ public sealed partial class DungeonService
         float distance = MonsterService.Distance(boss.X, boss.Z, at.X, at.Z);
         foreach (var skill in run.Def.BossSkills)
         {
-            if (now < run.BossReady.GetValueOrDefault(skill.Skill) || _data.Row("SkillConfig", skill.Skill) is not { } row) continue;
+            if (skill.FromStage > run.Stage + 1 || now < run.BossReady.GetValueOrDefault(skill.Skill)
+                || _data.Row("SkillConfig", skill.Skill) is not { } row) continue;
             if (distance > Math.Max(4f, GameData.Int(row, "_iDistanceMax") / 100f)) continue;
             await CastBossSkillAsync(a, run, skill, row, at, now);
             return;
@@ -261,7 +308,7 @@ public sealed partial class DungeonService
                 var players = Present(a).Where(p => p.Role != null && !p.Dead && !p.SceneLoading && p.WorldScene == boss.WorldScene
                     && InArea(hit, origin, p.Position.X, p.Position.Z)).ToArray();
                 if (players.Length > 0) await _combat.MonsterSkillHitAsync(boss, row, players, boss.Uid, session: castId, scaleBp: hit.ShareBp);
-                foreach (var ally in run.Allies.Select(s => s.Unit).Where(u => !u.Dead && InArea(hit, origin, u.X, u.Z)).ToArray())
+                foreach (var ally in run.Allies.Where(s => !s.Kit.Idle).Select(s => s.Unit).Where(u => !u.Dead && InArea(hit, origin, u.X, u.Z)).ToArray())
                     await _combat.MonsterDamagesMonsterAsync(boss, ally, row, castId, hit.ShareBp);
             });
     }
@@ -296,7 +343,7 @@ public sealed partial class DungeonService
     private async Task TickAllyAsync(Attempt a, EncounterRun run, AllyState ally, long now)
     {
         var unit = ally.Unit;
-        if (unit.Dead || now < unit.BusyUntilMs) return;
+        if (ally.Kit.Idle || unit.Dead || now < unit.BusyUntilMs) return;
         if (ally.Kit.Support)
         {
             await TickSupportAsync(a, run, ally, now);
@@ -436,10 +483,10 @@ public sealed partial class DungeonService
     // ---- lines ----
 
     /// <summary>
-    /// ChatConfig lines through 30404 DungeonEventInvokeClientFunc. Type 2 (enum_SystemMessageType Bubbling) needs a
-    /// speaker: LC_DunGeon_Actions.ShowShoutingChatBubble(chatId, unitId) -> LC_SystemMessageHelper.ShowChatBubble; the
-    /// others (7 Secretary, the named portrait panel; 16; 47) go through Shouting(chatId) -> MessagePush. Reading the
-    /// bubble's second argument as the speaker's entity id is (inferred).
+    /// ChatConfig lines. Type 2 (enum_SystemMessageType Bubbling) needs a speaker and goes out as 1022 from MsgSource_npc
+    /// with the speaker's uid (Genesis capture 2026-10-25: Wule's, Boya's and the adventurers' lines, see NpcSayAsync); the
+    /// others (7 Secretary, the named portrait panel; 16; 47) go through 30404 DungeonEventInvokeClientFunc
+    /// LC_DunGeon_Actions.Shouting(chatId) -> MessagePush.
     /// </summary>
     private void SayLines(Attempt a, EncounterRun run, IReadOnlyList<EncounterLine> lines)
     {
@@ -457,24 +504,30 @@ public sealed partial class DungeonService
         var speaker = line.By == 0 ? null
             : line.By == run.Boss.Template.NpcId ? run.Boss
             : run.Allies.Select(s => s.Unit).FirstOrDefault(u => u.Template.NpcId == line.By && !u.Dead);
-        bool bubble = new ChatConfig(chat).Type == 2;
-        if (bubble && speaker == null) return; // its speaker is not in the fight
-        var call = new DungeonEventNotify
+        if (new ChatConfig(chat).Type == 2)
         {
-            DungeonEntry = a.Plan.SceneEntry, EventType = (DungeonEventType)6, StageNum = a.Wave + 1, LevelNum = 1,
-            CliFuncname = bubble ? "ShowShoutingChatBubble" : "Shouting",
-            Params = { new EventParams { IntParams = { line.Chat } } },
-        };
-        if (bubble) call.Params.Add(new EventParams { IntParams = { speaker!.Uid } });
-        await BroadcastAsync(a, Event, call);
+            if (speaker != null) await NpcSayAsync(a, speaker, line.Chat); // else its speaker is not in the fight
+            return;
+        }
+        await ClientFuncAsync(a, "Shouting", line.Chat);
     }
 
-    /// <summary>The run ends with its attempt; a won fight says its closing lines first.</summary>
-    private async Task EndEncounterAsync(Attempt a, bool won)
+    /// <summary>30404 DungeonEventInvokeClientFunc (event type 6): runs LC_DunGeon_Actions.<paramref name="name"/>(value).</summary>
+    private Task ClientFuncAsync(Attempt a, string name, long value) => BroadcastAsync(a, Event, new DungeonEventNotify
     {
-        if (a.Encounter is not { Done: false } run) return;
+        DungeonEntry = a.Plan.SceneEntry, EventType = (DungeonEventType)6, StageNum = a.Wave + 1, LevelNum = 1,
+        CliFuncname = name, Params = { new EventParams { IntParams = { value } } },
+    });
+
+    /// <summary>The run ends with its attempt; a won fight says its closing lines, each at its time after the win.</summary>
+    private Task EndEncounterAsync(Attempt a, bool won)
+    {
+        if (a.Encounter is not { Done: false } run) return Task.CompletedTask;
         run.Done = true;
         run.Boss.HpFloor = 0;
-        if (won) foreach (var line in run.Def.WinLines) await SayAsync(a, run, line);
+        if (!won) return Task.CompletedTask;
+        foreach (var line in run.Def.WinLines)
+            _loop.ScheduleLegacy(TimeSpan.FromMilliseconds(line.Ms), () => a.Room.Closed ? Task.CompletedTask : SayAsync(a, run, line));
+        return Task.CompletedTask;
     }
 }
