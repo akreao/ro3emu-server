@@ -8,6 +8,9 @@ if (args.Length < 2)
           play    <client dir> <server url>     patch for that server (if needed) and start the game
           patch   <client dir> <server url> [gate_rsa_public.pem] [Ro3Emu.ClientHooks.dll] [--verbose]
           restore <client dir>                  put the original DLLs back
+          capture <client dir> [--off] [--no-launch] [Ro3Emu.ClientHooks.dll]
+                                                record the client's decrypted traffic to <client dir>\Logs\capture-*.jsonl
+                                                and start the game; the server it talks to is unchanged
           launch  <client dir> [ro3.exe args...]
           release <client dir> <server url> <gate_rsa_public.pem> <repo dir> <version> [channel] [zstd level]
                                                 publish the client patched for that server for Ro3Emu.Launcher
@@ -57,6 +60,8 @@ try
         case "restore":
             ClientPatcher.Restore(args[1]);
             return 0;
+        case "capture":
+            return Capture(args[1..]);
         case "launch":
             return Launcher.Launch(args[1], args[2..]);
         default:
@@ -67,6 +72,23 @@ catch (Exception e)
 {
     Console.Error.WriteLine($"error: {e.Message}");
     return 2;
+}
+
+// Capture-only patch (CapturePatch): nothing points the client at another server, so it plays where it always does.
+static int Capture(string[] args)
+{
+    string clientDir = args[0];
+    var rest = args[1..];
+    if (rest.Contains("--off"))
+    {
+        if (!CapturePatch.Remove(clientDir)) Console.WriteLine("no capture hook installed");
+        return 0;
+    }
+    string? hooks = rest.FirstOrDefault(a => !a.StartsWith("--", StringComparison.Ordinal));
+    if (ClientPatcher.IsPatchedForServer(clientDir))
+        Console.WriteLine("note: this client is patched for an RO3Emu server and still talks to it; run restore first to capture the original server");
+    CapturePatch.Install(clientDir, hooks);
+    return rest.Contains("--no-launch") ? 0 : Launcher.Launch(clientDir, []);
 }
 
 // The RO3 client has no character deletion (its role screen button is hidden); the server offers it over HTTP.
