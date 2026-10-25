@@ -1,6 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using Romsg;
 using Ro3Emu.Server.Data;
+using Ro3Emu.Server.Data.Config;
 using Ro3Emu.Server.Game;
 using Ro3Emu.Server.Maps;
 using static Ro3Emu.Server.Game.ReconstructedDungeons;
@@ -51,6 +52,18 @@ public sealed partial class DungeonTests
                 }
             }
             Assert.All(lines, l => Assert.True(data.Row("ChatConfig", l.Chat) != null, $"chat {l.Chat}"));
+            foreach (var skill in e.BossSkills)
+            {
+                Assert.True(skill.Hits.Count > 0 || skill.Marks.Count > 0, $"{skill.Skill} hits nothing");
+                foreach (var (mark, i) in skill.Marks.Select((m, i) => (m, i)))
+                {
+                    Assert.True(EffectData.Warning(data, mark.Warn) is { DurationMs: > 0 }, $"{skill.Skill}: warning {mark.Warn}");
+                    Assert.True(mark.Show == 0 || EffectData.Exists(data, mark.Show), $"{skill.Skill}: effect {mark.Show}");
+                    Assert.True(mark.Around < i, $"{skill.Skill}: mark {i} is placed around a later mark");
+                }
+                Assert.All(skill.Moves, m => Assert.InRange(m.To, 0, skill.Marks.Count - 1));
+                Assert.True(skill.Moves.Count == 0 || EffectData.MovementMs(data, skill.MoveEffect) > 0, $"{skill.Skill}: move effect");
+            }
         }
     }
 
@@ -130,4 +143,40 @@ public sealed partial class DungeonTests
     private Task<MonsterUnit[]> Party(long instance) => Service<GameLoop>().InvokeAsync(() => Task.FromResult(Service<World>().AllUnits()
         .OfType<MonsterUnit>().Where(m => m.InstanceId == instance && m.Template.NpcId is >= 5300007 and <= 5300009 or >= 5300070 and <= 5300078)
         .ToArray()));
+
+    [ClientDataFact]
+    public async Task EddgaMarksTheGroundWhereHisSkillsLand()
+    {
+        await using var alice = await InWorld("Alice");
+        await Gm(alice, "!lvl 60");
+        await Gm(alice, "!quest accept 10102200");
+        Assert.Equal(0, await Enter(alice, new EnterDungeonReq { SceneEntry = Eddga }));
+        long instance = await Load(alice, Eddga);
+        var boss = await BossIn(instance, EddgaNpc);
+        var dungeons = Service<DungeonService>();
+
+        // The jump: an 8 m ring 14.4 m ahead (Genesis), then eight rings 15 m around it that erupt a second later.
+        Assert.True(await Service<GameLoop>().InvokeAsync(() => dungeons.CastEncounterSkillAsync(Session(alice).DungeonAttempt!, 5300501)));
+        var centre = await Next(alice, CombatService.SkillEffectHigh, SkillEffectDisplayNotify.Parser, e => e.EffectId == 5300504);
+        Assert.Equal(6, centre.EffectType);
+        Assert.Equal(boss.Uid, centre.SourceId);
+        Assert.InRange(MonsterService.Distance(boss.X, boss.Z, centre.TargetPos.X, centre.TargetPos.Z), 14.3f, 14.5f);
+        var ring = await Next(alice, CombatService.SkillEffectHigh, SkillEffectDisplayNotify.Parser, e => e.EffectId == 5300505);
+        Assert.InRange(MonsterService.Distance(centre.TargetPos.X, centre.TargetPos.Z, ring.TargetPos.X, ring.TargetPos.Z), 14.9f, 15.1f);
+        await Next(alice, CombatService.SkillEffectHigh, SkillEffectDisplayNotify.Parser, e => e.EffectId == 5300513 && e.SourceId == 0);
+
+        // 801 in stage 2: a strip at a fighter and a dash onto it, then the ring with its eight strips.
+        Assert.True(await Service<GameLoop>().InvokeAsync(() => dungeons.SkipEncounterStageAsync(Session(alice).DungeonAttempt!)));
+        Assert.True(await Service<GameLoop>().InvokeAsync(() => dungeons.CastEncounterSkillAsync(Session(alice).DungeonAttempt!, 5300801)));
+        await Next(alice, CombatService.SkillEffectHigh, SkillEffectDisplayNotify.Parser, e => e.EffectId == 5300841);
+        var dash = await Next(alice, CombatService.SkillMove, SkillStartMoveNotify.Parser, m => m.SkillConfigId == 5300801);
+        Assert.Equal(5300851, dash.EffectId);
+        Assert.Equal(600, dash.MoveTimeMs);
+        var big = await Next(alice, CombatService.SkillEffectHigh, SkillEffectDisplayNotify.Parser, e => e.EffectId == 5300844);
+        for (int i = 0; i < 8; i++)
+        {
+            var strip = await Next(alice, CombatService.SkillEffectHigh, SkillEffectDisplayNotify.Parser, e => e.EffectId == 5300843);
+            Assert.InRange(MonsterService.Distance(big.TargetPos.X, big.TargetPos.Z, strip.TargetPos.X, strip.TargetPos.Z), 9.9f, 10.1f);
+        }
+    }
 }

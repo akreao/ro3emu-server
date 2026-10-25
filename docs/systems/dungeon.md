@@ -183,6 +183,13 @@ Story encounters (`Reconstructed/story-encounters.json`, same switch; `DungeonSe
   and 5300801 from stage 2) between swings, hitting players and companions in the area fixed at the cast start; he
   retargets every 8 s (a player weighs twice a companion), and the swordman's Provoke pulls him. His closing lines
   come 6 s and 9 s after the win.
+- Ground marks (`DungeonService.EncounterMarks`): Eddga's ground flames, jump and 5300801 place warnings the way the
+  Genesis capture shows them: a 31109 from the boss with effect type 6 and an EffectData warning effect (its
+  `m_kWarningRange` is the ring radius or the strip's length and width, and how long it shows), then, when it ends, a
+  31109 of the damage effect (types 4 and 2) and the hit on everyone inside that shape (once per target per moment).
+  5300801 also dashes Eddga (31112, effect 5300851, 600 ms). The positions are Genesis's from one run, turned with
+  the boss's facing or aim; which fighter a "random" aim picks is (inferred). The second swing 5300601 has no marks in
+  the capture and keeps a chosen cone.
 - Companions are camp-1 monsters with scripted targeting: their normal swing is the kit's first damaging row
   (`MonsterService.FightMonster`), the rest is cast when ready (`CombatService.Allies`, same damage formula as other
   hits). The priest follows tree 10803: Blessing and Increase AGI, then Sanctuary when three are below 95% HP, else

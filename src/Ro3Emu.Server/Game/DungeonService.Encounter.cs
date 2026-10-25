@@ -224,6 +224,15 @@ public sealed partial class DungeonService
         return true;
     }
 
+    /// <summary>TEST AID, not the original: the boss casts this skill of its kit now, at the first player.</summary>
+    internal async Task<bool> CastEncounterSkillAsync(Attempt a, int skill)
+    {
+        if (a.Encounter is not { Done: false } run || run.Def.BossSkills.FirstOrDefault(x => x.Skill == skill) is not { } def
+            || _data.Row("SkillConfig", skill) is not { } row || Present(a).FirstOrDefault(s => s.Role != null) is not { } p) return false;
+        await CastBossSkillAsync(a, run, def, row, (p.Position.X, p.Position.Z), MonsterService.NowMs);
+        return true;
+    }
+
     private async Task EncounterGmAsync(GameSession s, string[] args)
     {
         if (Active(s) is not { Encounter: { } run } a) throw new ArgumentException("not in a story encounter");
@@ -300,6 +309,11 @@ public sealed partial class DungeonService
             SkillMs = actionMs, StartTime = now,
         }, highLevel: GameData.Int(row, "_iSkillEffectLevel") > 0);
         if (skill.Line != 0 && run.SaidSkillLines.Add(skill.Line)) SayLines(a, run, [new EncounterLine(skill.Line, 0, 0)]);
+        if (skill.Marks.Count > 0)
+        {
+            StartMarks(new MarkCast(a, run, skill, row, castId));
+            return;
+        }
         (float X, float Z, float Face) origin = (boss.X, boss.Z, boss.Face);
         foreach (var hit in skill.Hits)
             _loop.ScheduleLegacy(TimeSpan.FromMilliseconds(hit.Ms), async () =>

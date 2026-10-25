@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "about": "Story boss encounters rebuilt from what the client holds (docs/systems/dungeon.md, 'Story encounters'). The original server's encounter scripts and boss behaviour trees (NPCConfig _iAISpecial MainStory_*) are not in the client. What is real: the boss and companion templates (NPCConfig), their skill kits (SkillConfig, named by _kScriptLogic), the skill timelines (data/skills, m_kShows effects and timings), the dialogue (ChatConfig 53xxxxx), the scene-editor points and the quest stages (DungeonQuestConfig). What is chosen here and marked as such: which skills a boss uses and in which order, every hit area and hit time, the stage triggers, the companions' rotations (except the priest, whose tree MainStory_MuShi ships) and when each line is said. An encounter with a 'source' was retimed from a capture of another private server (Genesis, which differs from the official beta); that source says which values it gave. Fields: 'airWalls' (scene-editor air walls raised for the run, var 133), a boss skill's 'fromStage', an ally's 'ms' (arrival after its stage starts), a kit with no skills (a bystander the boss leaves alone), and a stage end's 'blackScreenMs', 'cast' and 'castMs' (the boss's self-cast after the end).",
+  "about": "Story boss encounters rebuilt from what the client holds (docs/systems/dungeon.md, 'Story encounters'). The original server's encounter scripts and boss behaviour trees (NPCConfig _iAISpecial MainStory_*) are not in the client. What is real: the boss and companion templates (NPCConfig), their skill kits (SkillConfig, named by _kScriptLogic), the skill timelines (data/skills, m_kShows effects and timings), the dialogue (ChatConfig 53xxxxx), the scene-editor points and the quest stages (DungeonQuestConfig). What is chosen here and marked as such: which skills a boss uses and in which order, every hit area and hit time, the stage triggers, the companions' rotations (except the priest, whose tree MainStory_MuShi ships) and when each line is said. An encounter with a 'source' was retimed from a capture of another private server (Genesis, which differs from the official beta); that source says which values it gave. Fields: 'airWalls' (scene-editor air walls raised for the run, var 133), a boss skill's 'fromStage', an ally's 'ms' (arrival after its stage starts), a kit with no skills (a bystander the boss leaves alone), and a stage end's 'blackScreenMs', 'cast' and 'castMs' (the boss's self-cast after the end). A boss skill's 'marks' place ground warnings the client draws from EffectData m_kWarningRange (Genesis sends them as 31109): 'ms' into the cast, 'warn' (and the damage effect 'show'), 'distance'/'angle' from the boss or from mark 'around', a strip's 'dir', all relative to 'aim' (facing, target or random) unless 'world', repeated 'count' times turning 'step' degrees; the hit lands in the warning's shape when it ends or at 'hitMs'. 'moves' dash the boss toward a placed mark on 'moveEffect'.",
   "encounters": {
     "1022001": {
       "name": "Payon Forest: Eddga",
@@ -15,27 +15,75 @@
         {
           "skill": 5300401,
           "fromStage": 2,
-          "why": "MainStory_HuWangSkill3, timeline 53004: Skill1_6 three times, fx_eddga_skill_groundflame_xuli at 2.83 s, mark groups at 0, 2.52 and 5.1 s: ground flames around Eddga. A 7 m circle at 2.9, 5.4 and 7.6 s, a third of the damage each (chosen). Genesis: first used 3 s into stage 2, not in stage 1.",
-          "hits": [
-            { "ms": 2900, "shape": "circle", "radius": 7, "share": 3333 },
-            { "ms": 5400, "shape": "circle", "radius": 7, "share": 3333 },
-            { "ms": 7600, "shape": "circle", "radius": 7, "share": 3334 }
+          "why": "MainStory_HuWangSkill3, timeline 53004 (three Skill1_6 rounds). Genesis: three rounds of 5 m warning rings (EffectData 5300403) at 0, 2.52 and 5.11 s, 6, 8 and 10 of them, 4-22 m around Eddga; each erupts (5300406) 1.86 s after it shows. The ring positions are Genesis's, turned with Eddga's facing (one run: how Genesis chooses them is not known). First used 3 s into stage 2.",
+          "marks": [
+            { "ms": 0, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 12.0, "angle": 76.5 },
+            { "ms": 0, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 12.0, "angle": 154.4 },
+            { "ms": 0, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 4.0, "angle": 0 },
+            { "ms": 0, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 4.0, "angle": 180 },
+            { "ms": 0, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 12.0, "angle": 115.4 },
+            { "ms": 0, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 12.0, "angle": 358.6 },
+            { "ms": 2518, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 22.0, "angle": 286.1 },
+            { "ms": 2518, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 22.0, "angle": 265.2 },
+            { "ms": 2518, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 22.0, "angle": 13.7 },
+            { "ms": 2518, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 22.0, "angle": 223.2 },
+            { "ms": 2518, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 22.0, "angle": 352.8 },
+            { "ms": 2518, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 14.0, "angle": 189.3 },
+            { "ms": 2518, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 22.0, "angle": 331.8 },
+            { "ms": 2518, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 22.0, "angle": 55.6 },
+            { "ms": 5108, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 20.0, "angle": 159.6 },
+            { "ms": 5108, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 20.0, "angle": 113.4 },
+            { "ms": 5108, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 20.0, "angle": 182.7 },
+            { "ms": 5108, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 12.0, "angle": 232.2 },
+            { "ms": 5108, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 20.0, "angle": 275.0 },
+            { "ms": 5108, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 20.0, "angle": 90.4 },
+            { "ms": 5108, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 12.0, "angle": 271.2 },
+            { "ms": 5108, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 12.0, "angle": 37.5 },
+            { "ms": 5108, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 4.0, "angle": 180 },
+            { "ms": 5108, "warn": 5300403, "show": 5300406, "hitMs": 1860, "distance": 20.0, "angle": 311.9 }
           ],
           "line": 5300009
         },
         {
           "skill": 5300801,
           "fromStage": 2,
-          "why": "MainStory_HuWangSkill5, timeline 53008 (10.35 s action, CD 40 s). Genesis: used once in stage 2, the player hit 4.57 s and 8.85 s into it. A 12 m circle around Eddga at those times, half the damage each (area chosen).",
-          "hits": [
-            { "ms": 4570, "shape": "circle", "radius": 12, "share": 5000 },
-            { "ms": 8850, "shape": "circle", "radius": 12, "share": 5000 }
-          ]
+          "why": "MainStory_HuWangSkill5, timeline 53008 (10.35 s). Genesis: a 25 x 6 m strip (5300841) at one fighter, a dash (5300851) onto its start at 2.1 s; a strip (5300842) at the target at 2.97 s, a dash at 3.97 s and the hit as it ends (the player was hit at 4.57 s); then a 12 m ring (5300844) 10.4 m ahead with eight strips (5300843) wheeling out 10 m around it at 5.85 s, a 5.4 m dash toward it at 8.25 s and the blast (5300862, 5300861) at 8.85 s (the player was hit again). Which fighter the first strip and the ring aim at is not known: a random one (inferred). Used once in stage 2.",
+          "moveEffect": 5300851,
+          "marks": [
+            { "ms": 0, "warn": 5300841, "aim": "random", "distance": 0.87 },
+            { "ms": 2970, "warn": 5300842, "aim": "target", "distance": -2.15 },
+            { "ms": 5850, "warn": 5300844, "show": 5300862, "aim": "random", "distance": 10.4 },
+            {
+              "ms": 5850,
+              "warn": 5300843,
+              "show": 5300861,
+              "around": 2,
+              "distance": 10,
+              "angle": 45,
+              "dir": 90,
+              "count": 8,
+              "step": 45
+            }
+          ],
+          "moves": [ { "ms": 2100, "to": 0 }, { "ms": 3970, "to": 1 }, { "ms": 8250, "to": 2, "distance": 5.4 } ]
         },
         {
           "skill": 5300501,
-          "why": "MainStory_HuWangSkill4, timeline 53005: fx_eddga_skill_impact_xuli at 1.67 s, fx_eddga_skill_impact 4 m in front (scale 2) and a camera shake at 3.33 s: the jump and landing. A 5 m circle centred 4 m in front at 3.33 s (chosen from that offset). Genesis: used in both stages, with line 5300007 each time.",
-          "hits": [ { "ms": 3333, "shape": "circle", "radius": 5, "forward": 4 } ],
+          "why": "MainStory_HuWangSkill4, timeline 53005: the jump. Genesis: an 8 m warning ring (5300504) 14.4 m in front of Eddga, then at 1.87 s eight 5 m rings (5300505) 15 m around it at the compass points, erupting (5300513) 1 s later. Genesis sent no damage effect for the centre ring; it hits when its warning ends (inferred). Used in both stages, with line 5300007.",
+          "marks": [
+            { "ms": 0, "warn": 5300504, "distance": 14.4 },
+            {
+              "ms": 1873,
+              "warn": 5300505,
+              "show": 5300513,
+              "hitMs": 1010,
+              "around": 0,
+              "world": true,
+              "distance": 15,
+              "count": 8,
+              "step": 45
+            }
+          ],
           "line": 5300007
         },
         {

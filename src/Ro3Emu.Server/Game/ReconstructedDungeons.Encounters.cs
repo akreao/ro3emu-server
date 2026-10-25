@@ -20,7 +20,15 @@ public sealed partial class ReconstructedDungeons
 
     /// <summary>A boss skill with its hits and the line said on its first cast; used from stage <paramref name="FromStage"/>
     /// (1-based; 0 or 1: the whole fight).</summary>
-    public sealed record EncounterSkill(int Skill, IReadOnlyList<EncounterHit> Hits, int Line, int FromStage = 0);
+    public sealed record EncounterSkill(int Skill, IReadOnlyList<EncounterHit> Hits, int Line, int FromStage = 0)
+    {
+        /// <summary>Ground marks placed during the cast; when there are any, they decide the hits instead of
+        /// <see cref="Hits"/>.</summary>
+        public IReadOnlyList<EncounterMark> Marks { get; init; } = [];
+        public IReadOnlyList<EncounterMove> Moves { get; init; } = [];
+        /// <summary>The displacement effect a move plays (EffectData m_kPoint.m_bMovement).</summary>
+        public int MoveEffect { get; init; }
+    }
 
     /// <summary>A line of ChatConfig said <paramref name="Ms"/> into its stage (or its stage's end); <paramref name="By"/>
     /// names the NPC whose bubble shows a type-2 line.</summary>
@@ -75,10 +83,11 @@ public sealed partial class ReconstructedDungeons
             long scene = long.Parse(entry.Name, CultureInfo.InvariantCulture);
             var e = entry.Value;
             var skills = e.GetProperty("bossSkills").EnumerateArray().Select(s => new EncounterSkill(Int(s, "skill"),
-                s.GetProperty("hits").EnumerateArray().Select(h => new EncounterHit(Int(h, "ms"),
+                s.TryGetProperty("hits", out var hits) ? hits.EnumerateArray().Select(h => new EncounterHit(Int(h, "ms"),
                     Enum.Parse<HitShape>(h.GetProperty("shape").GetString()!, ignoreCase: true), Float(h, "radius"), Float(h, "angle"),
-                    Float(h, "length"), Float(h, "width"), Float(h, "forward"), Int(h, "share", 10000))).ToArray(),
-                Int(s, "line"), Int(s, "fromStage"))).ToArray();
+                    Float(h, "length"), Float(h, "width"), Float(h, "forward"), Int(h, "share", 10000))).ToArray() : [],
+                Int(s, "line"), Int(s, "fromStage"))
+            { Marks = Marks(s), Moves = Moves(s), MoveEffect = Int(s, "moveEffect") }).ToArray();
             var kits = e.GetProperty("kits").EnumerateObject().ToDictionary(k => int.Parse(k.Name, CultureInfo.InvariantCulture),
                 k => new EncounterKit(k.Value.GetProperty("skills").EnumerateArray().Select(v => v.GetInt32()).ToArray(),
                     k.Value.TryGetProperty("support", out var support) && support.GetBoolean()));
