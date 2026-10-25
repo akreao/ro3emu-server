@@ -59,6 +59,18 @@ public sealed class FlyWingSpotTests : IDisposable
         Assert.Equal(2, (await map.WarmRandomSpots()).Count);
     }
 
+    /// <summary>The grid never changes, so seeds on the same layers reuse one flood fill (every test server shares it).</summary>
+    [Fact]
+    public void SeedsOnTheSameLayersShareOneFloodFill()
+    {
+        var nav = Grid(20, 10, (x, _) => x == 8 ? null : 0f);
+        var reach = nav.Reachable([(2f, 0f, 2f), (5.5f, 0f, 5.5f)]);
+        Assert.Same(reach, nav.Reachable([(5.2f, 0f, 5.7f), (2.9f, 0f, 2.1f), (2.5f, 0f, 2.5f)]));
+        Assert.NotSame(reach, nav.Reachable([(15f, 0f, 5f)]));
+        Assert.True(nav.Reachable([(15f, 0f, 5f)]).Contains(12, 0, 3));
+        Assert.False(reach.Contains(12, 0, 3));
+    }
+
     [ClientDataFact]
     public async Task PayonForestNeverLandsOnItsNorthernEdge()
     {

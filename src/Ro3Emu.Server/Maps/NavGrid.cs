@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+
 namespace Ro3Emu.Server.Maps;
 
 /// <summary>
@@ -15,6 +17,7 @@ public sealed class NavGrid
     private readonly byte[] _data;
     private readonly int _blockSize;
     private readonly int _blocksX;
+    private readonly ConcurrentDictionary<string, Lazy<NavReach>> _reach = new();
 
     public int Width { get; }
     public int Height { get; }
@@ -119,15 +122,24 @@ public sealed class NavGrid
     /// <summary>
     /// The walkable layers reachable on foot from the seeds (inferred): a flood fill over the 8 neighbouring cells,
     /// stepping onto a walkable layer within <see cref="WalkHeightTolerance"/> of the current one, as <see cref="CanWalk"/>
-    /// follows heights. A seed that stands on no walkable layer adds nothing.
+    /// follows heights. A seed that stands on no walkable layer adds nothing. The grid never changes, so the fill runs
+    /// once per set of seed layers: it takes up to ~400 ms on a field map, and every server of a test run that loads the
+    /// map shares this grid (ProcessCache), where repeating it took ~40% of the run's CPU.
     /// </summary>
     public NavReach Reachable(IEnumerable<(float X, float Y, float Z)> seeds)
     {
-        var reached = new HashSet<long>();
-        var open = new Queue<(int X, int Z, float Height)>();
+        var start = new SortedDictionary<long, (int X, int Z, float Height)>();
         foreach (var (x, y, z) in seeds)
-            if (Layer(x, y, z) is { } seed && reached.Add(NavReach.Key(seed.X, seed.Z, seed.Index, Width)))
-                open.Enqueue((seed.X, seed.Z, seed.Height));
+            if (Layer(x, y, z) is { } seed)
+                start.TryAdd(NavReach.Key(seed.X, seed.Z, seed.Index, Width), (seed.X, seed.Z, seed.Height));
+        var key = string.Join(',', start.Keys);
+        return _reach.GetOrAdd(key, _ => new Lazy<NavReach>(() => Flood(start))).Value;
+    }
+
+    private NavReach Flood(SortedDictionary<long, (int X, int Z, float Height)> start)
+    {
+        var reached = new HashSet<long>(start.Keys);
+        var open = new Queue<(int X, int Z, float Height)>(start.Values);
         while (open.TryDequeue(out var at))
             for (int dx = -1; dx <= 1; dx++)
                 for (int dz = -1; dz <= 1; dz++)

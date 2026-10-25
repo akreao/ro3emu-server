@@ -68,31 +68,61 @@ CI prints the same line per test project in its job summary.
 
 ## Running tests while you work
 
-Every server test starts its own server, so a whole run starts about 2,000 of them. The test project shares what
-those servers would otherwise each redo (`tests/Ro3Emu.Tests/TestRunSetup.cs`): the parsed client tables, scene
-editors and nav grids (`ProcessCache`), one gate RSA key, and a lower password hash count. It also turns off
-profile-guided recompilation (`TieredPGO`, about 30% of the run's CPU) and starts the longest test classes first
-(`LongestFirstOrderer`). None of this changes how a real server runs.
+CI runs every test on Linux and Windows for each push, so you don't need the whole suite for each change. Run what
+your change touches:
 
-Build once and pass `--no-build` after that. Then pick the smallest set that covers your change:
+```bash
+tools/test-changed.sh              # builds, then runs the tests of what changed since origin/main
+tools/test-changed.sh --no-build   # you just built
+tools/test-changed.sh --print      # only show what it would run
+```
+
+It compares your branch (committed, staged, unstaged and untracked files) with its merge base on `origin/main`:
+
+- a test file runs its test classes;
+- a server, bot or load-test `.cs` file runs, for each type it declares, the test class named after it
+  (`MailService` -> `MailTests`, `GameLoop` -> `GameLoopTests`) and every test class whose file names the type. Over 30
+  classes it keeps the ones named after the type; `--wide` runs them all;
+- a server data file (`Reconstructed/*.json`) counts as the code that names it;
+- the patcher and the setup tool run their own test project; docs and client-side projects run nothing;
+- a change that can reach every test (a project file or `Directory.*.props`, the fixture, `content/`, a deleted file,
+  types no test names) runs the CI set instead. `--all` runs the CI set whatever changed.
+
+The client-data tests of the picked classes run when you have the export. On Windows run the script from Git Bash, or
+pick the classes yourself:
 
 | What | Command | Time on 4 cores |
 |---|---|---|
-| The classes you touched | `dotnet test tests/Ro3Emu.Tests -c Release --no-build --filter "FullyQualifiedName~Ro3Emu.Tests.TavernTests"` | seconds to a minute |
-| Everything about skills | `--filter "FullyQualifiedName~Ro3Emu.Tests.Skill"` (172 tests) | ~3 min |
-| What CI runs | `RO3EMU_NO_CLIENT_DATA=1` with `--filter "Category!=Slow"` (735 tests) | ~2 min |
-| The whole suite | `--filter "Category!=Slow"` | ~12 min |
+| A few classes | `dotnet test tests/Ro3Emu.Tests -c Release --no-build --filter "FullyQualifiedName~Ro3Emu.Tests.TavernTests."` | seconds |
+| One big class | `--filter "FullyQualifiedName~Ro3Emu.Tests.DungeonTests."` (130 tests) | ~1 min |
+| What CI runs | `RO3EMU_NO_CLIENT_DATA=1` with `--filter "Category!=Slow"` (955 tests) | ~70 s |
+| The whole suite | `--filter "Category!=Slow"` (2,325 tests) | ~7.5 min |
 
-Join several classes with `|`: `--filter "FullyQualifiedName~PetTests|FullyQualifiedName~PetAoiTests"`. A class
-named after a service (`MailTests`, `GuildTests`) usually holds that service's end-to-end tests; for a shared piece
-such as `CombatService` or `GameData`, search the tests for the type name.
+Join several classes with `|`: `--filter "FullyQualifiedName~PetTests.|FullyQualifiedName~PetAoiTests."`; the dot
+after the name keeps `PetTests` from matching `PetTestsHost`. Run the whole suite yourself when a change reaches most
+of the server (the game loop, sessions, persistence, `GameData`), and the `Category=Slow` walks (`QuestWalkTests`
+alone takes ~3.5 min) when you change what they walk.
 
-- The whole suite fits in one run in 16 GB. Don't raise `xUnit.MaxParallelThreads` above the core count: the run is
-  CPU-bound, and 8 threads on 4 cores was slower than 4.
-- `Category=Slow` holds the long walks (`QuestWalkTests` alone takes ~3.5 min); run them when you change what they
-  walk.
-- A few tests depend on timing and can fail when the machine is busy. Re-run a failing test on its own before you
-  chase it.
+### Why a run takes as long as it does
+
+Every server test starts its own server, so a whole run starts about 2,000 of them. The test project shares what
+those servers would otherwise each redo (`tests/Ro3Emu.Tests/TestRunSetup.cs`): the parsed client tables, scene
+editors and nav grids (`ProcessCache`), one gate RSA key, and a lower password hash count. Because the nav grids are
+shared, so is the Fly Wing reachability flood fill each server ran per map (`NavGrid.Reachable`), which was ~40% of
+the run's CPU. The project also turns off profile-guided recompilation (`TieredPGO`, about 30% of the run's CPU). None
+of this changes how a real server runs.
+
+Most tests then wait on game time (ticks, cooldowns, casts) rather than compute, which leaves the cores idle:
+
+- `xunit.runner.json` runs two test classes per core (`maxParallelThreads: 2x`). On 4 cores that took the whole suite
+  from 8m53s to 7m56s; before the flood fill was shared, the run was CPU-bound and 8 threads were slower than 4.
+- `SplitClassFramework` runs a class of more than 16 tests as parts of 16 at once, since xUnit runs one class's tests
+  one after another: DungeonTests alone went from 3.5 min to 1 min, SkillCombatTests from ~6.5 min to 75 s, and the
+  whole suite to 7m22s. A named `[Collection]` stays in one part.
+- `LongestFirstOrderer` starts the longest classes first.
+
+The whole suite fits in one run in 16 GB (peak ~8 GB). A few tests depend on timing and can fail when the machine is
+busy. Re-run a failing test on its own before you chase it.
 
 ## Snapshot tests
 
