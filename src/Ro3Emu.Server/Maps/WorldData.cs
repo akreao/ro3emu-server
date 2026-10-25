@@ -80,6 +80,8 @@ public sealed class MapWorld
     public IReadOnlyDictionary<long, MapRegion> Regions { get; init; } = new Dictionary<long, MapRegion>();
     /// <summary>Scene-editor guide points (m_kGuidePoints): paths the client draws as a guide arrow line (PGuideWayList).</summary>
     public IReadOnlySet<long> GuidePoints { get; init; } = new HashSet<long>();
+    /// <summary>Scene-editor air walls (m_kAirWalls): raised by the client while dungeon var 133 CAirWallList names them.</summary>
+    public IReadOnlySet<long> AirWalls { get; init; } = new HashSet<long>();
 
     /// <summary>Dungeon m_kGroups joined to m_kMonsterSpawnPoints; templates/timing belong to PetFloorConfig.</summary>
     public IReadOnlyDictionary<int, IReadOnlyList<SpawnPoint>> DungeonGroups { get; init; } = new Dictionary<int, IReadOnlyList<SpawnPoint>>();
@@ -347,12 +349,13 @@ public sealed partial class WorldData(IOptions<ServerOptions> options, GameData 
         {
             SceneEntry = sceneEntry, Born = born, Revive = revive, Npcs = npcs, Points = points, Nav = map.Nav, SpawnGroups = spawnGroups,
             GatheringPoints = LoadGatheringPoints(se, sceneEntry), DungeonGroups = LoadDungeonGroups(se), Regions = LoadRegions(se),
-            GuidePoints = LoadGuidePoints(se)
+            GuidePoints = LoadIds(se, "m_kGuidePoints"), AirWalls = LoadIds(se, "m_kAirWalls"),
         };
     }
 
-    private static HashSet<long> LoadGuidePoints(JsonElement se) =>
-        se.TryGetProperty("m_kGuidePoints", out var gs) && gs.ValueKind == JsonValueKind.Object
+    /// <summary>The ids of a scene-editor list keyed by id (m_kGuidePoints, m_kAirWalls).</summary>
+    private static HashSet<long> LoadIds(JsonElement se, string list) =>
+        se.TryGetProperty(list, out var gs) && gs.ValueKind == JsonValueKind.Object
             ? gs.EnumerateObject().Select(g => long.TryParse(g.Name, out long id) ? id : 0).Where(id => id > 0).ToHashSet()
             : [];
 

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Romsg;
 using Ro3Emu.Server.Data;
+using Ro3Emu.Server.Data.Config;
 using Ro3Emu.Server.Maps;
 using static Ro3Emu.Server.Game.ReconstructedDungeons;
 
@@ -456,7 +457,7 @@ public sealed partial class DungeonService
         var speaker = line.By == 0 ? null
             : line.By == run.Boss.Template.NpcId ? run.Boss
             : run.Allies.Select(s => s.Unit).FirstOrDefault(u => u.Template.NpcId == line.By && !u.Dead);
-        bool bubble = GameData.Int(chat, "_iType") == 2;
+        bool bubble = new ChatConfig(chat).Type == 2;
         if (bubble && speaker == null) return; // its speaker is not in the fight
         var call = new DungeonEventNotify
         {

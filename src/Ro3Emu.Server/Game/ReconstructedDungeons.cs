@@ -13,7 +13,11 @@ namespace Ro3Emu.Server.Game;
 /// </summary>
 public sealed partial class ReconstructedDungeons
 {
-    public sealed record Spawn(long Point, int NpcId);
+    /// <summary>
+    /// A monster at a scene-editor point. In a scripted fight, <paramref name="Ms"/> delays it after the step's start and
+    /// <paramref name="Say"/> is a ChatConfig line it says once it is out (0: none).
+    /// </summary>
+    public sealed record Spawn(long Point, int NpcId, int Ms = 0, int Say = 0);
     public sealed record Wave(int Quest, IReadOnlyList<Spawn> Spawns);
     public sealed record Dungeon(long Scene, string Name, string Confidence, IReadOnlyList<Wave> Waves);
 

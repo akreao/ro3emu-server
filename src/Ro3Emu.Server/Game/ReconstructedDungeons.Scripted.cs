@@ -69,6 +69,9 @@ public sealed partial class ReconstructedDungeons
         /// (dungeon var 10021 PGuideWayList); empty: none.
         /// </summary>
         public IReadOnlyList<long> Guide { get; init; } = [];
+        /// <summary>The step names its goal: a fight step's tracker then shows it instead of the step's kills (the waves
+        /// done of all waves).</summary>
+        public bool FixedGoal { get; init; }
     }
 
     /// <summary>
@@ -100,7 +103,11 @@ public sealed partial class ReconstructedDungeons
     /// 0 when the players are sent back out.
     /// </summary>
     public sealed record ScriptedScene(long Scene, string Name, string Confidence, IReadOnlyList<ScriptedStep> Steps,
-        IReadOnlyList<int> Unplayed, long Next = 0);
+        IReadOnlyList<int> Unplayed, long Next = 0)
+    {
+        /// <summary>Scene-editor air walls (m_kAirWalls) raised for the whole run (dungeon var 133 CAirWallList).</summary>
+        public IReadOnlyList<long> AirWalls { get; init; } = [];
+    }
 
     private readonly Dictionary<long, ScriptedScene> _scripted = new();
 
@@ -123,7 +130,10 @@ public sealed partial class ReconstructedDungeons
                 ? u.EnumerateArray().Select(q => q.GetProperty("quest").GetInt32()).ToArray() : [];
             _scripted[scene] = new ScriptedScene(scene, entry.Value.GetProperty("name").GetString() ?? "",
                 entry.Value.GetProperty("confidence").GetString() ?? "", steps, unplayed,
-                entry.Value.TryGetProperty("next", out var next) ? next.GetProperty("scene").GetInt64() : 0);
+                entry.Value.TryGetProperty("next", out var next) ? next.GetProperty("scene").GetInt64() : 0)
+            {
+                AirWalls = entry.Value.TryGetProperty("airWalls", out var walls) ? [.. walls.EnumerateArray().Select(w => w.GetInt64())] : [],
+            };
         }
     }
 
@@ -137,7 +147,8 @@ public sealed partial class ReconstructedDungeons
             : [];
         var complete = Triggers(s, "complete");
         var fight = s.TryGetProperty("fight", out var f)
-            ? f.EnumerateArray().Select(x => new Spawn(x.GetProperty("point").GetInt64(), x.GetProperty("npc").GetInt32())).ToArray()
+            ? f.EnumerateArray().Select(x => new Spawn(x.GetProperty("point").GetInt64(), x.GetProperty("npc").GetInt32(),
+                x.TryGetProperty("ms", out var ms) ? ms.GetInt32() : 0, x.TryGetProperty("say", out var say) ? say.GetInt32() : 0)).ToArray()
             : [];
         if (complete.Count == 0 && fight.Length == 0)
             throw new InvalidOperationException($"Scripted step '{s.GetProperty("stage").GetString()}' cannot complete.");
@@ -170,6 +181,7 @@ public sealed partial class ReconstructedDungeons
                     fb.TryGetProperty("from", out var from) && from.GetString() == "mount")
                 : null,
             Guide = s.TryGetProperty("guide", out var guide) ? guide.EnumerateArray().Select(v => v.GetInt64()).ToArray() : [],
+            FixedGoal = s.TryGetProperty("goal", out _),
         };
     }
 

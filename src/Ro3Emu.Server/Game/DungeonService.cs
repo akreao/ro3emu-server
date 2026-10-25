@@ -19,6 +19,10 @@ public sealed partial class DungeonService
     private const long EggThiefDungeon = 1021301;
     private const int EggThiefWaveSpeedCm = 550;
     private const float EggThiefWaveLeash = 100f;
+    /// <summary>How long after a scripted fight's monster appears it says its line (Genesis capture 2026-10-25).</summary>
+    private const int SpawnSayDelayMs = 850;
+    /// <summary>LC_DunGeon_VarDefine 133 CAirWallList (kProcessComp enum_SceneComponent.AirWall): the air walls raised.</summary>
+    public const int AirWallVar = 133;
 
     public const uint Sync = 5062, Enter = 30400, BaseInfo = 30401, Leave = 30402, Result = 30403, Event = 30404,
         Confirm = 30406, ClientEvent = 30106, CreateResult = 30107, EnterSceneResult = 30108,
@@ -160,6 +164,8 @@ public sealed partial class DungeonService
         public bool Advancing { get; set; }
         public bool Entering { get; set; } = true;
         public bool Spawning { get; set; }
+        /// <summary>Delayed monsters of the current wave still to come (a scripted fight's "ms"); Spawning holds until 0.</summary>
+        public int PendingSpawns { get; set; }
         /// <summary>The current scripted step got one of its completing client events (DungeonService.Scripted).</summary>
         public bool StepDone { get; set; }
         /// <summary>A Realm of the Gods raid waits in its preparation phase (DungeonService.RealmOfGods).</summary>
@@ -432,6 +438,7 @@ public sealed partial class DungeonService
                 NextStageStartTime = 0, NextStageEndTime = 0
             },
         };
+        if (a.Plan.AirWalls.Count > 0) snapshot.Vars.Add(new DungeonVar { VarId = AirWallVar, Vi64 = { a.Plan.AirWalls } });
         if (QuestList(a) is { } quests) snapshot.Vars.Add(quests);
         if (GoalParams(a) is { } goal) snapshot.Vars.Add(goal);
         if (GuideWays(a) is { } guide) snapshot.Vars.Add(guide);
@@ -488,7 +495,7 @@ public sealed partial class DungeonService
         if (a.Wave >= a.Plan.Waves.Count || CurrentQuest(a) <= 0) return null;
         int size = a.Plan.Waves[a.Wave].Spawns.Count;
         var v = new DungeonVar { VarId = 10003 };
-        if (Step(a) is { } step && size == 0)
+        if (Step(a) is { } step && (size == 0 || step.FixedGoal))
         {
             // A scripted step: its configured counter, or the events an "all" step has seen (inferred).
             v.Vi64.Add(step.All ? [a.StepSeen.Count, step.Complete.Count] : [step.Goal.Done, step.Goal.Total]);
@@ -612,43 +619,86 @@ public sealed partial class DungeonService
             }
             // A step with a fight spawns it below; it advances once its event and its kills are both in.
         }
-        foreach (var spawn in a.Plan.Waves[a.Wave].Spawns)
-        {
-            if (a.Settled || a.Room.Closed) { a.Spawning = false; return; }
-            MonsterTemplate? waveTemplate = null;
-            if (a.Plan.SceneEntry == EggThiefDungeon && _monsters.Template(spawn.NpcId) is { } template)
-            {
-                // (inferred) The missing original encounter script sent these three portal waves toward the player. The
-                // reconstructed first-wave Pupa is immobile and all three authored portals lie outside its normal
-                // 20 m home leash, so ordinary field AI leaves two actors off-camera forever. Use the 550 cm/s pace
-                // already carried by this encounter's Boa/Willow waves and a room-sized leash for this scene only.
-                waveTemplate = template with
-                {
-                    SpeedCm = Math.Max(template.SpeedCm, EggThiefWaveSpeedCm),
-                    LeashDistance = Math.Max(template.LeashDistance, EggThiefWaveLeash),
-                };
-            }
-            var monster = await _instances.SpawnAsync(a.Room, spawn.NpcId, spawn.Point, customTemplate: waveTemplate);
-            if (a.Settled || a.Room.Closed)
-            {
-                a.Spawning = false;
-                await _instances.ClearMonstersAsync(a.Room);
-                return;
-            }
-            if (monster == null) { a.Spawning = false; await SettleAsync(a, false); return; }
-            a.Spawned++;
-            // Multi-bosses retain their AI instead of being ordered to attack on scene load. In Culvert the
-            // born point 15 is 15m from monster point 19; NPC 4300000/1 uses non-roaming AI 25000001 and
-            // RaidFive_Boss00[easy], whose server script is absent. Waiting for a player hit/taunt is an
-            // (inferred) fallback, not proof that its 100m view/leash means automatic entry aggro.
-            // No five-player preparation duration/start-button contract was recovered; GVE/Whale's
-            // DungeonStart preparation UI belongs to other gameplay types. Story-wave engagement is unchanged.
-            if (a.Plan.Multi == null && Present(a).FirstOrDefault(s => !s.Dead && !s.SceneLoading) is { } target)
-                _monsters.Engage(monster, target);
-        }
+        var spawns = a.Plan.Waves[a.Wave].Spawns;
+        int wave = a.Wave;
+        a.PendingSpawns = spawns.Count(x => x.Ms > 0);
+        foreach (var spawn in spawns.Where(x => x.Ms > 0))
+            _loop.ScheduleLegacy(SceneDelay(spawn.Ms), () => DelayedSpawnAsync(a, wave, spawn));
+        foreach (var spawn in spawns.Where(x => x.Ms <= 0))
+            if (!await SpawnOneAsync(a, spawn)) return;
+        if (a.PendingSpawns > 0) return; // the last delayed monster ends the spawning
         a.Spawning = false;
         await AdvanceAsync(a);
     }
+
+    /// <summary>A scripted fight's delayed monster; the wave can be fought to its end only once the last one is out.</summary>
+    private async Task DelayedSpawnAsync(Attempt a, int wave, DungeonCatalog.Spawn spawn)
+    {
+        if (a.Wave != wave || a.Settled || a.Room.Closed || !await SpawnOneAsync(a, spawn)) return;
+        if (--a.PendingSpawns > 0) return;
+        a.Spawning = false;
+        await AdvanceAsync(a);
+    }
+
+    /// <summary>One monster of the wave; false when the run ended (or failed) instead.</summary>
+    private async Task<bool> SpawnOneAsync(Attempt a, DungeonCatalog.Spawn spawn)
+    {
+        if (a.Settled || a.Room.Closed) { a.Spawning = false; return false; }
+        var monster = await _instances.SpawnAsync(a.Room, spawn.NpcId, spawn.Point, customTemplate: WaveTemplate(a, spawn.NpcId));
+        if (a.Settled || a.Room.Closed)
+        {
+            a.Spawning = false;
+            await _instances.ClearMonstersAsync(a.Room);
+            return false;
+        }
+        if (monster == null) { a.Spawning = false; await SettleAsync(a, false); return false; }
+        a.Spawned++;
+        // Multi-bosses retain their AI instead of being ordered to attack on scene load. In Culvert the
+        // born point 15 is 15m from monster point 19; NPC 4300000/1 uses non-roaming AI 25000001 and
+        // RaidFive_Boss00[easy], whose server script is absent. Waiting for a player hit/taunt is an
+        // (inferred) fallback, not proof that its 100m view/leash means automatic entry aggro.
+        // No five-player preparation duration/start-button contract was recovered; GVE/Whale's
+        // DungeonStart preparation UI belongs to other gameplay types. Story-wave engagement is unchanged.
+        if (a.Plan.Multi == null && Present(a).FirstOrDefault(s => !s.Dead && !s.SceneLoading) is { } target)
+            _monsters.Engage(monster, target);
+        if (spawn.Say != 0) _loop.ScheduleLegacy(SceneDelay(SpawnSayDelayMs), () => SpawnSayAsync(a, monster, spawn.Say));
+        return true;
+    }
+
+    /// <summary>
+    /// Egg Thief (1021301): the portal monsters run at the player across the arena. Genesis capture 2026-10-25 (one run):
+    /// each one is hated by the player as it appears (31051) and walks to them from its portal. The portals lie outside the
+    /// ordinary 20 m home leash and some of these templates barely move, so the scene gets the 550 cm/s pace of its
+    /// Boa/Willow and a room-sized leash (inferred values).
+    /// </summary>
+    private MonsterTemplate? WaveTemplate(Attempt a, int npcId) =>
+        a.Plan.SceneEntry == EggThiefDungeon && _monsters.Template(npcId) is { } template
+            ? template with
+            {
+                SpeedCm = Math.Max(template.SpeedCm, EggThiefWaveSpeedCm),
+                LeashDistance = Math.Max(template.LeashDistance, EggThiefWaveLeash),
+            }
+            : null;
+
+    /// <summary>
+    /// A spawned monster's line (a scripted fight's "say"). Genesis capture 2026-10-25: SYSTEM_BOARDCAST_MSG_NTF 1022 from
+    /// MsgSource_npc with the monster's uid and CHAT_PARAM_NPC_NAME its NPCConfig id, about 850 ms after it appears.
+    /// </summary>
+    private Task SpawnSayAsync(Attempt a, MonsterUnit monster, int chat)
+    {
+        if (a.Settled || a.Room.Closed || monster.Dead || !a.Room.Monsters.Contains(monster)) return Task.CompletedTask;
+        var ntf = new SystemBoardCastMsgNtf { Source = MsgSource.Npc, ChatId = chat, PlayerId = monster.Uid };
+        ntf.ParamList[1] = new ChatParameter
+        {
+            Params = { monster.Template.NpcId.ToString(System.Globalization.CultureInfo.InvariantCulture) },
+            Type = ChatParamType.ChatParamNpcName,
+        };
+        return BroadcastAsync(a, SystemBroadcast, ntf);
+    }
+
+    /// <summary>A scripted scene's timer, at the configured pace (ServerOptions.ScriptedScenePacePercent).</summary>
+    private TimeSpan SceneDelay(int ms) =>
+        TimeSpan.FromMilliseconds((long)ms * Math.Max(1, _options.ScriptedScenePacePercent) / 100);
 
     private async Task KilledAsync(GameSession s, MonsterUnit monster)
     {

@@ -75,8 +75,6 @@ public sealed partial class DungeonTests
     [ClientDataFact]
     public async Task EddgaFightBringsItsCompanionsLinesAndStages()
     {
-        var parameters = (Dictionary<string, System.Text.Json.JsonElement>)Service<GameData>().Table("PublicParamConfig");
-        parameters["FiveGamePlay_CloseTime"] = System.Text.Json.JsonSerializer.SerializeToElement(3);
         await using var alice = await InWorld("Alice");
         await Gm(alice, "!lvl 60"); // Eddga's skills should not end the run before the companions do their part
         await Gm(alice, "!quest accept 10102200");
@@ -123,10 +121,7 @@ public sealed partial class DungeonTests
         await Next(alice, DungeonService.Event, DungeonEventNotify.Parser,
             e => e.CliFuncname == "Shouting" && e.Params[0].IntParams.Single() == 5300012);
 
-        // The won story run sends the player back out after its countdown (shortened here from the client's 15 s).
-        var countdown = await Next(alice, DungeonService.Event, DungeonEventNotify.Parser, e => e.CliFuncname == "SetCountDown");
-        Assert.True(countdown.Params[0].IntParams.Single() > _clock.GetUtcNow().ToUnixTimeSeconds());
-        await Next(alice, GmCommands.BroadcastNotify, BroadCastNotify.Parser, n => n.Content.StartsWith("Leave the dungeon in"));
+        // The won story run sends the player back out a moment after its closing line, without a countdown (Genesis).
         Assert.Equal(0, (await Next(alice, DungeonService.Leave, LeaveDungeonRsp.Parser)).Result);
         await Next(alice, MsgId.SwitchSceneLine, SwitchSceneLineResp.Parser, m => m.SceneEntry != Eddga); // back where the run began
     }
