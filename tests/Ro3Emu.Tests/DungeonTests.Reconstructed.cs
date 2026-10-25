@@ -130,7 +130,7 @@ public sealed partial class DungeonTests
         {
             // The tracker counts the waves done of three, not the wave's kills.
             var info = await Next(alice, DungeonService.BaseInfo, DungeonBaseInfoNotify.Parser, i => i.Stage == wave + 1
-                && i.Vars.Any(v => v.VarId == 10003 && v.Vi64.SequenceEqual(new long[] { wave, 3 })));
+                && i.Vars.Any(v => v.VarId == 10003 && v.Vi64.SequenceEqual<long>([wave, 3])));
             // The arena's four exits stay walled for the whole run.
             Assert.Equal([31L, 32, 33, 34], Assert.Single(info.Vars, v => v.VarId == DungeonService.AirWallVar).Vi64);
             var actors = await WaveIn(instance, plan.Waves[wave].Spawns.Count);
