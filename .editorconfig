@@ -71,7 +71,7 @@ dotnet_diagnostic.CA1051.severity = suggestion
 dotnet_diagnostic.CA1068.severity = suggestion
 # 426: specify IFormatProvider
 dotnet_diagnostic.CA1305.severity = suggestion
-# 57: specify StringComparison for correctness
+# 56: specify StringComparison for correctness
 dotnet_diagnostic.CA1310.severity = suggestion
 # 1: use nameof
 dotnet_diagnostic.CA1507.severity = suggestion
@@ -109,7 +109,7 @@ dotnet_diagnostic.CA1832.severity = suggestion
 dotnet_diagnostic.CA1836.severity = suggestion
 # 4: prefer Dictionary.Contains methods
 dotnet_diagnostic.CA1841.severity = suggestion
-# 426: use LoggerMessage delegates
+# 425: use LoggerMessage delegates
 dotnet_diagnostic.CA1848.severity = suggestion
 # 5: prefer TryGetValue
 dotnet_diagnostic.CA1854.severity = suggestion

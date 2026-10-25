@@ -158,11 +158,11 @@ Reconstructed story encounters (`ReconstructedDungeons`, switch `Ro3Emu:Reconstr
 - `DungeonTests.Reconstructed` resolves every reconstructed plan, clears each dungeon wave by wave to a win with the
   tracker vars checked, counts a clear toward its 101018 quest, and switches off.
 
-Leaving after a win (`DungeonService.AutoLeave`): a won ordinary (non-team) run tells its players "Leave the dungeon in
-15 sec." (the client's UIWords 69053 text, as a 83270 notice), pushes `LC_DunGeon_Actions.SetCountDown` with the leave
-time, then sends each player still in the room out through the normal exit. The client has no story exit script and
-shows no result window for these scenes; the 15 s is its team-dungeon close time (`PublicParamConfig`
-FiveGamePlay_CloseTime). Using it for story runs, and whether the countdown widget shows, are *(inferred)*.
+Leaving after a win (`DungeonService.AutoLeave`): a won ordinary (non-team) run sends each player still in the room out
+through the normal exit, with no countdown and no notice. The client has no story exit script and shows no result window
+for these scenes. The timing follows the Genesis capture (2026-10-25, one run of each; Genesis differs from the official
+beta): 250 ms after the result, or about 3 s after a story encounter's last closing line. It replaced a 15 s countdown
+borrowed from the team-dungeon close time (`PublicParamConfig` FiveGamePlay_CloseTime) that Genesis does not use.
 
 Story encounters (`Reconstructed/story-encounters.json`, same switch; `DungeonService.Encounter`):
 
