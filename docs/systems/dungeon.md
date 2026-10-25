@@ -120,9 +120,9 @@ Reconstructed story encounters (`ReconstructedDungeons`, switch `Ro3Emu:Reconstr
 - [dungeon-inventory.md](dungeon-inventory.md) (generated from the client data) lists every eligible scene with its
   spawn points, labels, quest stages and base map: 28 story scenes, 7 tutorial, 4 minigames, 29 Territory War zones
   and 4 developer test maps. The story scenes' combat templates (2000xxxx) exist only on the original server.
-- `src/Ro3Emu.Server/Reconstructed/dungeon-monsters.json` (embedded) rebuilds 11 of them as waves of client-known
+- `src/Ro3Emu.Server/Reconstructed/dungeon-monsters.json` (embedded) rebuilds 10 of them as waves of client-known
   NPCConfig monsters at authored points, one wave per quest stage, each spawn with its reason (point label, quest
-  text, base map) and each dungeon with a confidence: 7 high, 2 medium, 2 low. Bosses use the client's story
+  text, base map) and each dungeon with a confidence: 7 high, 2 medium, 1 low. Bosses use the client's story
   templates (530xxxx: Golden Thief Bug, Baphomet, Pharaoh, the airship's Evil Warriors/Archers/Boss,
   Elusive Pecopeco); minions use the base map's field monsters. No elite stat scaling, phase or mechanic is invented.
 - Story templates have no normal attack in the client (their server scripts chose skills); `monsterAttacks` names
@@ -132,7 +132,7 @@ Reconstructed story encounters (`ReconstructedDungeons`, switch `Ro3Emu:Reconstr
   exploration, Deniro ride, Louie's game, Moonlight Flower's hide-and-seek), the MVP party event, the Ring Test map and
   scenes without points. The first three are rebuilt as scripted scenes (below).
   Airship cannons, allied NPC companions and the Goblin Forest transfer are not reproduced. Maya's nest (1000401) moved
-  to the scripted scenes below, with its Maya fight as a fight step.
+  to the scripted scenes below, with its Maya fight as a fight step, and so did the Egg Thief's portal waves (1021301).
 - The task widget: each reconstructed wave names the DungeonQuestConfig quest it plays. 30401 carries var 10001
   `PDungeonQuestIdList` (the scene's quests up to the current one; the widget shows the last one's title and goals)
   and var 10003 `PDungeonQuestGoalParamList` (the wave's kills and size, the goal's "(done/total)"). Seen live: the
@@ -199,6 +199,11 @@ Reconstructed scripted scenes (`Reconstructed/scripted-scenes.json`, same switch
   type 24) with a scripted reconstruction plays it instead of its bare point respawns. A step's `strike` makes an
   actor's interaction cast a skill from the player at the nearest monster of the fight; with `shots`, that many strikes
   defeat it whatever the damage (inferred, for the airship's cannons).
+- A fight monster may come out `ms` after its step starts (the wave cannot end before the last one is out) and say a
+  ChatConfig line once out (`say`): 1022 from MsgSource_npc with its uid and CHAT_PARAM_NPC_NAME its NPC id, 850 ms
+  after it appears. A fight step that names its `goal` shows it on the tracker (var 10003) instead of its kills. A scene's
+  `airWalls` raise those scene-editor air walls (m_kAirWalls) for the whole run: dungeon var 133 CAirWallList
+  (LC_DunGeon_VarDefine, processed by LC_SceneCom_AirWall) in 30401. All four come from the Genesis traffic capture.
 - Moonlight Flower's hide-and-seek (3120802) is played as a game, inferred as a whole from its ChatConfig lines (a step
   `seek`, DungeonService.HideAndSeek): her three opening bubbles over her head, then rounds of a warning
   (5310005), the 5 s countdown tip (5310010) and a look. A player within 3 m of a group 27 point (the darkness that
@@ -206,6 +211,14 @@ Reconstructed scripted scenes (`Reconstructed/scripted-scenes.json`, same switch
   the darkness within 8 m of the hiding place, so the second round needs another side of the room; it wins (5310007)
   and completes the step. The lines go out as 1022 with her uid, which the client's Bubbling rows need for the head
   bubble. `ScriptedScenePacePercent` shortens these timers for tests.
+- The Egg Thief's portal waves (Southern Payon, 1021301) are rebuilt from one Genesis run (traffic capture
+  2026-10-25; Genesis is a private server that differs from the official beta, so this is how Genesis runs it): the
+  arena's air walls 31-34 go up, three neutral 5001051 stand on the arrow points 28-30 and three 5001018 just behind the
+  portals, and three waves of 3, 6 and 9 monsters come out one by one, each type always from the same portal (25: Poring
+  5001046 and the card Poring 5001049, 26: Fabre 5001047 and 5001050, 27: Boa 5001048), each saying 5380004. The
+  tracker counts the waves (0/3 to 2/3) and the lines 5380005-5380010 are said at the captured moments. One run cannot
+  tell fixed waves from rolled ones; the run is played as the fixed sequence. The scene keeps its 550 cm/s pace and
+  room-sized leash so the monsters reach the player from the portals.
 - Four story dungeons that were monster waves now play their scripted stages around the fights, each with its
   evidence and guessed parts in the file (Payon Forest, 1022001, stays a story encounter, above: Eddga with Boya and
   Wule fighting beside the player):

@@ -14,7 +14,9 @@ namespace Ro3Emu.Server.Game;
 public sealed class DungeonCatalog(GameData data, WorldData worldData, MonsterService monsters,
     SeasonService seasons, IOptions<ServerOptions> options, ReconstructedDungeons? reconstructed = null)
 {
-    public sealed record Spawn(int NpcId, MapPoint Point);
+    /// <summary>A wave's monster; a scripted fight may delay it (<paramref name="Ms"/> after the wave starts) and give it a
+    /// ChatConfig line it says once out (<paramref name="Say"/>, 0: none).</summary>
+    public sealed record Spawn(int NpcId, MapPoint Point, int Ms = 0, int Say = 0);
     /// <summary>
     /// A wave; <paramref name="Quest"/> is the DungeonQuestConfig quest it plays (0: none known). A scripted step
     /// (<paramref name="Step"/>, ReconstructedDungeons.Scripted) has no monsters: it completes on its client events.
@@ -30,6 +32,8 @@ public sealed class DungeonCatalog(GameData data, WorldData worldData, MonsterSe
         public int DurationMs => (int)Math.Clamp(GameData.Int(Config, "_iLimitTime"), 1000, int.MaxValue);
         /// <summary>A Hidden Realm run: the random entry (TenGameplayConfig _iIsRandomDungeon) this boss was drawn for.</summary>
         public RandomOrigin? Origin { get; init; }
+        /// <summary>Scene-editor air walls raised for the whole run (a scripted scene's "airWalls", dungeon var 133).</summary>
+        public IReadOnlyList<long> AirWalls { get; init; } = [];
         /// <summary>The entry whose rewards, allowance and record the run counts against: the Hidden Realm's own row when
         /// drawn from it (inferred: its boss row 4300099 carries the awards and _iMatchID), else the fought boss's.</summary>
         public JsonElement? RewardMulti => Origin?.Multi ?? Multi;
@@ -113,7 +117,10 @@ public sealed class DungeonCatalog(GameData data, WorldData worldData, MonsterSe
         // A Journey scene (24) rebuilt as a scripted scene plays its steps instead of the bare point respawns.
         var waves = mode == 24 && selected == null && reconstructed?.Scripted(req.SceneEntry) == null
             ? JourneySpawns(config) : Spawns(config, boss, worldData.Map(req.SceneEntry)!);
-        return max >= min && waves.Count > 0 ? new Plan(config, multi, boss, mark, min, max, waves) : null;
+        return max >= min && waves.Count > 0 ? new Plan(config, multi, boss, mark, min, max, waves)
+        {
+            AirWalls = boss == null && reconstructed?.Scripted(req.SceneEntry) is { } scripted ? scripted.AirWalls : [],
+        } : null;
     }
 
     /// <summary>
@@ -332,6 +339,7 @@ public sealed class DungeonCatalog(GameData data, WorldData worldData, MonsterSe
         // The scene a won run goes on to must be a dungeon that loads without a loading screen from this one.
         if (scene.Next != 0 && (data.Row("DungeonConfig", scene.Next) is not { } next
             || GameData.Int(next, "_iSameDupLoadingType") != 2)) return [];
+        if (scene.AirWalls.Any(w => !map.AirWalls.Contains(w))) return [];
         var waves = new List<Wave>();
         foreach (var step in scene.Steps)
         {
@@ -374,8 +382,9 @@ public sealed class DungeonCatalog(GameData data, WorldData worldData, MonsterSe
             var fight = new List<Spawn>();
             foreach (var spawn in step.Fight)
             {
-                if (!map.Points.TryGetValue(spawn.Point, out var at) || monsters.Template(spawn.NpcId) == null) return [];
-                fight.Add(new Spawn(spawn.NpcId, at));
+                if (!map.Points.TryGetValue(spawn.Point, out var at) || monsters.Template(spawn.NpcId) == null || spawn.Ms < 0
+                    || spawn.Say != 0 && data.Row("ChatConfig", spawn.Say) == null) return [];
+                fight.Add(new Spawn(spawn.NpcId, at, spawn.Ms, spawn.Say));
             }
             if (step.Lines.Concat(step.DoneLines).Any(l => data.Row("ChatConfig", l.Chat) == null
                     || l.By != 0 && step.Actors.All(x => x.NpcId != l.By) && step.Fight.All(x => x.NpcId != l.By))) return [];

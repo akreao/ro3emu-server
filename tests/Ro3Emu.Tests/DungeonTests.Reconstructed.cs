@@ -79,6 +79,7 @@ public sealed partial class DungeonTests
     public async Task TheEggThiefPortalWaveKeepsPursuingFromOutsideTheFieldLeash()
     {
         const long scene = 1021301;
+        Service<IOptions<ServerOptions>>().Value.ScriptedScenePacePercent = 10; // the portals' delays, shortened
         await using var alice = await InWorld("Alice");
         var fieldTemplate = Assert.IsType<MonsterTemplate>(Service<MonsterService>().Template(5000035));
         Assert.Equal(0, fieldTemplate.SpeedCm);
@@ -112,6 +113,38 @@ public sealed partial class DungeonTests
         Assert.Equal(0, fieldTemplate.SpeedCm); // the public-map template remains untouched
     }
 
+    // Genesis capture 2026-10-25 (one run): the arena's air walls, the waves counted on the tracker, the portal monsters
+    // coming out one by one, each saying its line from its own uid.
+    [ClientDataFact]
+    public async Task TheEggThiefPortalsSendTheirMonstersOneByOneAndCountTheWaves()
+    {
+        const long scene = 1021301;
+        Service<IOptions<ServerOptions>>().Value.ScriptedScenePacePercent = 10;
+        await using var alice = await InWorld("Alice");
+        await Gm(alice, "!lvl 99");
+        Assert.Equal(0, await Enter(alice, new EnterDungeonReq { SceneEntry = scene }));
+        long instance = await Load(alice, scene);
+        var plan = Session(alice).DungeonAttempt!.Plan;
+        Assert.Equal([3, 6, 9], plan.Waves.Select(w => w.Spawns.Count));
+        for (int wave = 0; wave < plan.Waves.Count; wave++)
+        {
+            // The tracker counts the waves done of three, not the wave's kills.
+            var info = await Next(alice, DungeonService.BaseInfo, DungeonBaseInfoNotify.Parser, i => i.Stage == wave + 1
+                && i.Vars.Any(v => v.VarId == 10003 && v.Vi64.SequenceEqual(new long[] { wave, 3 })));
+            // The arena's four exits stay walled for the whole run.
+            Assert.Equal([31L, 32, 33, 34], Assert.Single(info.Vars, v => v.VarId == DungeonService.AirWallVar).Vi64);
+            var actors = await WaveIn(instance, plan.Waves[wave].Spawns.Count);
+            var last = actors.MaxBy(m => m.Uid)!;
+            var line = await Next(alice, 1022, SystemBoardCastMsgNtf.Parser, m => m.ChatId == 5380004 && m.PlayerId == last.Uid);
+            Assert.Equal(MsgSource.Npc, line.Source);
+            Assert.Equal(ChatParamType.ChatParamNpcName, line.ParamList[1].Type);
+            var speaker = last;
+            Assert.Equal(speaker.Template.NpcId.ToString(System.Globalization.CultureInfo.InvariantCulture), Assert.Single(line.ParamList[1].Params));
+            foreach (var actor in actors) await Kill(alice, actor);
+        }
+        Assert.Equal((DungeonRes)1, (await Next(alice, DungeonService.Result, DungeonResNotify.Parser)).Res);
+    }
+
     [ClientDataFact]
     public async Task AReconstructedClearCountsTowardItsStoryQuestDungeonPassTarget()
     {
@@ -139,6 +172,7 @@ public sealed partial class DungeonTests
         // Boya's next dialogue (1010211001) says the player picked up a Card: Poring, and guide 26 then slots it.
         // NPC 5001049's only drop is DropGroupConfig 144: Card: Poring 1420300, _iQuestLimit 10102100 (this dungeon's quest).
         const int Card = 1420300;
+        Service<IOptions<ServerOptions>>().Value.ScriptedScenePacePercent = 10; // the portals' delays, shortened
         await using var alice = await InWorld("Alice");
         await Gm(alice, "!lvl 99");
         if (onQuest) await Gm(alice, "!quest accept 10102100");

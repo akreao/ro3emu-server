@@ -1,6 +1,8 @@
 using System.Text.Json;
+using Microsoft.Extensions.Options;
 using Romsg;
 using Ro3Emu.Bot;
+using Ro3Emu.Server;
 using Ro3Emu.Server.Data;
 using Ro3Emu.Server.Game;
 using Ro3Emu.Server.Maps;
@@ -24,6 +26,7 @@ public sealed partial class DungeonTests
     [MemberData(nameof(ScriptedScenes))]
     public async Task EveryInteractionAStepWaitsOnIsOfferedByTheClientsOwnRules(long scene)
     {
+        Service<IOptions<ServerOptions>>().Value.ScriptedScenePacePercent = 10; // delayed fight monsters, shortened
         await using var alice = await InWorld("Alice");
         await Gm(alice, "!lvl 99"); // a scene with a fight
         if (scene == 1022001) await Gm(alice, "!quest accept 10102200"); // Payon Forest's condition [1101, 10102200]
@@ -124,6 +127,7 @@ public sealed partial class DungeonTests
     [MemberData(nameof(ScriptedScenes))]
     public async Task TheUseTestAidFinishesAScriptedSceneServerSide(long scene)
     {
+        Service<IOptions<ServerOptions>>().Value.ScriptedScenePacePercent = 10; // delayed fight monsters, shortened
         await using var alice = await InWorld("Alice");
         await Gm(alice, "!lvl 99"); // a scene with a fight
         await Gm(alice, "!actors use"); // outside a scene: refused, nothing happens

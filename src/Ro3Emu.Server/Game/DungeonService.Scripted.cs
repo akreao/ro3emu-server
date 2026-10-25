@@ -1,5 +1,6 @@
 using Romsg;
 using Ro3Emu.Server.Data;
+using Ro3Emu.Server.Data.Config;
 using Ro3Emu.Server.Maps;
 using Kind = Ro3Emu.Server.Game.ReconstructedDungeons.TriggerKind;
 
@@ -91,7 +92,7 @@ public sealed partial class DungeonService
         if (step.Fallback is { FromMount: false } fallback) ScheduleFallback(a, fallback);
         int wave = a.Wave;
         foreach (var line in step.Lines.Where(l => l.Ms > 0))
-            _loop.ScheduleLegacy(TimeSpan.FromMilliseconds(line.Ms),
+            _loop.ScheduleLegacy(SceneDelay(line.Ms),
                 () => a.Wave != wave || a.Settled || a.Room.Closed ? Task.CompletedTask : SayStepLinesAsync(a, [line]));
         await SayStepLinesAsync(a, step.Lines.Where(l => l.Ms <= 0).ToArray());
         if (step.Story != 0 && !a.Settled && !a.Room.Closed)
@@ -128,7 +129,7 @@ public sealed partial class DungeonService
         foreach (var line in lines)
         {
             if (a.Room.Closed || _data.Row("ChatConfig", line.Chat) is not { } chat) continue;
-            bool bubble = GameData.Int(chat, "_iType") == 2;
+            bool bubble = new ChatConfig(chat).Type == 2;
             long speaker = line.By == 0 ? 0
                 : a.SceneActors.FirstOrDefault(u => u.NpcId == line.By)?.Uid
                   ?? a.Room.Monsters.FirstOrDefault(m => m.Template.NpcId == line.By && !m.Dead)?.Uid ?? 0;
