@@ -1162,8 +1162,12 @@ public sealed partial class CombatService : IGameTicker
         }
     }
 
-    /// <summary>HP/SP regeneration every 5 s out of combat: FinalReHp = ReHP + MaxHP × per_rehp (117/118, inferred).
-    /// MP also takes 243 ("temporary_per_magicrecover", Meditatio's "MP Recovery Speed") beside per_resp 1081 (inferred).</summary>
+    /// <summary>
+    /// HP/SP regeneration every 5 s, in combat too: FinalReHp = ReHP + MaxHP × per_rehp (117/118, inferred formula).
+    /// AttributeConfig 117/118, the panel's HP/SP Recovery, read "Recovers ${1} MP every @{1} sec." with no condition; the
+    /// out-of-combat recovery is its own pair, 120/121 rest_rehp/rest_resp, "... while out of combat", not implemented here.
+    /// MP also takes 243 ("temporary_per_magicrecover", Meditatio's "MP Recovery Speed") beside per_resp 1081 (inferred).
+    /// </summary>
     internal async Task RegenAsync(GameSession s)
     {
         if (s.Role is not { } role || s.Progress == null) return;
@@ -1175,7 +1179,7 @@ public sealed partial class CombatService : IGameTicker
             || attachment?.Cancelled == true)
         { return; }
         using var _ = held;
-        if (s.Role == null || s.Progress == null || s.Dead || (s.StatusBits & FightBit) != 0) return;
+        if (s.Role == null || s.Progress == null || s.Dead || Now < s.NoRegenUntilMs) return;
         if (s.CurrentHp == null && s.CurrentSp == null) return; // unset = full (CharacterService.Stats): nothing to restore
         var st = _character.Stats(s);
         if (st[2000] >= st[101] && st[2001] >= st[102]) return;

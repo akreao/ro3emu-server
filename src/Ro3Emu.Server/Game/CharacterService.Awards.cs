@@ -116,7 +116,7 @@ public sealed partial class CharacterService
         context.AssertRole(session.Role!.Id);
         context.BindPresentation(session);
         var attachment = session.Attachment;
-        if (taskBaseExp < 0) throw new ArgumentOutOfRangeException(nameof(taskBaseExp));
+        ArgumentOutOfRangeException.ThrowIfNegative(taskBaseExp);
         // PBManifestType.ManifestTypeRunRing (18) needs the slots LC_DAL_Reward uses to stop the wheel.
         if (manifestType is < 1 or > 19 or 15 || manifestType == TaskService.ManifestTypeRunRing && rewardIndexes is not { Count: > 0 })
             throw new ArgumentOutOfRangeException(nameof(manifestType));
@@ -239,9 +239,7 @@ public sealed partial class CharacterService
         // Other ApplyAward callers have no quest delivery boundary and retain their standalone behavior.
         var decomposed = deliveredTaskState == null && ownedAward?.CommandKind != "cd13e/grant" ? new ItemAutoDecomposeTipsNtf()
             : StageAutoDecomposeAward(session, items, staged, received, beforeGrants, gained);
-        // Base EXP brings 20% Job EXP (JobExpFromBase), quest EXP included. An award that lists its own Job EXP keeps
-        // exactly that amount (inferred: only the 1001040-1001044 packs list both).
-        if (jobExp == 0) jobExp = JobExpFromBase(baseExp);
+        jobExp = checked(jobExp + JobExpFromBase(baseExp));
         AddVirtualReward(notification, BaseExpItem, baseExp);
         AddVirtualReward(notification, JobExpItem, jobExp);
         int oldLevel = staged.Level, oldJob = staged.JobLevel;

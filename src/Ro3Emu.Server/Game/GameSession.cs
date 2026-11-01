@@ -31,11 +31,12 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
     /// <summary>While the web panel's GM console runs a command for this session (loop-owned), the GM replies sent to it.</summary>
     internal List<string>? GmReplies { get; set; }
 
-    /// <summary>Closes the connection for a recovery relogin; unlike a network drop it never waits for a reconnect.</summary>
+    /// <summary>Closes the connection for a recovery relogin, after the replies already queued; unlike a network drop it
+    /// never waits for a reconnect.</summary>
     internal void AbortForRecovery()
     {
         ReconnectBlocked = true;
-        Channel.Abort();
+        Channel.AbortAfterFlush();
     }
 
     public long HandshakeToken { get; set; }
@@ -154,6 +155,9 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
     /// <summary>Status bits (property 2701, bit 15 = fighting) and when the player last dealt or took a hit.</summary>
     public long StatusBits { get; set; }
     public long LastCombatMs { get; set; }
+    /// <summary>No natural HP/SP regeneration before this server ms (CombatService.RegenAsync). Only tests set it, to keep
+    /// the five-second regeneration out of exact HP checks; fighting does not pause it.</summary>
+    internal long NoRegenUntilMs { get; set; }
 
     /// <summary>Active buffs (BuffService) and cooldown ends in server ms: skills by group id, items by id, item share groups.</summary>
     public List<ActiveBuff> Buffs { get; } = [];

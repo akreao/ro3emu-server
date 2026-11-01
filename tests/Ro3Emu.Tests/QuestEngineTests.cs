@@ -143,7 +143,7 @@ public sealed class QuestEngineTests : IAsyncLifetime
     [ClientDataFact]
     public async Task TheCaravanQuestMarksItsGuildActivityJoinAndIsDelivered()
     {
-        // 1601000's _kEXECAction [115,3000]: ActionConfig 115 MarkGuildActivityJoin with GuildActivityConfig 3000 (#166).
+        // 1601000's _kEXECAction [115,3000]: ActionConfig 115 MarkGuildActivityJoin with DailyActivityConfig 3000 (#166).
         await using var bot = await InWorld();
         var joined = new List<long>();
         Service<TaskService>().GuildActivityJoined.Add((_, activity) => joined.Add(activity));
@@ -182,7 +182,7 @@ public sealed class QuestEngineTests : IAsyncLifetime
             var request = new ClientNpcInteractReq { DialogID = 1010104001, Areapointid = 1010104001 };
             await bot.SendGameAsync(SceneService.ClientNpcInteract, request);
             var reward = await Next(bot, CharacterService.GetRewardNotify, GetRewardNotify.Parser);
-            // 7 Base EXP brings 20% (rounded down) = 1 Job EXP.
+            // 7 Base EXP brings its share of Job EXP, rounded down (CharacterService.JobExpFromBase).
             Assert.Equal([(100, 7), (101, 1)], reward.Rewards.Select(r => (r.ItemEntry, r.Stack)));
             await Next(bot, TaskService.TaskInfoSync, DBTaskInfoIncrement.Parser,
                 m => m.CompleteTaskNum.TryGetValue(10101040, out var n) && n.All == 1);

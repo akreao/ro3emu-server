@@ -355,7 +355,7 @@ internal static class Flows
         return 0;
     }
 
-    private static bool GameRunning() => Process.GetProcessesByName("ro3").Any();
+    private static bool GameRunning() => Process.GetProcessesByName("ro3").Length != 0;
 
     /// <summary>The account RO3Emu logs in with for the player (<c>--account</c>), or null: the game asks as usual.</summary>
     internal sealed record GameLogin(string ServerUrl, string Account, string Password);

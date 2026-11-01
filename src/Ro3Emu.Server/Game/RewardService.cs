@@ -12,8 +12,8 @@ namespace Ro3Emu.Server.Game;
 /// Kill rewards: the monster's drop chains are rolled for the killer
 /// (NPCConfig._iDrop / _iNormalDrop → MultiverseGroupConfig → NPCDropConfig[env 0 reduced / env 1 Bonus Time, inferred]
 /// / additive NpcNormalDropConfig → DropPoolConfig slots → weighted DropGroupConfig rows). Item 100 rows are Base EXP,
-/// scaled by LvExpCorrectionConfig; Job EXP is BaseToJobConversionPercent (20%) of Base EXP. ServerOptions.Rates then scales EXP, roll
-/// chances and currency amounts. Currencies go to the currency map, everything
+/// scaled by LvExpCorrectionConfig; Job EXP is CharacterService.JobExpFromBase of it. ServerOptions.Rates then scales EXP,
+/// roll chances and currency amounts. Currencies go to the currency map, everything
 /// else to the bag; then one 31322 drop notify makes
 /// the client animate the loot from the corpse.
 /// </summary>
@@ -184,10 +184,9 @@ public sealed class RewardService
             baseExp = Math.Max(1, baseExp * _teams.ExpBonus(player) / 10000);
             baseExp = ScaleFieldExp(monster.Template.NpcId, player.Progress!.Level, baseExp);
         }
-        // Job EXP is 20% of the kill's Base EXP before the catch-up bonus (CharacterService.JobExpFromBase).
-        // BaseExpAddConfig catch-up below the server level raises Base EXP only (CharacterService.LevelRules);
-        // the server rates then scale both.
-        return ApplyRates(items, _character.WithPursueBonus(player.Progress!.Level, baseExp), _character.JobExpFromBase(baseExp));
+        // BaseExpAddConfig catch-up below the server level (CharacterService.LevelRules); the server rates then scale both.
+        baseExp = _character.WithPursueBonus(player.Progress!.Level, baseExp);
+        return ApplyRates(items, baseExp, _character.JobExpFromBase(baseExp));
     }
 
     /// <summary>ServerOptions.Rates on a resolved kill: currency amounts, then Base and Job EXP (Job defaults to Base).</summary>

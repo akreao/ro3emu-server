@@ -24,11 +24,15 @@ dotnet_style_qualification_for_field = false:suggestion
 dotnet_style_qualification_for_property = false:suggestion
 dotnet_style_qualification_for_method = false:suggestion
 dotnet_style_qualification_for_event = false:suggestion
-# Collections are created with [] where the target type allows it (the rules older code breaks are in the baseline).
+# Collections are created with [] where the target type allows it.
 dotnet_style_prefer_collection_expression = when_types_loosely_match
+dotnet_diagnostic.IDE0028.severity = warning
+dotnet_diagnostic.IDE0300.severity = warning
+dotnet_diagnostic.IDE0301.severity = warning
 dotnet_diagnostic.IDE0302.severity = warning
 dotnet_diagnostic.IDE0303.severity = warning
 dotnet_diagnostic.IDE0304.severity = warning
+dotnet_diagnostic.IDE0305.severity = warning
 # A class whose constructor only stores its parameters uses a primary constructor.
 csharp_style_prefer_primary_constructors = true
 dotnet_diagnostic.IDE0290.severity = warning
@@ -57,14 +61,12 @@ dotnet_naming_rule.private_fields_are_underscore_camel_case.severity = warning
 # Analyzer baseline: rules of AnalysisLevel 10.0-recommended and of the style above that older code still breaks, each
 # with its number of violations. They show as suggestions; every other rule fails the build. CI checks the numbers
 # (dotnet run --project tools/AnalyzerBaseline -c Release): more violations fail, and fewer fail until the number is
-# lowered, so new code cannot add any. Delete a rule's two lines once it reaches zero. The counts are the ones of the
+# lowered; a number higher than in the parent commit fails too, so new code cannot add any. Delete a rule's two lines once it reaches zero. The counts are the ones of the
 # SDK band CI uses (10.0.4xx, dotnet-version in .github/workflows): after an SDK update, run the tool and write the
 # numbers it prints. IDE1006 stays: the fields of DbPlan types and of the values they hold keep their names, because
 # EconomyChildIntent and EventPlanFingerprint write those names into stored receipts (ReceiptFieldNamesTests pins them).
-# 24: types that own disposable fields should be disposable
+# 22: types that own disposable fields should be disposable
 dotnet_diagnostic.CA1001.severity = suggestion
-# 1: declare types in namespaces
-dotnet_diagnostic.CA1050.severity = suggestion
 # 29: do not declare visible instance fields
 dotnet_diagnostic.CA1051.severity = suggestion
 # 3: CancellationToken parameters must come last
@@ -75,18 +77,10 @@ dotnet_diagnostic.CA1305.severity = suggestion
 dotnet_diagnostic.CA1310.severity = suggestion
 # 1: use nameof
 dotnet_diagnostic.CA1507.severity = suggestion
-# 7: use the ArgumentOutOfRangeException throw helper
-dotnet_diagnostic.CA1512.severity = suggestion
-# 1: use the ObjectDisposedException throw helper
-dotnet_diagnostic.CA1513.severity = suggestion
 # 64: identifiers should not contain underscores
 dotnet_diagnostic.CA1707.severity = suggestion
-# 1: identifiers should differ by more than case
-dotnet_diagnostic.CA1708.severity = suggestion
 # 5: identifiers should not have an incorrect suffix
 dotnet_diagnostic.CA1711.severity = suggestion
-# 1: identifiers should have the correct prefix
-dotnet_diagnostic.CA1715.severity = suggestion
 # 3: identifiers should not match keywords
 dotnet_diagnostic.CA1716.severity = suggestion
 # 5: identifiers should not contain type names
@@ -141,6 +135,9 @@ dotnet_diagnostic.IDE1006.severity = suggestion
 # The client projects keep their block-scoped namespaces (built only against a local client).
 [src/Ro3Emu.{ClientHooks,Loc}/**.cs]
 csharp_style_namespace_declarations = block_scoped:silent
+# Members inherited from the client's obfuscated classes differ only by case (Obf_KkD, Obf_kkD). CI builds without the
+# client, so it never sees this rule fail here: only a local build against the client does.
+dotnet_diagnostic.CA1708.severity = none
 
 # Projects that build only against a local client keep their style rules as suggestions.
 [src/Ro3Emu.{ClientHooks,Loc,ClientTools}/**.cs]

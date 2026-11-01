@@ -103,19 +103,17 @@ public sealed partial class CharacterService
     /// of the scaled amount (<see cref="JobExpFromBase"/>), so JobExp is not applied a second time.</summary>
     public long QuestExp(long baseExp) => RewardService.Scale(baseExp, RewardService.Rate(options.Value.Rates.BaseExp));
 
-    private long? _baseToJobPercent;
-
     /// <summary>
-    /// The Job EXP that comes with <paramref name="baseExp"/>: PublicParamConfig.BaseToJobConversionPercent (2000 = 20%),
-    /// rounded down. Beta footage: kills of 5, 9 and 23 Base EXP gave 1, 1 and 4 Job EXP, and a beta character at base
-    /// level 18 (236,056 Base EXP earned, mostly from quests) was at rank 2 job level 25 (about 47,200 Job EXP earned),
-    /// which is 20% of all Base EXP.
+    /// Job EXP that comes with <paramref name="baseExp"/> of Base EXP: PublicParamConfig.BaseToJobConversionPercent per
+    /// 10000, rounded down. *(inferred: the client's Lua never reads the parameter.)* The reading fits the tables: Job
+    /// Advance needs Base 30 and Job 40 together (TransformJobLevelLimit), BaseLvConfig asks 1,377,405 EXP up to Base 30
+    /// and JobLvConfig rank 2 asks 261,627 up to Job 40, which is 19%. It holds for every source of Base EXP, on the
+    /// amount credited: with the catch-up bonus left out, a role below the server level would reach that Advance with
+    /// a fraction of the Job EXP it asks. An award's own item 101 adds to it.
     /// </summary>
     public long JobExpFromBase(long baseExp)
     {
-        if (baseExp <= 0) return 0;
-        _baseToJobPercent ??= data.Table("PublicParamConfig").TryGetValue("BaseToJobConversionPercent", out var v)
-            && GameData.Number(v) is { } n && n >= 0 ? (long)n : 2000;
-        return baseExp * _baseToJobPercent.Value / 10000;
+        if (baseExp <= 0 || !data.Table("PublicParamConfig").TryGetValue("BaseToJobConversionPercent", out var value)) return 0;
+        return checked(baseExp * (long)(GameData.Number(value) ?? 0) / 10000);
     }
 }

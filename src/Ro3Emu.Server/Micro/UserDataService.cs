@@ -21,10 +21,14 @@ public sealed class UserDataService(SocialOwnerCache cache, OwnerRegistry owners
     // The original per-field version allocation is not exported; this service already returns all requested roles.
     private long _version = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-    public string Name => "UserDataService";
+    /// <summary>
+    /// The most roles one call may ask for: the client splits its requests at this size
+    /// (LC_DAL_RolePublic.iOneTimesGetArrtsCount = 50). Each role costs a reservation and rows on the loop, so without a
+    /// limit one 90 KB request held the loop for seconds. Keys past it are not answered, as the client never sends them.
+    /// </summary>
+    internal const int MaxRolesPerBatch = 50;
 
-    /// <summary>Roles answered per batch. The client asks for its friend, guild and team lists, far fewer than this.</summary>
-    internal const int MaxBatch = 1000;
+    public string Name => "UserDataService";
 
     public async ValueTask<object?> InvokeAsync(MicroSession session, string method, object? args)
     {
@@ -39,8 +43,9 @@ public sealed class UserDataService(SocialOwnerCache cache, OwnerRegistry owners
         var results = new List<object>();
         if (args is IDictionary<object, object?> map && map.TryGetValue("UidFieldVersions", out var v) && v is IDictionary<object, object?> uids)
         {
-            var ids = uids.Keys.Select(key => long.TryParse(key.ToString(), out long id) ? id : 0L)
-                .Where(id => id > 0).Distinct().Take(MaxBatch).ToArray();
+            object[] asks = [.. uids.Keys.Take(MaxRolesPerBatch)];
+            var ids = asks.Select(key => long.TryParse(key.ToString(), out long id) ? id : 0L)
+                .Where(id => id > 0).Distinct().ToArray();
             // Guild state has an entity revision separate from the role vector. Until guild publication
             // reaches this projection, a small worker snapshot validates it on every batch.
             while (true)
@@ -53,7 +58,7 @@ public sealed class UserDataService(SocialOwnerCache cache, OwnerRegistry owners
                 if (ids.Any(id => stamps[id] != stable[id])) continue;
                 var profiles = await cache.LoadProfilesAsync(ids, stable);
                 var answered = ids.ToHashSet();
-                foreach (var key in uids.Keys)
+                foreach (var key in asks)
                 {
                     if (!long.TryParse(key.ToString(), out long uid) || !answered.Remove(uid)) continue;
                     var asked = uids[key] is IDictionary<object, object?> types

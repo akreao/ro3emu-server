@@ -417,7 +417,12 @@ public sealed partial class SceneService(IOptions<ServerOptions> options, World 
         || row.TryGetProperty("_iInteractID", out var ids) && ids.ValueKind == System.Text.Json.JsonValueKind.Array
             && ids.EnumerateArray().Any(x => Data.GameData.Number(x) == id);
 
-    /// <summary>30012: travel to a map's born point (world-map travel, failed scene load).</summary>
+    /// <summary>
+    /// 30012: travel to a map's born point. The client sends it for its cross-scene auto path (LC_Actor_ControlMove), a failed
+    /// scene load and leaving Territory Wars (LC_TransitionBase, LC_TerritoryWarsServer: 10100), the GvG transfer node
+    /// (10110), leaving auto battle and more, so the target itself is not limited here. (inferred) A dead role gets the
+    /// client's own "Cannot teleport while dead", except to its map or the town a failed load falls back to.
+    /// </summary>
     public async Task SceneTeleportAsync(GameSession s, SceneTeleportReq req)
     {
         if (s.Handoff is { Completing: false } pending)
@@ -426,8 +431,9 @@ public sealed partial class SceneService(IOptions<ServerOptions> options, World 
             RequireReconnect(s, pending); // failed load has no nonce: do not arm an ambiguous same-map retry
             return;
         }
-        int result = data.Row("MapConfig", req.TargetMapId) == null || worldData.Map(req.TargetMapId) == null
-            || !worldData.ClientHasScene(req.TargetMapId) ? ErrorCodes.SceneMissing
+        bool known = data.Row("MapConfig", req.TargetMapId) != null && worldData.Map(req.TargetMapId) != null
+            && worldData.ClientHasScene(req.TargetMapId);
+        int result = !known ? ErrorCodes.SceneMissing : s.Dead && !RescueTarget(s, req.TargetMapId) ? ErrorCodes.TeleportDead
             : TravelRefused(s, req.TargetMapId) ? ErrorCodes.FeatureUnavailable : 0;
         await s.SendGameAsync(SceneTeleport, new SceneTeleportRsp { Result = result });
         if (result == 0) await EnterSceneAsync(s, req.TargetMapId);
@@ -435,16 +441,27 @@ public sealed partial class SceneService(IOptions<ServerOptions> options, World 
 
     /// <summary>
     /// 30012 to another map is free travel: a GM may go anywhere, a player only to a map it has been to (the world map
-    /// the client draws from 1016 VisitedMaps), alive and outside an instance or dungeon. The failed-load recovery
-    /// request names the current map and is always allowed.
+    /// the client draws from 1016 VisitedMaps), outside an instance or dungeon. The failed-load recovery request names the
+    /// current map and is always allowed, and so is a dead role's return to the main city (<see cref="RescueTarget"/>).
     /// </summary>
     private bool TravelRefused(GameSession s, long target) =>
         target != s.SceneEntry && !GmCommands.Allowed(options.Value, s.Account, loopbackTool: false)
-        && (s.Dead || s.InstanceId != 0 || !s.WorldState.Saved.VisitedMaps.Contains(target));
+        && !(s.Dead && RescueTarget(s, target))
+        && (s.InstanceId != 0 || !s.WorldState.Saved.VisitedMaps.Contains(target));
 
-    /// <summary>30131: a dialog option jumping to a numbered point of a map (e.g. the palace guard).</summary>
+    /// <summary>The role's own map or the main city (PublicParamConfig.AutoBattleAutoBackMainCityID, the 10100 of LC_TransitionBase).</summary>
+    private bool RescueTarget(GameSession s, long target) => target == s.SceneEntry
+        || data.Table("PublicParamConfig").TryGetValue("AutoBattleAutoBackMainCityID", out var city) && Data.GameData.Number(city) == target;
+
+    /// <summary>30131: a dialog option jumping to a numbered point of a map (e.g. the palace guard). A dialog needs a living
+    /// role in a loaded scene.</summary>
     public async Task CustomJumpAsync(GameSession s, ClientCustomJumpMapReq req)
     {
+        if (s.Dead || s.SceneLoading)
+        {
+            await s.SendGameAsync(CustomJumpMap, new ClientCustomJumpMapResp { Result = s.Dead ? ErrorCodes.TeleportDead : ErrorCodes.SwitchingScenes });
+            return;
+        }
         var map = data.Row("MapConfig", req.SceneId) != null ? worldData.Map(req.SceneId) : null;
         var point = s.Dead || s.SceneLoading ? null : map?.Points.GetValueOrDefault(req.PointId);
         await s.SendGameAsync(CustomJumpMap, new ClientCustomJumpMapResp

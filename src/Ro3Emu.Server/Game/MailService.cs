@@ -176,7 +176,7 @@ public sealed partial class MailService(AccountStore accounts, RoleStore roles, 
         var expired = box.Letters.Where(m => m.RemoveTime != 0 && now >= m.RemoveTime).ToArray();
         if (transaction != null)
         {
-            if (role <= 0) throw new ArgumentOutOfRangeException(nameof(role));
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(role);
             AuthorizeMailExpiry(role, transaction, expired);
         }
         if (expired.Length == 0) return false;
@@ -729,9 +729,10 @@ public sealed partial class MailService(AccountStore accounts, RoleStore roles, 
                     source = new RoleBlobSnapshot(true, purged, purge.CommittedVector(role, "mailbox"));
                 }
                 int refusal = ErrorCodes.MailMissing;
+                var letters = box.Letters.ToLookup(m => m.Id);
                 foreach (string id in request.MailUid.Distinct())
                 {
-                    var mail = box.Letters.FirstOrDefault(m => m.Id == id);
+                    var mail = letters[id].FirstOrDefault();
                     if (mail == null) { if (expiredIds.Contains(id)) refusal = ErrorCodes.MailExpired; continue; }
                     if (mail.Claimed) { refusal = ErrorCodes.MailAlreadyClaimed; continue; }
                     if (mail.Attachments.Count == 0 && mail.Items.Count == 0 && mail.Currency.Count == 0)
@@ -739,7 +740,7 @@ public sealed partial class MailService(AccountStore accounts, RoleStore roles, 
                     var attachments = mail.Attachments.Select(a => (a.Entry, a.Count, a.Bind)).ToArray();
                     var boundGoods = attachments.Where(a => a.Entry is not (100 or 101)).ToArray();
                     long baseExp = attachments.Where(a => a.Entry == 100).Sum(a => (long)a.Count);
-                    long jobExp = attachments.Where(a => a.Entry == 101).Sum(a => (long)a.Count);
+                    long jobExp = attachments.Where(a => a.Entry == 101).Sum(a => (long)a.Count) + character.JobExpFromBase(baseExp);
                     int preflight = character.PlainGrantError(session, [], mail.Items, mail.Currency,
                         boundGoods: attachments);
                     if (preflight != 0) { refusal = preflight; continue; }

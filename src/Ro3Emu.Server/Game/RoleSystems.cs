@@ -68,7 +68,7 @@ public sealed class RoleSystems(Maps.World world, ChatService chat, CharacterSer
         // 5035 must precede To-Do/scene loading: LC_OnHookHelper calls Mathf.Max on its remaining seconds.
         await afk.LoginAsync(session);
         checkpoint();
-        await tavern.LoginAsync(session); // 5043 before 5027: the Daily Tavern quest (106010) reads today's seconds
+        await character.CatchUpJobExpAsync(session); // before the quests read the role's job level
         checkpoint();
         await tasks.LoginAsync(session); // 5027 before 5056: quest-gated functions (condition 4004)
         checkpoint();
