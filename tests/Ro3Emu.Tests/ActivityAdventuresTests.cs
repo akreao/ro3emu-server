@@ -26,7 +26,7 @@ public sealed class ActivityAdventuresTests : IAsyncLifetime
     private static readonly TimeSpan MailWait = TimeSpan.FromSeconds(20);
     private WebApplication _app = null!;
     private string _http = "";
-    private readonly Dictionary<string, BotClient> _clients = new();
+    private readonly Dictionary<string, BotClient> _clients = [];
     private readonly FixedClock _clock = new();
 
     private sealed class FixedClock : TimeProvider

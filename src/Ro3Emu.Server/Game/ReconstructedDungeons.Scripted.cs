@@ -132,7 +132,7 @@ public sealed partial class ReconstructedDungeons
         public IReadOnlyList<long> AirWalls { get; init; } = [];
     }
 
-    private readonly Dictionary<long, ScriptedScene> _scripted = new();
+    private readonly Dictionary<long, ScriptedScene> _scripted = [];
 
     public IReadOnlyCollection<ScriptedScene> AllScripted => _scripted.Values;
 

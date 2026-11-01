@@ -30,7 +30,7 @@ public sealed class SkillObject : WorldUnit
     public int Touched { get; set; }
     /// <summary>Meters a touched enemy is knocked back from the field (Fire Wall); 0 = none.</summary>
     public float PushMeters { get; init; }
-    public HashSet<int> Skills { get; } = new();
+    public HashSet<int> Skills { get; } = [];
 
     public override EntityBase Entity() => new()
     {
@@ -238,7 +238,7 @@ public sealed partial class CombatService
                 .Concat(playerTargets.Select(p => (Id: p.Role!.Id, Distance: PlayerDistance(s, p))))
                 .OrderBy(p => p.Distance).ThenBy(p => p.Id).Take(maxTargets).Select(p => p.Id).ToHashSet();
             targets.RemoveAll(m => !selected.Contains(m.Uid));
-            await HitEventPlayersAsync(s, playerTargets.Where(p => selected.Contains(p.Role!.Id)).ToArray(),
+            await HitEventPlayersAsync(s, [.. playerTargets.Where(p => selected.Contains(p.Role!.Id))],
                 row, action.Request.SkillId, HitEffect(GameData.Int(row, "_iScriptShow")), action.Id, CanApplyMoreEffects,
                 action.GuardianDamage == null ? null : (id, amount) => RecordGuardianDamage(action, id, amount), center);
             if (IsGuardianEffect(row))
@@ -354,7 +354,7 @@ public sealed partial class CombatService
                 if (CanApplyMoreEffects() && firstBolt && !target.Dead && target.Hp > 0) await DisplaceTargetAsync(s, action, target, center);
             }
             // Buff1 is self for hostile selectors, but actual friend recipients for ally selectors (Detoxify, Blessing).
-            foreach (var recipient in friendly ? allies : new List<GameSession> { s })
+            foreach (var recipient in friendly ? allies : [s])
             {
                 if (!CanApplyMoreEffects()) break;
                 if (field == null && firstBolt)

@@ -527,7 +527,7 @@ public sealed class GameLoopTests : IAsyncLifetime
     {
         public int Ticks;
         public bool AllOnLoop = true;
-        public readonly List<TimeSpan> Deltas = new();
+        public readonly List<TimeSpan> Deltas = [];
 
         public void Tick(GameTime time)
         {

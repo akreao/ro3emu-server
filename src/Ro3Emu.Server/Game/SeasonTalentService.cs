@@ -210,11 +210,11 @@ public sealed partial class SeasonTalentService
 
     /// <summary>SeasonTalentTreeConfig's rows (table order), read once: a login rebuilt the unlocks several times,
     /// each time looking every field up in the JSON rows (stage G).</summary>
-    private IReadOnlyList<TalentTree> Trees() => _trees ??= _data.Table("SeasonTalentTreeConfig").Values.Select(row =>
+    private IReadOnlyList<TalentTree> Trees() => _trees ??= [.. _data.Table("SeasonTalentTreeConfig").Values.Select(row =>
         new TalentTree(GameData.Int(row, "_iId"),
             row.TryGetProperty("_kMultiverseArray", out var books) && books.ValueKind == JsonValueKind.Array
-                ? books.EnumerateArray().Select(GameData.Number).ToArray() : [],
-            GameData.Int(row, "_iTreeCondition"), GameData.Int(row, "_iNeedLevel"), GameData.Int(row, "_iUpPvPLvLimit"))).ToArray();
+                ? [.. books.EnumerateArray().Select(GameData.Number)] : [],
+            GameData.Int(row, "_iTreeCondition"), GameData.Int(row, "_iNeedLevel"), GameData.Int(row, "_iUpPvPLvLimit")))];
     private TalentTree[]? _trees;
 
     /// <summary>SeasonTalentConfig's nodes (id &gt; 0, table order) and each node's same-tree parents with their caps,
@@ -232,7 +232,7 @@ public sealed partial class SeasonTalentService
                 if (GameData.Number(v) is { } child)
                 {
                     var key = ((long)child, tree);
-                    if (!parents.TryGetValue(key, out var list)) parents[key] = list = new();
+                    if (!parents.TryGetValue(key, out var list)) parents[key] = list = [];
                     list.Add((parent, max));
                 }
         }
@@ -260,7 +260,7 @@ public sealed partial class SeasonTalentService
         _branchOf = branchOf;
         _countedIds = nodes.Where(n => n.Type is not (PvpNodeType or BranchPointType)) // the oath is added once, from its shared level
             .Select(n => n.Id).ToHashSet();
-        _nodeIds = nodes.Select(n => n.Id).ToHashSet();
+        _nodeIds = [.. nodes.Select(n => n.Id)];
         return _nodes = nodes;
     }
 
