@@ -84,7 +84,6 @@ public sealed partial class MonsterService : IMonsterBrain, IGameTicker
     /// <summary>Set by CombatService: a monster's attack on its target (the brain decides when).</summary>
     public Func<MonsterUnit, GameSession, Task>? Attack { get; set; }
     public Func<MonsterUnit, TowerPetUnit, Task>? AttackPet { get; set; }
-    public Func<MonsterUnit, MonsterUnit, Task>? AttackMonster { get; set; }
 
     public static long NowMs => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
@@ -478,11 +477,6 @@ public sealed partial class MonsterService : IMonsterBrain, IGameTicker
             }
             return;
         }
-        if (m.MonsterTarget != null)
-        {
-            FightMonster(m, map, now);
-            return;
-        }
         if (m.PetTarget != null)
         {
             FightPet(m, map, now);
@@ -592,23 +586,11 @@ public sealed partial class MonsterService : IMonsterBrain, IGameTicker
     {
         if (m.Dead || m.StaysOutOfBattle || m.WorldScene != target.WorldScene || TargetVisible?.Invoke(m, target) == false
             || Spares?.Invoke(m, target) == true || m.Template.SpeedCm == 0 && m.Template.AttackRange <= 0) return;
-        if (m.ScriptedTargeting && (m.Target != null || m.MonsterTarget != null)) return;
         bool entering = m.Target == null;
         if (entering) m.NextSwingMs = NowMs + 300;
         SetTarget(m, target);
-        m.MonsterTarget = null;
         m.Returning = false;
         if (entering && !called && m.Template.BattleCallRange > 0) CallIntoBattle(m, target);
-    }
-
-    /// <summary>An encounter owner's choice of a player target (bypasses <see cref="MonsterUnit.ScriptedTargeting"/>).</summary>
-    public void Retarget(MonsterUnit m, GameSession target)
-    {
-        if (m.Dead || m.WorldScene != target.WorldScene) return;
-        if (m.Target == null) m.NextSwingMs = Math.Max(m.NextSwingMs, NowMs + 300);
-        SetTarget(m, target);
-        m.MonsterTarget = null;
-        m.Returning = false;
     }
 
     /// <summary>
@@ -652,56 +634,6 @@ public sealed partial class MonsterService : IMonsterBrain, IGameTicker
         }
         m.PetTarget = target;
         m.Returning = false;
-    }
-
-    /// <summary>Fight another monster (story encounter companions and the boss): chase into range, swing the normal
-    /// attack. The owner picks and drops the target; a dead target or one on another map is simply let go.</summary>
-    public void Engage(MonsterUnit m, MonsterUnit target)
-    {
-        if (m.Dead || m.Hp <= 0 || target.Dead || target.Hp <= 0 || m.WorldScene != target.WorldScene) return;
-        if (m.MonsterTarget == null) m.NextSwingMs = Math.Max(m.NextSwingMs, NowMs + 300);
-        m.MonsterTarget = target;
-        if (m.Target != null) SetTarget(m, null);
-        m.Returning = false;
-    }
-
-    private void FightMonster(MonsterUnit m, MapInstance map, long now)
-    {
-        var target = m.MonsterTarget!;
-        if (target.Dead || target.Hp <= 0 || target.WorldScene != m.WorldScene)
-        {
-            m.MonsterTarget = null;
-            if (m.Moving)
-            {
-                m.Moving = false;
-                SendStop(m, now);
-            }
-            return;
-        }
-        float dist = Distance(m.X, m.Z, target.X, target.Z);
-        if (dist <= m.Template.AttackRange + 0.5f)
-        {
-            if (m.Moving)
-            {
-                m.Moving = false;
-                SendStop(m, now);
-            }
-            if (now >= m.NextSwingMs && !m.Forbids(5) && AttackMonster != null && m.Template.NormalSkill != 0)
-            {
-                m.NextSwingMs = now + m.Template.SwingIntervalMs;
-                m.Face = Angle(m.X, m.Z, target.X, target.Z);
-                _loop.TrackRuntimeDetached("monster versus monster attack", () => AttackMonster(m, target));
-            }
-            return;
-        }
-        if (m.Template.SpeedCm <= 0) return;
-        if (!m.Moving || now >= m.NextChaseMs)
-        {
-            m.NextChaseMs = now + 400;
-            float dx = target.X - m.X, dz = target.Z - m.Z;
-            float go = Math.Min(MaxSegment, dist - m.Template.AttackRange * 0.8f);
-            if (go > 0.2f) WalkTo(m, map, m.X + dx / dist * go, m.Z + dz / dist * go, 1f);
-        }
     }
 
     private void FightPet(MonsterUnit m, MapInstance map, long now)
@@ -914,7 +846,6 @@ public sealed partial class MonsterService : IMonsterBrain, IGameTicker
         EndBossSkills(m, interrupt: true);
         SetTarget(m, null);
         m.PetTarget = null;
-        m.MonsterTarget = null;
         await _world.ToUnitViewersAsync(m, CombatService.AoiAttrChange, Hp(m));
         await _world.ToUnitViewersAsync(m, CombatService.EntityBaseChange, m.StateChange());
         if (m.RuntimeMap.Kind != RuntimeMapKind.PublicLine)

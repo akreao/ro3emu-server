@@ -83,8 +83,7 @@ public sealed partial class DungeonService
         SessionRegistry sessions, RewardService rewards, AuctionService auctions, GuildStore guilds, MonsterService monsters, CombatService combat,
         SceneService scene, BuffService buffs, GameLoop loop, TimeProvider clock, ILogger<DungeonService> log, World world,
         GmCommands gm, AccountStore accounts, AwardService awards, Microsoft.Extensions.Options.IOptions<ServerOptions> options,
-        PraiseService praise, WorldInteractionService vehicles, TestingSwitches testing,
-        ReconstructedDungeons? reconstructed = null)
+        PraiseService praise, WorldInteractionService vehicles, TestingSwitches testing)
     {
         this._accounts = accounts; this._awards = awards; this._options = options.Value; this._praise = praise;
         this._testing = testing;
@@ -102,7 +101,6 @@ public sealed partial class DungeonService
         this._world = world;
         this._vehicles = vehicles;
         gm.Register("actors", "[npcId | walk <x> <z> | use] (scripted scene test aid: the step's scene actors, jump beside one, arrive at x z as a walk would, or complete the step server-side)", ActorsGmAsync);
-        gm.Register("encounter", "[next] (story encounter test aid: its stage, quest and companions; next starts the next stage now)", EncounterGmAsync);
         WireRaidTrials(combat, gm);
         teams.MultiDungeonInfo = TeamDungeonInfo;
         combat.DamageAdjusters.Add((s, m, _, _, damage) => BondDamage(s, m, damage, incoming: false));
@@ -117,7 +115,6 @@ public sealed partial class DungeonService
         combat.Taken.Add((m, s, n, dead) => { if (Active(s) is { } a && m.InstanceId == a.Room.Id) a.Stats[s.Role!.Id].TotalBeDamage += n; });
         combat.Healed.Add((s, n) => { if (Active(s) is { } a) a.Stats[s.Role!.Id].TotalCure += n; });
         character.ProgressHandlers.Add(SyncLockedAsync); // CharacterService invokes these while holding StateLock.
-        UseReconstruction(reconstructed);
     }
 
     public sealed class Attempt
@@ -166,8 +163,6 @@ public sealed partial class DungeonService
         public bool Started { get; set; }
         public bool Settled { get; set; }
         public int Wave { get; set; }
-        /// <summary>The scene's story boss encounter while it runs (DungeonService.Encounter).</summary>
-        internal EncounterRun? Encounter { get; set; }
         public int Spawned { get; set; }
         /// <summary>Spawned before the current wave (its own kill count is Killed.Count minus this).</summary>
         public int WaveBase { get; set; }
@@ -509,7 +504,7 @@ public sealed partial class DungeonService
     /// </summary>
     private DungeonVar? QuestList(Attempt a)
     {
-        if (CurrentQuest(a) is not (> 0 and var current)) return null;
+        if (a.Wave >= a.Plan.Waves.Count || a.Plan.Waves[a.Wave].Quest is not (> 0 and var current)) return null;
         var v = new DungeonVar { VarId = 10001 };
         v.Vi64.Add(_data.Table("DungeonQuestConfig").Values
             .Where(q => GameData.Int(q, "_iDungeonID") == a.Plan.SceneEntry && GameData.Int(q, "_iQuestID") <= current)
@@ -524,7 +519,7 @@ public sealed partial class DungeonService
     /// </summary>
     private static DungeonVar? GoalParams(Attempt a)
     {
-        if (a.Wave >= a.Plan.Waves.Count || CurrentQuest(a) <= 0) return null;
+        if (a.Wave >= a.Plan.Waves.Count || a.Plan.Waves[a.Wave].Quest <= 0) return null;
         int size = a.Plan.Waves[a.Wave].Spawns.Count;
         var v = new DungeonVar { VarId = 10003 };
         if (Step(a) is { } step && (size == 0 || step.FixedGoal))
@@ -533,9 +528,7 @@ public sealed partial class DungeonService
             v.Vi64.Add(step.All ? [a.StepSeen.Count, step.Complete.Count] : [step.Goal.Done, step.Goal.Total]);
             return v;
         }
-        // A story encounter's stage shows done as it ends (Genesis capture: var 10003 [1,1] with the black screen).
-        int done = a.Encounter is { Ending: true, Done: false } ? size : Math.Clamp(a.Killed.Count - a.WaveBase, 0, size);
-        v.Vi64.Add([done, size]);
+        v.Vi64.Add([Math.Clamp(a.Killed.Count - a.WaveBase, 0, size), size]);
         return v;
     }
 
@@ -603,7 +596,6 @@ public sealed partial class DungeonService
         a.StartedAt = _loop.Now; a.StartMs = MonsterService.NowMs;
         await BroadcastAsync(a, BaseInfo, Snapshot(a));
         await SpawnWaveAsync(a);
-        await BeginEncounterAsync(a);
         StartRaidTrials(a);
         _loop.ScheduleLegacy(TimeSpan.FromMilliseconds(a.Plan.DurationMs), () => a.Settled || a.Room.Closed ? Task.CompletedTask : SettleAsync(a, false));
     }
@@ -978,7 +970,6 @@ public sealed partial class DungeonService
     {
         if (a.Settled || a.Room.Closed) return;
         await EndStepMovementAsync(a);
-        await EndEncounterAsync(a, won);
         if (a.GuildChallenge is { } challenge)
         {
             a.Settled = true;

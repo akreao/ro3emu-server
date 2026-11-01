@@ -6,82 +6,82 @@
   },
   "soloTuning": {
     "5300001": {
-      "hp": 10000,
+      "hp": 1170,
       "attack": 1500,
-      "why": "Eddga: the story encounter (story-encounters.json 1022001) brings his companions back, so his HP is the client's again (measured: the twelve adventurers take about 300 HP/s off him); his attack keeps the solo tuning."
+      "why": "Eddga: solo tuning, see about; fought beside the companions Boya and Wule (scripted-scenes.json 1022001), whose expected damage counts with the player's"
     },
     "5300002": {
-      "hp": 970,
+      "hp": 580,
       "attack": 410,
       "why": "Golden Thief Bug: solo tuning, see about"
     },
     "5300003": {
-      "hp": 900,
+      "hp": 540,
       "attack": 360,
       "why": "Baphomet: solo tuning, see about"
     },
     "5300006": {
-      "hp": 4030,
+      "hp": 2420,
       "attack": 1035,
       "why": "Maya: solo tuning, see about"
     },
     "5300010": {
-      "hp": 660,
+      "hp": 390,
       "attack": 420,
       "why": "Pharaoh: solo tuning, see about"
     },
     "5300018": {
-      "hp": 4870,
+      "hp": 2870,
       "attack": 1230,
       "why": "Evil Boss: solo tuning, see about"
     },
     "5300042": {
-      "hp": 20000,
-      "attack": 1800,
-      "why": "airship boarder: HP and attack scaled so a group of three is a solo fight at L20, see about"
+      "hp": 10000,
+      "attack": 2000,
+      "why": "airship boarder: attack scaled so a group of three is a solo fight at L20, see about"
     },
     "5300043": {
-      "hp": 20000,
-      "attack": 1800,
-      "why": "airship boarder: HP and attack scaled so a group of three is a solo fight at L20, see about"
+      "hp": 10000,
+      "attack": 2000,
+      "why": "airship boarder: attack scaled so a group of three is a solo fight at L20, see about"
     },
     "5300044": {
-      "hp": 20000,
-      "attack": 1800,
-      "why": "airship boarder: HP and attack scaled so a group of three is a solo fight at L20, see about"
+      "hp": 10000,
+      "attack": 2000,
+      "why": "airship boarder: attack scaled so a group of three is a solo fight at L20, see about"
     },
     "5300045": {
-      "hp": 20000,
-      "attack": 1800,
-      "why": "airship boarder: HP and attack scaled so a group of three is a solo fight at L20, see about"
+      "hp": 10000,
+      "attack": 2000,
+      "why": "airship boarder: attack scaled so a group of three is a solo fight at L20, see about"
     },
     "5300046": {
-      "hp": 20000,
-      "attack": 1800,
-      "why": "airship boarder: HP and attack scaled so a group of three is a solo fight at L20, see about"
+      "hp": 10000,
+      "attack": 2000,
+      "why": "airship boarder: attack scaled so a group of three is a solo fight at L20, see about"
     },
     "5300047": {
-      "hp": 20000,
-      "attack": 1800,
-      "why": "airship boarder: HP and attack scaled so a group of three is a solo fight at L20, see about"
+      "hp": 10000,
+      "attack": 2000,
+      "why": "airship boarder: attack scaled so a group of three is a solo fight at L20, see about"
     },
     "5300048": {
-      "hp": 20000,
-      "attack": 1800,
-      "why": "airship boarder: HP and attack scaled so a group of three is a solo fight at L20, see about"
+      "hp": 10000,
+      "attack": 2000,
+      "why": "airship boarder: attack scaled so a group of three is a solo fight at L20, see about"
     },
     "5300049": {
-      "hp": 20000,
-      "attack": 1800,
-      "why": "airship boarder: HP and attack scaled so a group of three is a solo fight at L20, see about"
+      "hp": 10000,
+      "attack": 2000,
+      "why": "airship boarder: attack scaled so a group of three is a solo fight at L20, see about"
     },
     "5300050": {
-      "hp": 20000,
-      "attack": 1800,
-      "why": "airship boarder: HP and attack scaled so a group of three is a solo fight at L20, see about"
+      "hp": 10000,
+      "attack": 2000,
+      "why": "airship boarder: attack scaled so a group of three is a solo fight at L20, see about"
     },
     "5300082": {
-      "hp": 8850,
+      "hp": 5210,
       "attack": 2880,
       "why": "Elusive Pecopeco: solo tuning, see about"
     },
@@ -398,6 +398,7 @@
     "1010101": "Izlude scene; no spawn points.",
     "1011301": "Prontera North Gate: rebuilt as a scripted scene with a fight step (scripted-scenes.json).",
     "1015052": "Culvert variant without spawn points.",
+    "1022001": "Payon Forest: rebuilt as a scripted scene with a fight step (scripted-scenes.json).",
     "1023001": "Payon instance without spawn points.",
     "1051001": "Peco Peco nest: rebuilt as a scripted scene with a fight step (scripted-scenes.json).",
     "1054001": "Ant Hell scene without spawn points.",

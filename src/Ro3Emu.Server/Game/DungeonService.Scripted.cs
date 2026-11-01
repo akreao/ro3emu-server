@@ -108,7 +108,7 @@ public sealed partial class DungeonService
     }
 
     /// <summary>
-    /// A step's story lines, as the story encounters say theirs (30404 DungeonEventInvokeClientFunc): a type-2 bubble
+    /// A step's story lines (30404 DungeonEventInvokeClientFunc): a type-2 bubble
     /// through ShowShoutingChatBubble(chat, speaker uid), needing its speaker (a shown scene actor or a living monster of
     /// the room with that NPC id), every other type through Shouting(chat). When each line is said is (inferred).
     /// </summary>

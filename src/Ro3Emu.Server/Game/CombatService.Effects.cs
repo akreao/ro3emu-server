@@ -303,7 +303,7 @@ public sealed partial class CombatService
                 {
                     var (amount, result) = MonsterHitDamage(s, attacker, target, row, action, stage, bolt, bolts);
                     long beforeHp = target.Hp;
-                    target.Hp = target.HpAfter(beforeHp, amount);
+                    target.Hp = Math.Max(0, beforeHp - amount);
                     long effective = beforeHp - target.Hp;
                     RecordGuardianDamage(action, target.Uid, amount);
                     if (target.Hp == 0) killed.Add(target); // reserve before awaited damage callbacks

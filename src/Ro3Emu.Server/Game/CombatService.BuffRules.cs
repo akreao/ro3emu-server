@@ -156,7 +156,7 @@ public sealed partial class CombatService
         var defender = AsDefender(m);
         long amount = PeriodicAmount(attacker, defender, rule, buff.PileCount);
         long before = m.Hp;
-        m.Hp = m.HpAfter(before, amount);
+        m.Hp = Math.Max(0, before - amount);
         bool lethal = m.Hp == 0; // reserved before the awaited settlement, like a skill hit
         try
         {

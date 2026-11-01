@@ -47,7 +47,6 @@ public sealed partial class ReconstructedDungeons
                 entry.Value.GetProperty("confidence").GetString() ?? "", waves);
         }
         LoadScriptedScenes();
-        LoadEncounters();
         LoadRaidTrials();
     }
 

@@ -337,7 +337,6 @@ public sealed partial class CombatService : IGameTicker
         character.JobChanged.Add(SyncCompanionsAsync);
         scene.Loaded.Add(SyncCompanionsAsync);
         monsters.AttackPet = MonsterAttackPetAsync;
-        monsters.AttackMonster = MonsterAttackMonsterAsync;
         buffs.UnitChanged.Add(PublishTowerPetStatsAsync);
         WireBuffRules();
         WireBossSkills();
@@ -453,7 +452,7 @@ public sealed partial class CombatService : IGameTicker
                     var (damage, result) = Damage(attacker, defender, row);
                     foreach (var adjust in MonsterDamageAdjusters) damage = adjust(monster, damage, false);
                     long previousHp = monster.Hp;
-                    monster.Hp = monster.HpAfter(monster.Hp, damage);
+                    monster.Hp = Math.Max(0, monster.Hp - damage);
                     if (monster.Hp == 0) killed.Add(monster); // reserve before awaited callbacks
                     await SettleMonsterHitAsync(owner, monster, previousHp, damage);
                     hit.Dsts.Add(new DamageInfo

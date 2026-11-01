@@ -11,14 +11,12 @@ public sealed partial class DungeonService
 {
     /// <summary>How long after the result a won story run with nothing left to say sends its players out (Genesis).</summary>
     private const int AutoLeaveMs = 250;
-    /// <summary>How long after its last closing line a won story run sends its players out (Genesis).</summary>
-    private const int AutoLeaveAfterLinesMs = 3000;
 
     private Task ScheduleAutoLeaveAsync(Attempt a)
     {
         if (a.Plan.Multi != null || a.GuildChallenge != null || a.Dracula != null || a.Room.Closed) return Task.CompletedTask;
         var members = Present(a).Where(a.Loaded.Contains).ToArray();
-        _loop.ScheduleLegacy(TimeSpan.FromMilliseconds(AutoLeaveDelayMs(a)), async () =>
+        _loop.ScheduleLegacy(TimeSpan.FromMilliseconds(AutoLeaveMs), async () =>
         {
             foreach (var s in members)
             {
@@ -31,9 +29,4 @@ public sealed partial class DungeonService
         });
         return Task.CompletedTask;
     }
-
-    /// <summary>A story encounter's closing lines are said first; otherwise the players leave at once.</summary>
-    private static int AutoLeaveDelayMs(Attempt a) => a.Encounter?.Def.WinLines is { Count: > 0 } lines
-        ? lines.Max(l => l.Ms) + AutoLeaveAfterLinesMs
-        : AutoLeaveMs;
 }

@@ -85,16 +85,6 @@ public class MonsterUnit : WorldUnit
     public GameSession? Target { get; set; }
     /// <summary>Tower pet currently drawing this monster's attacks; owner remains the fallback target (inferred).</summary>
     public TowerPetUnit? PetTarget { get; set; }
-    /// <summary>Another monster this one fights: a story encounter's allied companion and the boss it attacks, or the
-    /// boss turning on a companion (DungeonService.Encounter). Its owner chooses it; the brain only chases and swings.</summary>
-    public MonsterUnit? MonsterTarget { get; set; }
-    /// <summary>Hits do not take HP below this (a story boss while its encounter has stages left); 0: none.</summary>
-    public long HpFloor { get; set; }
-
-    /// <summary>The HP left after <paramref name="damage"/> from <paramref name="before"/>, never under <see cref="HpFloor"/>.</summary>
-    public long HpAfter(long before, long damage) => Math.Max(Math.Min(before, HpFloor), before - damage);
-    /// <summary>An encounter owner chooses this unit's targets: hits taken do not redirect it (MonsterService.Engage).</summary>
-    public bool ScriptedTargeting { get; set; }
     public long NextSwingMs { get; set; }
     public long NextChaseMs { get; set; }
     public bool Returning { get; set; }

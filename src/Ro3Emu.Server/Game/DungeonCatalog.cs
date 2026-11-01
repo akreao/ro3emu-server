@@ -124,10 +124,10 @@ public sealed class DungeonCatalog(GameData data, WorldData worldData, MonsterSe
         } : null;
     }
 
-    /// <summary>The air walls a reconstructed scene or story encounter raises, when the scene editor has them all.</summary>
+    /// <summary>The air walls a reconstructed scene raises, when the scene editor has them all.</summary>
     private IReadOnlyList<long> SceneAirWalls(long scene)
     {
-        var walls = reconstructed?.Scripted(scene)?.AirWalls ?? reconstructed?.EncounterFor(scene)?.AirWalls ?? [];
+        var walls = reconstructed?.Scripted(scene)?.AirWalls ?? [];
         return worldData.Map(scene) is { } map && walls.All(map.AirWalls.ContainsKey) ? walls : [];
     }
 

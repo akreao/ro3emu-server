@@ -577,6 +577,37 @@
         }
       ]
     },
+    "1022001": {
+      "name": "Payon Forest: Eddga, Boya and Wule",
+      "confidence": "low",
+      "evidence": ["DungeonQuestConfig 5300000-5300001: 1 'Encounter Eddga' [5,0,1] 'Cover Boya and Wule'; 2 'Work Together' [5,0,1] 'Join the Adventurers and defeat Eddga'. Task 10102200 'A Dangerous Battle' ('Defeat Eddga') enters it by its accept action 3000.", "Editor sc_pay_fild10_001_pl01: 20 boss位置 (boss position, NpcLevelPointRespawnConfig: 5300001 Eddga), 21 唔勒 (Wule), 23 保亚 (Boya), 22 对峙点 (standoff point) between them and the boss; groups 24 and 40 each hold six adventurer points by class: 战 warrior, 猎 hunter, 奶 priest, 商 merchant, 刺 assassin, 法 mage.", "NPCConfig 5300086 Wule and 5300087 Boya: camp 1 (the player's side), AI 5300007, own skills (MainStory_WuLe ...): the story companions; 5300080/5300081, the same pair in camp 3, are the hostile versions.", "AIConfig 5300007: _iSearchTime 100, _iStayInPlace 1, _iViewRange 10000, _iAttackTickTime 1000. SkillConfig 5353901/5353601 (Wule) and 5354001/5353701 (Boya): cooldowns 15000/2000 ms, reach 600/400 and 600/350 cm."],
+      "guessed": ["'Cover Boya and Wule' completes on reaching the standoff point 22 (within 3 m), stepping between them and Eddga, who waits at his point meanwhile.", "Boya and Wule are companions while Eddga fights (CompanionUnit): each attacks the nearest monster within _iViewRange with the first listed ready skill that reaches it, walks toward it (31081, NPCConfig _iSpeed) when none does, never farther than AIConfig _iChaseDistance from its point, and walks back to its point with no target (AIConfig 5300007 _iStayInPlace 1 read as 'goes back to its point', not 'never moves'); Eddga answers the one that hit him once no player holds him (a player comes first: an aggressive monster keeps scanning for players while it answers a companion, and one that cannot move stops answering a companion out of its reach); a boss area skill that hits tower pets hits a companion inside it too; a kill of theirs is credited to the first present, loaded participant who is alive, else the first present, loaded one; one that falls does not come back. In the first step they are plain actors, shown but not fighting.", "The adventurers of groups 24 and 40 are not shown: no client NPC is bound to their class points ('Join the Adventurers' is the fight with Eddga)."],
+      "steps": [
+        {
+          "quest": 1,
+          "stage": "Encounter Eddga: cover Boya and Wule",
+          "actors": [
+            { "npc": 5300086, "point": 21, "why": "Wule at 唔勒" },
+            { "npc": 5300087, "point": 23, "why": "Boya at 保亚" },
+            { "npc": 5300001, "point": 20, "why": "Eddga at boss位置, not yet fighting" }
+          ],
+          "complete": [
+            { "point": 22, "radius": 3, "why": "the standoff point between the pair and Eddga (inferred)" }
+          ]
+        },
+        {
+          "quest": 2,
+          "stage": "Work Together: defeat Eddga",
+          "actors": [
+            { "npc": 5300086, "point": 21, "companion": true, "why": "Wule fights beside the player: camp 1, his own _kSkills" },
+            { "npc": 5300087, "point": 23, "companion": true, "why": "Boya fights beside the player: camp 1, her own _kSkills" }
+          ],
+          "fight": [
+            { "point": 20, "npc": 5300001, "why": "NpcLevelPointRespawnConfig binds the boss point to the story Eddga 5300001" }
+          ]
+        }
+      ]
+    },
     "1051001": {
       "name": "Desert Crossroad: the Peco Peco nest and Bragis",
       "confidence": "medium",
