@@ -5,7 +5,7 @@ using Ro3Emu.Server.Game;
 namespace Ro3Emu.Server.Net;
 
 /// <summary>Accepts TCP connections on one port and runs a <see cref="PhonestChannel"/> per client.</summary>
-public abstract class GateListener(IPAddress address, int port, ILogger log, Diagnostics.ServerMetrics? metrics = null) : BackgroundService
+public abstract partial class GateListener(IPAddress address, int port, ILogger log, Diagnostics.ServerMetrics? metrics = null) : BackgroundService
 {
     private const int MaxServeTasks = 4096;
     private readonly object _servesGate = new();
@@ -104,7 +104,7 @@ public abstract class GateListener(IPAddress address, int port, ILogger log, Dia
                     var task = Task.Run(() => ServeAsync(socket, ct, completion), CancellationToken.None);
                     _serves.Add(id, (socket, task));
                     if (remote != null) _perAddress[remote] = _perAddress.GetValueOrDefault(remote) + 1;
-                    _ = task.ContinueWith(_ =>
+                    var removed = task.ContinueWith(_ =>
                         {
                             lock (_servesGate)
                             {
@@ -113,6 +113,8 @@ public abstract class GateListener(IPAddress address, int port, ILogger log, Dia
                             }
                         },
                         CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                    // Stop drains the removal, not just the serve: the count it reports is then already down.
+                    if (_serves.ContainsKey(id)) _serves[id] = (socket, removed);
                 }
             }
         }
@@ -159,6 +161,11 @@ public abstract class GateListener(IPAddress address, int port, ILogger log, Dia
             catch (Exception e) when (e is SocketException or OperationCanceledException or IOException)
             {
             }
+            catch (Exception e) when (e is InvalidDataException or Google.Protobuf.InvalidProtocolBufferException)
+            {
+                // Bytes that are not the client's framing (port scanners, a wrong key): one line without a stack.
+                LogNotAFrame(Log, Name, channel.Remote, e.Message);
+            }
             catch (Exception e)
             {
                 Log.LogError(e, "{Name}: {Remote} failed", Name, channel.Remote);
@@ -179,6 +186,10 @@ public abstract class GateListener(IPAddress address, int port, ILogger log, Dia
         }
         finally { _serveCompletion.Value = null; completion?.Dispose(); }
     }
+
+    // The reasons are the framing's and protobuf's own short messages, not client text.
+    [LoggerMessage(Level = LogLevel.Warning, Message = "{Name}: {Remote} sent data that is not a client frame ({Reason}); closing")]
+    private static partial void LogNotAFrame(ILogger logger, string name, string remote, string reason);
 
     /// <summary>Ends a connection that has not encrypted, or not signed in, in time (it would hold a slot forever).</summary>
     private async Task WatchHandshakeAsync(PhonestChannel channel, CancellationTokenSource deadline)

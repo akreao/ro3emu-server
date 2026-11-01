@@ -49,6 +49,7 @@ public sealed partial class ReconstructedDungeons
         }
         LoadScriptedScenes();
         LoadEncounters();
+        LoadRaidTrials();
     }
 
     public bool Enabled { get; }

@@ -28,6 +28,9 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
     /// without NPCs, since the client's socket resync waits for one (spec §1.6.5).</summary>
     internal bool ReconnectAoiPending { get; set; }
 
+    /// <summary>While the web panel's GM console runs a command for this session (loop-owned), the GM replies sent to it.</summary>
+    internal List<string>? GmReplies { get; set; }
+
     /// <summary>Closes the connection for a recovery relogin; unlike a network drop it never waits for a reconnect.</summary>
     internal void AbortForRecovery()
     {
@@ -141,8 +144,8 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
 
     /// <summary>Authoritative cast generation; delayed effects cannot outlive an interrupted/replaced cast.</summary>
     public ActiveSkillCast? SkillCast { get; set; }
-    /// <summary>The last accepted normal attack, which paces the next one (CombatService.NormalAttackTooSoon).</summary>
-    internal ActiveSkillCast? LastNormalAttack { get; set; }
+    /// <summary>The running Skill Bar Lineup (CombatService.StartLineup); pressing the Skill Bar again replaces it.</summary>
+    internal object? LineupRun { get; set; }
     public SemaphoreSlim SkillCastGate { get; } = new(1, 1);
     public List<SkillObject> SkillObjects { get; } = new();
     public Dictionary<(int Group, int Mode), long> SkillModeCds { get; } = new();
@@ -167,7 +170,7 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
     /// <summary>No other player shows this one (World): a Survivor Battle spectator whose view follows the watched
     /// teammate. Set through World.SetHiddenAsync; a scene join clears it.</summary>
     public bool AoiHidden { get; internal set; }
-    /// <summary>Lasting buffs the falcon, wolf or Madogear grant right now (CombatService.Companions).</summary>
+    /// <summary>Lasting buffs the falcon, wolf or Madogear grant right now (CombatService.ClassCompanions).</summary>
     internal HashSet<int> CompanionBuffs { get; set; } = new();
     /// <summary>The battle mount ridden when companions were last synced: a change resends the normal attack.</summary>
     internal long CompanionRide { get; set; }
@@ -213,11 +216,12 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
     /// <summary>GM override added to the speed attribute (113), not saved (!speed).</summary>
     public long SpeedBonus { get; set; }
 
-    /// <summary>GM panel GmUnlimit: hits on this player deal no damage. Test aid, not saved.</summary>
-    public bool GmInvincible { get; set; }
-
-    /// <summary>GM panel GmNoCD: casts start no cooldown. Test aid, not saved.</summary>
-    public bool GmNoCooldown { get; set; }
+    /// <summary>GM panel combat switches (GmNoCD, GmDamageFix, GmUnlimit), not saved; combat reads the field per cast or hit.</summary>
+    public GmCombatSwitches GmCombat { get; set; }
+    /// <summary>GM panel attribute changes (GmSetEntityAttr / GmChangeEntityAttr) as raw contributions, not saved.</summary>
+    internal Dictionary<int, double>? GmAttributes { get; set; }
+    /// <summary>The skill a GM panel cast (GmCastSkill / GmTargetCastSkill) may use unlearned, only while it is admitted.</summary>
+    internal int GmCastSkill { get; set; }
 
     /// <summary>Between sending 70010 and the client's 30005: walks still refer to the old map and are dropped.</summary>
     public bool SceneLoading { get; set; }
@@ -225,8 +229,20 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
     /// <summary>Time of the last accepted walk (speed check).</summary>
     public DateTime LastWalkUtc { get; set; }
 
-    /// <summary>Walk check refusals of this session (logged sparsely).</summary>
-    internal int WalkCheckWarnings { get; set; }
+    /// <summary>The distance the walk check still lets this client report (SceneService.AcceptWalkAsync).</summary>
+    internal WalkAllowance WalkAllowance { get; } = new();
+
+    /// <summary>The game message budgets of this connection (GameMessageHandler.WithinRate).</summary>
+    internal SessionRates? MessageRates { get; set; }
+
+    /// <summary>The chat line budget of this connection (ChatService).</summary>
+    internal RateBucket? ChatLines { get; set; }
+
+    /// <summary>The same for flight moves (WorldCoreService.FlyMoveAsync), at the flight speed.</summary>
+    internal WalkAllowance FlightAllowance { get; } = new();
+
+    /// <summary>WalkReq.dir of the last accepted walk: degrees, 0 = +z, clockwise toward +x.</summary>
+    public float WalkDir { get; set; }
 
     /// <summary>The last accepted walk was a move, not a stop: the client is somewhere along it now.</summary>
     public bool Walking { get; set; }
@@ -311,6 +327,8 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
     public PronteraDefenseService.State? Defense { get; set; }
     public TimedBattleService.State? TimedBattle { get; set; }
     public int EventFaction { get; set; }
+    /// <summary>EntityBase.teamId on this player's unit: its party (TeamService.SyncUnitTeamAsync), 0 when solo.</summary>
+    public long UnitTeamId { get; set; }
     public Romsg.DBTrainingGroundInfo? Training { get; set; }
     public long? ActivityServerDay { get; set; }
     public Romsg.DBLotteryData? Lottery { get; set; }
@@ -325,19 +343,15 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
     /// <summary>Chat emoticons unlocked by items (5041, role blob "emoji_info"); EmojiService.</summary>
     public Romsg.DBEmojiInfo? EmojiInfo { get; set; }
 
+    /// <summary>Tavern Star Power, active days and today's time in a room (5043, role blob "barroom"); TavernService.</summary>
+    public TavernService.RoleState? Tavern { get; set; }
+
     /// <summary>Profile card presets and 620 item unlocks (5016, role blob "personal"; other unlockInfos are derived); PersonalService.</summary>
     public Romsg.DBPersonalInfo? Personal { get; set; }
 
     /// <summary>Chat cosmetics unlocked by items and the worn choices (role blob "social_outfit"; 5044 lays them over the
     /// configuration's defaults); SocialOutfitService.</summary>
     public Romsg.DBSocialOutfit? SocialOutfit { get; set; }
-
-    /// <summary>Tavern Star Power, today's seconds in a room and completed days (5043, role blob "barroom"); TavernService.
-    /// barRoomId is the room the role is in now (rooms live in memory).</summary>
-    public Romsg.DBBarRoomInfo? Tavern { get; set; }
-
-    /// <summary>When this role's tavern seconds were last counted (unix seconds; 0 when not in a room); TavernService.</summary>
-    public long TavernCountedAt { get; set; }
 
     /// <summary>The emote or sitting in progress (state 17 Prepare or 14 Play); runtime only, gone at logout.</summary>
     public EmojiService.Emote? Emote { get; set; }
@@ -440,6 +454,9 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
 
     /// <summary>GM test aid only: this role session may start a multi-dungeon match alone. Never persisted.</summary>
     public bool DungeonSoloMatch { get; set; }
+
+    /// <summary>GM panel GmPlayerAsset openallfunc: every FunctionConfig function counts as open. This role session only (inferred).</summary>
+    public bool GmAllFunctionsOpen { get; set; }
 
     /// <summary>Territory war role counters and the shared, guild-qualified battle instance.</summary>
     public TerritoryWarsService.RoleState? TerritoryWars { get; set; }

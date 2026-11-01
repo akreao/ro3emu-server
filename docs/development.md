@@ -9,7 +9,8 @@ same for joining, and both take any RO3Emu.exe option. On Linux, `scripts/server
 The same steps by hand:
 
 ```bash
-# game data from your client into data/ (config, scene editor, skills, nav, message table, English texts)
+# game data from your client into data/ (config, scene editor, skills, nav, message table, English texts, and the
+# web panel's pictures in data/icons; --no-icons skips them)
 dotnet run --project src/Ro3Emu.Setup -c Release -- export C:\Games\ROO_PC data
 # the server: HTTP 5380, micro gate 20000, game gate 33100, all on loopback; data/ holds its keys and database
 dotnet run --project src/Ro3Emu.Server -c Release
@@ -59,7 +60,8 @@ dotnet run -c Release --project src/Ro3Emu.LoadTest -- --scenario S2 --server-lo
 S1 is a login storm (500 logins in 60 s), S2 300 players in one town, S3 500 players in a mixed economy with a ledger
 check, S4 map changes and relogs, S5 a full castle siege (two guilds of 80). Each report marks every target (tick p99,
 reply latency, login time, players per view, database work on the loop, GC, CPU, memory) as PASS, FAIL or NOT MEASURED
-with the evidence.
+with the evidence. Against a server started elsewhere (`--server URL`), pass a copy of its `data/operator.token` with
+`--operator-token-file`: the metrics and the GM tool answer only with it.
 
 ## Releases
 
@@ -91,7 +93,7 @@ flowchart LR
 - **Visibility:** a grid per scene, views capped at the client's own limit, nearest players first; broadcasts are
   serialized once and shared.
 - **Map lines:** busy public maps open more channels and close empty ones.
-- **Metrics:** `/ro3emu/metrics` (loopback only) shows tick, queue and per-message costs and database work by call
+- **Metrics:** `/ro3emu/metrics` (loopback, with the operator token: [GM access](guide/gm-access.md#the-loopback-tool)) shows tick, queue and per-message costs and database work by call
   site.
 
 ## Contributing

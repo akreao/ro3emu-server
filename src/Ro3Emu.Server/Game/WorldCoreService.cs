@@ -38,6 +38,8 @@ public sealed class WorldSessionState
     public long ReviveHpRate { get; set; } = 10000;
     public long ReviveSpRate { get; set; } = 10000;
     public long TemporaryLeaveUntilMs { get; set; }
+    public long TypingWindowStartMs { get; set; }
+    public int TypingInWindow { get; set; }
 }
 
 /// <summary>
@@ -98,7 +100,7 @@ public sealed partial class WorldCoreService : IGameTicker
         monsters.TargetChanged.Add(TargetChangedAsync);
         combat.ReviveOffer = OfferReviveAsync;
         combat.CanLand = CanLand;
-        combat.BeforeCast.Add(MountFlightCastAsync); // a flying mount's take-off and landing (WorldCoreService.MountFlight)
+        combat.BeforeCastSkill.Add(MountFlightCastAsync); // a flying mount's take-off and landing (WorldCoreService.MountFlight)
         FlightChanged.Add(combat.FlightChangedAsync);
         combat.ReviveCheck = dungeons.ExternalReviveError;
         combat.ReviveItemSkill = ReviveItemSkillAsync;
@@ -144,13 +146,12 @@ public sealed partial class WorldCoreService : IGameTicker
         if (s.WorldState.Saved.VisitedMaps.Count > 0) await VisitsAsync(s);
         // Datasets this server has no content for, sent in their empty form so each asset category is materialized
         // (inferred): 5060 DBWizardInfo forbiddenItems is an operator item freeze (LC_DAL_Knapsack reads it nil-safe), 5052
-        // DBQuestionnaireData holds operator surveys (no client table), 5043 DBBarRoomInfo is the Tavern room (none yet).
+        // DBQuestionnaireData holds operator surveys (no client table). 5043 DBBarRoomInfo follows from TavernService.
         await CharacterService.SyncAsync(s, WizardSync, new DBWizardInfo());
         await CharacterService.SyncAsync(s, QuestionnaireSync, new DBQuestionnaireData());
-        await CharacterService.SyncAsync(s, BarRoomSync, new DBBarRoomInfo());
     }
 
-    private const uint BarRoomSync = 5043, QuestionnaireSync = 5052, WizardSync = 5060;
+    private const uint QuestionnaireSync = 5052, WizardSync = 5060;
 
     private Task VisitsAsync(GameSession s) => s.SendGameAsync(VisitedMaps,
         new SyncRoleVisitMapInfoNtf { Mapid = { s.WorldState.Saved.VisitedMaps.Order() } });

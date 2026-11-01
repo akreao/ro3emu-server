@@ -8,7 +8,7 @@ namespace Ro3Emu.Server.Game;
 /// Which client functions (enum_FunctionType: bag, skills, party, chat channels...) are open: the 5056 FunctionOpenInfo
 /// dataset, computed from FunctionConfig._kOpenCondition → LC_ConditionList sub-conditions [type, param...]:
 /// 1002 base level ≥ param, 1019 job rank ≥ param (inferred), 1101 role has a running task, 3031 server-open days, 3030 playbook-open seconds,
-/// 4004 quest delivered (TaskService.IsDelivered), 1014 cleared Spirit Tower floor, 11001 active life skill. Resent when the level or
+/// 4004 quest delivered (TaskService.IsDelivered), 1014 cleared Spirit Tower floor, 11001 active life skill, 1102 learned skill. Resent when the level or
 /// job changes, so functions unlock as the player grows.
 /// </summary>
 public sealed class FunctionService
@@ -16,10 +16,10 @@ public sealed class FunctionService
     public const uint FunctionOpenSync = 5056;
 
     private const int CondBaseLevel = 1002, CondTowerFloor = 1014, CondJobRank = 1019, CondRoleHasTask = 1101,
-        CondServerStage = 3031, CondServerStage2 = 3030, CondQuestDone = 4004, CondItemCount = 1020,
-        CondLearnedSkill = 1102;
+        CondLearnedSkill = 1102, CondServerStage = 3031, CondServerStage2 = 3030, CondQuestDone = 4004, CondItemCount = 1020;
     private const int CondJourneyAttr = 15100, CondJourneyDialogue = 15101;
     private const int CondGuildPosition = 9007;
+    private const int CondChickenRank = 6508;
 
     private readonly GameData _data;
     private readonly CharacterService _character;
@@ -62,6 +62,7 @@ public sealed class FunctionService
     /// <summary>A FunctionConfig row's open condition holds (a function without a row is not gated).</summary>
     public bool IsOpen(GameSession session, long functionId)
     {
+        if (session.GmAllFunctionsOpen) return true; // GM panel openallfunc (GmCommands.Presets)
         // Function 1003 has parent 10 and delivered-task gate 10103160.
         // TaskService's no-quest fallback is permissive, so this feature specifically fails closed.
         if (functionId == 1003 && (session.Tasks == null
@@ -101,6 +102,9 @@ public sealed class FunctionService
                 // LC_InteractCondition.CheckRoleHaveTask:732-752 requires the named task to be Running.
                 CondRoleHasTask => session.Tasks is { } tasks && tasks.Infos.TryGetValue(param, out var task)
                     && task.Status == TaskState.Running,
+                // LC_InteractCondition.CheckHasLearnedSkill [1102, skill] (:3510-3539): ServerAllSkills[skill] > 0, the
+                // current plan's skillAssigns level of that skill group (the rental side quests' 88000101-106).
+                CondLearnedSkill => param is > 0 and <= int.MaxValue && _skills.Level(p, (int)param) > 0,
                 // LC_InteractCondition.lua:1957-1979 checks iOpenDayCount. Start is the server's first day.
                 // OpenContent counts every server-day gate as met from the first day.
                 CondServerStage or CondServerStage2 when _seasons.OpenContent.ServerDayFree => true,
@@ -108,9 +112,6 @@ public sealed class FunctionService
                 // LC_InteractCondition.CheckPlayBook: GetPlayBookOpenTime() + offset <= server system time.
                 CondServerStage2 => _clock.GetUtcNow().ToUnixTimeSeconds() >= _seasons.StartTime + param,
                 CondQuestDone => TaskService.IsDelivered(session, param),
-                // LC_InteractCondition.CheckHasLearnedSkill [1102, skillGroup]: ServerAllSkills (the current plan's
-                // skill levels, LC_DAL_SkillDevelop) holds the group above level 0. The Rent side quests use it.
-                CondLearnedSkill => param is > 0 and <= int.MaxValue && _skills.Level(p, (int)param) > 0,
                 // LC_InteractCondition.CheckItemCount: [1020, item, count], LC_ItemHelper.GetItemCount(item) >= count.
                 CondItemCount => d.GetArrayLength() >= 3 && _character.CountOf(session, (int)param) >= (long)(GameData.Number(d[2]) ?? 0),
                 // LC_InteractCondition.CheckJourneyAttr / CheckJourneyDialogue: per-role Journey progress.
@@ -124,6 +125,16 @@ public sealed class FunctionService
                 // packs are [9007,6,3], Guild Master to Vice Guild Master. No guild: false.
                 CondGuildPosition => session.Guild is { GuildId: > 0 } guild && d.GetArrayLength() >= 3
                     && Compare(param, guild.Official, (long)(GameData.Number(d[2]) ?? 0)),
+                // LC_InteractCondition.CheckChickenRankLevel [6508, op, rank] (:2096-2119): the Survivor Battle rank
+                // (LC_ChickenHelper.GetCurRankInfo) against the rank, 1 >=, 2 <=, 3 ==.
+                CondChickenRank => d.GetArrayLength() >= 3 && session.TimedBattle is { } battle
+                    && (long)(GameData.Number(d[2]) ?? 0) is var rank && param switch
+                    {
+                        1 => battle.ChickenRank >= rank,
+                        2 => battle.ChickenRank <= rank,
+                        3 => battle.ChickenRank == rank,
+                        _ => false,
+                    },
                 _ => false,
             };
             bool inverse = sub.TryGetProperty("m_bInverse", out var inv) && inv.ValueKind == JsonValueKind.True;

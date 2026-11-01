@@ -80,7 +80,8 @@ public sealed partial class GenreService
                     await SaveGenreAsync(s, next);
                     await SyncAsync(s);
                 }
-                catch (Exception e) when (e is Microsoft.Data.Sqlite.SqliteException or InvalidOperationException or OverflowException)
+                catch (Exception e) when (e is Microsoft.Data.Sqlite.SqliteException
+                    or Accounts.Persistence.PersistenceException or InvalidOperationException or OverflowException)
                 { log.LogWarning(e, "Build seek code failed"); code = ErrorCodes.Unknown; share = 0; }
             }
             await s.SendGameAsync(82800, new GenreSeekerResp
@@ -108,7 +109,8 @@ public sealed partial class GenreService
                     await SaveGenreAsync(s, next);
                     await SyncAsync(s);
                 }
-                catch (Exception e) when (e is Microsoft.Data.Sqlite.SqliteException or InvalidOperationException or OverflowException)
+                catch (Exception e) when (e is Microsoft.Data.Sqlite.SqliteException
+                    or Accounts.Persistence.PersistenceException or InvalidOperationException or OverflowException)
                 { log.LogWarning(e, "Build sharing code failed"); code = ErrorCodes.Unknown; share = ""; }
             }
             await s.SendGameAsync(82807, new GenreSeekerCodeResp { Result = code, Code = share });
@@ -264,7 +266,7 @@ public sealed partial class GenreService
             next.Equipment.EquipPlans[index] = concrete.EquipPlan.Clone();
             foreach (int slot in next.Equipment.EquipPlans[index].ItemsEquipGrid.Where(kv => kv.Value == 0).Select(kv => kv.Key).ToArray())
                 next.Equipment.EquipPlans[index].ItemsEquipGrid.Remove(slot);
-            if ((code = character.StageEquipmentPlan(next.Equipment, next.Items, index, career: next.Progress.Career)) != 0) return code;
+            if ((code = character.StageEquipmentPlan(next.Equipment, next.Items, index, next.Progress)) != 0) return code;
         }
         if (concrete.CardPlan != null)
         {
@@ -548,7 +550,8 @@ public sealed partial class GenreService
                     await CommitAsync(s, next, genre);
                     skillChanged = changed;
                 }
-                catch (Exception e) when (e is Microsoft.Data.Sqlite.SqliteException or InvalidOperationException)
+                catch (Exception e) when (e is Microsoft.Data.Sqlite.SqliteException
+                    or Accounts.Persistence.PersistenceException or InvalidOperationException)
                 { log.LogWarning(e, "Genre recommendation commit failed"); result = ErrorCodes.Unknown; }
             }
             reply.Result = result;

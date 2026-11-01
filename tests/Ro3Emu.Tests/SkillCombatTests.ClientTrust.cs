@@ -21,7 +21,7 @@ public sealed partial class SkillCombatTests
         await Gm("alice", "!job 5400"); await Teach("alice", 15306); await Seasoned("alice");
         Combat.Rolls = new FixedRolls(9999);
         var session = Session("alice");
-        await Loop.InvokeAsync(() => { session.GmNoCooldown = true; return Task.CompletedTask; });
+        await Loop.InvokeAsync(() => { session.GmCombat |= GmCombatSwitches.NoCooldown; return Task.CompletedTask; });
         var start = session.Position.Clone();
         var target = await Target("alice", stationary: true);
         await Loop.InvokeAsync(() => { target.X = start.X + 1; target.Z = start.Z; target.Hp = 1_000_000; return Task.CompletedTask; });

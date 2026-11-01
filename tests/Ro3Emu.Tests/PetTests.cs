@@ -69,7 +69,7 @@ public sealed class PetTests : IAsyncLifetime
     private async Task Gm(string command)
     {
         using var http = new HttpClient();
-        var response = await http.PostAsync($"{_http}/ro3emu/gm?account=alice", new StringContent(command));
+        var response = await http.PostAsync($"{_http}/ro3emu/gm?account=alice", Operator.Command(command));
         response.EnsureSuccessStatusCode();
     }
 
@@ -766,6 +766,44 @@ public sealed class PetTests : IAsyncLifetime
         await bot.SendGameAsync(PetService.FragmentsBroken, new PetFragmentsBrokenReq { Fragments = { new PetFragment { FragmentId = 1610001, Count = -1 } } });
         Assert.Equal(ErrorCodes.Parameter, (await Next(bot, PetService.FragmentsBroken, PetFragmentsBrokenResp.Parser)).Result);
         Assert.Equal(1, Count(bot, 1610001));
+    }
+
+    // A slot opens on its PetSetLimitConfig condition alone, as the pet window shows it: support slot 2 at Base Level 42,
+    // slot 3 at 47 (the locked slot's "Base Level reaches 47"), slot 5 at 55, lineup slot 3 at 40. PublicParamConfig's
+    // PetAssistFieldUnlockLv (55 for support slot 2) refused slot 2 with "Invalid support slot".
+    [ClientDataFact]
+    public async Task SupportAndLineupSlotsOpenOnTheirPetSetLimitConditions()
+    {
+        await using var bot = await InWorld();
+        await Unlock();
+        await CombinePet(bot);
+        await CombinePet(bot, 11001, 1611001);
+        await CombinePet(bot, 13001, 1613001);
+        async Task<int> Put(int pet, int target, int slot, int source = 0, int sourceSlot = 0)
+        {
+            await bot.SendGameAsync(PetService.StateUpdate, new PetStateUpdateReq
+            {
+                PetId = pet, Source = (PetStateSource_Type)source, SourceSlotIndex = sourceSlot,
+                Target = (PetStateSource_Type)target, TargetSlotIndex = slot
+            });
+            return (await Next(bot, PetService.StateUpdate, PetStateUpdateResp.Parser)).Result;
+        }
+        await Gm("!lvl 42");
+        Assert.Equal(0, await Put(10001, 2, 1));
+        Assert.Equal(0, await Put(11001, 2, 2));
+        Assert.Equal(ErrorCodes.PetSupportSlot, await Put(13001, 2, 3));
+        Assert.Equal(ErrorCodes.PetSupportSlot, await Put(13001, 2, 0));
+        Assert.Equal(0, await Put(10001, 1, 3, source: 2, sourceSlot: 1));
+        Assert.Equal(ErrorCodes.PetSetupSlot, await Put(11001, 1, 4, source: 2, sourceSlot: 2));
+        await Gm("!lvl 47");
+        Assert.Equal(0, await Put(13001, 2, 3));
+        Assert.Equal(ErrorCodes.PetSupportSlot, await Put(13001, 2, 4, source: 2, sourceSlot: 3));
+        await Gm("!lvl 55");
+        Assert.Equal(0, await Put(13001, 2, 5, source: 2, sourceSlot: 3));
+        Assert.Equal(ErrorCodes.PetSupportSlot, await Put(13001, 2, 6, source: 2, sourceSlot: 5));
+        var plan = Saved(bot).SetupPlans[0];
+        Assert.Equal(10001, plan.SetUpPets[3]);
+        Assert.Equal((11001, 13001), (plan.SupportPets[2], plan.SupportPets[5]));
     }
 
     [ClientDataFact]

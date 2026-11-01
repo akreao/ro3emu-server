@@ -19,7 +19,7 @@ namespace Ro3Emu.Server.Game;
 /// A row is reached (status 1, stamptime in ms) when every slot holds its R, and never reverts. Claims (status 2,
 /// AchievementLevelInfo.curLevelRewardLevel) commit their grant and the new state as one owned-award economy
 /// transaction ("cd13e/achievement-award"). Points and levels are derived from reached rows with the client's algorithm.
-/// Fifteen rows whose source does not exist or whose meaning is unresolved stay at status 0 (§5, "Blocked").
+/// Nine rows whose source does not exist or whose meaning is unresolved stay at status 0 (§5, "Blocked").
 /// 76004 (share) has no sender in the client and stays unrouted.
 /// </summary>
 public sealed class AchievementService : IGameTicker
@@ -40,12 +40,12 @@ public sealed class AchievementService : IGameTicker
         CAppearanceCount = 303003, CJobRank = 101019, CLoginDays = 101011;
 
     /// <summary>No table (fashion level) or an unresolved meaning (§5, §10.5).</summary>
-    private static readonly HashSet<long> BlockedConditions =
-        [CFashionLevel, CAppraiseRare, CJobTalent];
+    private static readonly HashSet<long> BlockedConditions = [CFashionLevel, CAppraiseRare, CJobTalent];
 
-    /// <summary>Event counters: no history, the slot is the count since the feature exists (spec §5 "E").</summary>
+    /// <summary>Event counters: no history, the slot is the count since the feature exists (spec §5 "E"). 106007
+    /// TaskFinishRepeated [task, n] counts deliveries of the task (the Tavern's daily quest, <see cref="OnTaskCompletions"/>).</summary>
     private static readonly HashSet<long> CounterConditions =
-        [CCraftQualityOnce, CCraftCount, CAppraiseCount, CAppraiseStunt, CCardCount, CMvp, CLoginDays];
+        [CCraftQualityOnce, CCraftCount, CAppraiseCount, CAppraiseStunt, CCardCount, CMvp, CLoginDays, CTavernQuest];
 
     /// <summary>Friend conditions read the social relation from the database: login and relation hooks only.</summary>
     private static readonly HashSet<long> FriendConditions = [CFriends, CAffection];
@@ -104,7 +104,7 @@ public sealed class AchievementService : IGameTicker
     public AchievementService(GameData data, RoleStore roles, CharacterService character, AwardService awards,
         EquipmentService equipment, AppraisalService appraisal, CardService cards, MvpService mvps, TowerService tower,
         DungeonService dungeons, GuildService guilds, Micro.FriendService friends, Micro.SocialOwnerCache social,
-        TavernService tavern, SessionRegistry sessions, GameLoop loop, GmCommands gm, TimeProvider clock, ILogger<AchievementService> log)
+        SessionRegistry sessions, GameLoop loop, GmCommands gm, TimeProvider clock, ILogger<AchievementService> log)
     {
         this._data = data; this._roles = roles; this._character = character; this._awards = awards; this._tower = tower;
         this._social = social; this._sessions = sessions; this._loop = loop; this._clock = clock; this._log = log;
@@ -118,7 +118,6 @@ public sealed class AchievementService : IGameTicker
         dungeons.Completed.Add((s, _, _) => { QueueRecheck(s); return Task.CompletedTask; });
         tower.FloorCleared.Add(QueueRecheck);
         guilds.MembershipChanged.Add(QueueRecheck);
-        tavern.Changed.Add(QueueRecheck); // 106007 / 106008
         friends.RelationChanged.Add(QueueFriendRecheck);
         // Event counters: the payload is captured now, applied on the owner loop.
         equipment.Crafted.Add((s, entry, _, _) =>
@@ -214,7 +213,7 @@ public sealed class AchievementService : IGameTicker
         _ => -1,
     };
 
-    /// <summary>Spec §5 "Blocked": the 17 rows whose source or meaning is missing. 303004's fashion variant lists
+    /// <summary>Spec §5 "Blocked": the rows whose source or meaning is missing. 303004's fashion variant lists
     /// grids 8-13, whose WardRobeConfig mapping is inferred only.</summary>
     private static bool IsBlocked(long[] t) => BlockedConditions.Contains(t[0])
         || t[0] == CEquipQuality && (t.Length < 4 || t[3..].Any(grid => grid is < 1 or > 7));
@@ -365,10 +364,6 @@ public sealed class AchievementService : IGameTicker
             case CGodBoss: // [npc, 1]: the boss passed in the normal or hard Realm of the Gods
                 return s.Dungeons == null ? null
                     : row.GodKeys[index].Any(k => s.Dungeons.Records.TryGetValue(k, out var god) && god.Passed) ? r : 0;
-            case CTavernQuest: // [2000, days]: days the Daily Tavern quest time was reached (DBBarRoomInfo.actDays)
-                return s.Tavern == null ? null : TavernService.QuestDays(s);
-            case CTavernStar: // [n]: Star Power received from Tavern gifts (DBBarRoomInfo.popularity)
-                return s.Tavern == null ? null : TavernService.StarPower(s);
             case CGuild:
                 return s.Guild == null ? null : s.Guild.GuildId != 0 ? r : 0;
             case CGuildPosition: // [op, value]: LC_InteractCondition.CheckGuildPosition, ePosition op p2 (5 = "<")
@@ -380,6 +375,8 @@ public sealed class AchievementService : IGameTicker
                 var types = t.Skip(3).Take((int)Math.Max(0, t[2])).ToHashSet();
                 return OwnedAppearances(s).Count(id => types.Contains(_wardrobeType.GetOrAdd(id,
                     key => _data.Row("WardRobeConfig", key) is { } w ? GameData.Int(w, "_iType") : -1)));
+            case CTavernStar: // [n]: Star Power received from Tavern gifts (TavernService, 5043 popularity)
+                return s.Tavern?.Popularity;
             case CJobRank: // [rank]: JobConfig._iJobRank >= p1
                 return s.Progress == null ? null
                     : _data.Row("JobConfig", s.Progress.Career) is { } job && GameData.Int(job, "_iJobRank") >= t[1] ? r : 0;
@@ -656,6 +653,20 @@ public sealed class AchievementService : IGameTicker
             if (await EvaluateFriendsAsync(s, next, NowMs)) await CommitProgressAsync(s, next);
         }, "achievement friends", discarded: () => _friendQueued.Remove(s));
     }
+
+    /// <summary>106007 for <paramref name="count"/> more deliveries of <paramref name="task"/> (TaskService.QuestDelivered,
+    /// and the Tavern's GM op GMAddBarroomTaskFinishTimes); only tasks some row counts are posted.</summary>
+    public void OnTaskCompletions(GameSession s, long task, int count)
+    {
+        _countedTasks ??= [.. Rows().Rows.Values.SelectMany(r => r.Targets).Where(t => t is [CTavernQuest, _, _]).Select(t => t[1])];
+        if (count > 0 && _countedTasks.Contains(task))
+            PostEvent(s, t => t is [CTavernQuest, var wanted, _] && wanted == task ? count : 0);
+    }
+
+    private HashSet<long>? _countedTasks;
+
+    /// <summary>A snapshot source outside the hooks above changed (Tavern Star Power, 106008).</summary>
+    public void OnStateChanged(GameSession s) => QueueRecheck(s);
 
     private void PostEvent(GameSession s, Func<long[], long> amount)
     {

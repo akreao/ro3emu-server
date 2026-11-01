@@ -40,7 +40,7 @@ public sealed partial class CharacterService(RoleStore roles, ItemStore itemStor
 
     private const int ItemTypeCurrency = 1;
     private const int ItemTypeEquip = 5;
-    private const int ZenyId = 1;
+    internal const int ZenyId = 1;
     private const int BaseExpItem = 100;
     private const int JobExpItem = 101;
 
@@ -75,7 +75,7 @@ public sealed partial class CharacterService(RoleStore roles, ItemStore itemStor
     /// </summary>
     private static readonly (int Entry, int Count)[] DefaultStarterKit = [];
 
-    private IEnumerable<(int Entry, int Count)> StarterKit()
+    internal IEnumerable<(int Entry, int Count)> StarterKit()
     {
         if (options.Value.StarterKit is not { } configured) return DefaultStarterKit;
         var kit = new List<(int, int)>();
@@ -86,6 +86,15 @@ public sealed partial class CharacterService(RoleStore roles, ItemStore itemStor
         }
         return kit;
     }
+
+    /// <summary>The ledger receipt of a starter kit (CharacterFamilyEconomy: its goods are StarterGrant sources). A
+    /// character with the kit and no such receipt got it before the kit was recorded (PanelBackend's duplication check).</summary>
+    internal const string StarterKitEconomyKind = "cd13a/character-starter-kit";
+
+    /// <summary>The kit a character got before kits were written to the ledger (the earlier fixed kit; a configured
+    /// <see cref="ServerOptions.StarterKit"/> was not recorded either, inferred to be rare). PanelBackend's duplication
+    /// check counts it for those characters.</summary>
+    internal static readonly (int Entry, int Count)[] UnrecordedStarterKit = [(1000000, 20), (2010121, 1), (2550120, 1), (ZenyId, 1000)];
 
     // ---- helpers ----
 

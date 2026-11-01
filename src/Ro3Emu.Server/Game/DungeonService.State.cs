@@ -154,7 +154,8 @@ public sealed partial class DungeonService
                 int maximum = _catalog.Refresh(multi) is { } refresh ? (int)GameData.Int(refresh, "_iRewardMaxNum") : 0;
                 var award = new DBMultiDungeonAwardInfo
                 {
-                    TotalNumber = maximum, UseNumber = maximum - allowance.Remaining,
+                    // Testing UnlimitedRewards (TEST AID, not original): the count shows full, as it is never spent.
+                    TotalNumber = maximum, UseNumber = _testing.UnlimitedRewards ? 0 : maximum - allowance.Remaining,
                     // Separate first clear from recurring counters: Lua adds a free first entitlement for NotPass.
                     IsFirst = FirstPassAwardState(state, $"{id}:{mark}", boss, record),
                     FirstPassState = (MultiDungeonFirstPassState)(record?.Passed == true ? 2 : 0),

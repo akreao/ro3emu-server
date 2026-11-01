@@ -46,7 +46,7 @@ public sealed partial class TaskService
     public void OnStateChanged(GameSession s) => QueueRefresh(s);
 
     /// <summary>
-    /// 106602 / 107005: a committed successful clear of the TenGameplay boss <paramref name="boss"/> by <paramref name="party"/>
+    /// 106602: a committed successful clear of the TenGameplay boss <paramref name="boss"/> by <paramref name="party"/>
     /// (DungeonService.MultiBossCleared). Guild and Adventure Party quests also need a fellow member in that party.
     /// </summary>
     public async Task OnTenBossClearedAsync(GameSession s, long boss, IReadOnlyCollection<GameSession> party)
@@ -56,14 +56,7 @@ public sealed partial class TaskService
         long guild = s.Guild?.GuildId ?? 0, group = s.AdventureGroupRole?.AdventureGroupId ?? 0;
         bool guildMate = guild > 0 && party.Any(o => !ReferenceEquals(o, s) && o.Guild?.GuildId == guild);
         bool groupMate = group > 0 && party.Any(o => !ReferenceEquals(o, s) && o.AdventureGroupRole?.AdventureGroupId == group);
-        // Connect Quest 107005 [107005, n, boss]: the same clear with at least one other player in the run.
-        bool partied = party.Any(o => !ReferenceEquals(o, s));
-        await ProgressCoreAsync(s, null, t => t switch
-            {
-                [TTenBossWin, _, _, ..] when t[2..].Contains(boss) => 1,
-                [TPartyBoss, _, var cleared] when partied && cleared == boss => 1,
-                _ => 0,
-            },
+        await ProgressCoreAsync(s, TTenBossWin, t => t is [TTenBossWin, _, _, ..] && t[2..].Contains(boss) ? 1 : 0,
             def => def.Type switch { GuildQuestType => guildMate, AdventureGroupQuestType => groupMate, _ => true });
     }
 
@@ -111,24 +104,6 @@ public sealed partial class TaskService
         }), "quest siege");
     }
 
-    /// <summary>106610 / 106609: a settled Territory War battle; <paramref name="personal"/> holds the loaded participants'
-    /// personal scores, <paramref name="guilds"/> each fighting guild's score, credited to its online members.</summary>
-    public void OnTerritoryBattleScored(IReadOnlyDictionary<long, long> personal, IReadOnlyDictionary<long, long> guilds)
-    {
-        foreach (var s in _sessions.All().Where(s => s.Role != null).ToArray())
-        {
-            long own = personal.GetValueOrDefault(s.Role!.Id);
-            long guild = s.Guild is { GuildId: > 0 } g ? guilds.GetValueOrDefault(g.GuildId) : 0;
-            if (own <= 0 && guild <= 0) continue;
-            _loop.PostOwned(s, () => ProgressAsync(s, null, t => t switch
-            {
-                [TTerritoryPersonal, _] => own,
-                [TTerritoryGuild, _] => guild,
-                _ => 0,
-            }), "quest territory war");
-        }
-    }
-
     /// <summary>317002: levels gained by one committed Soul Echo upgrade.</summary>
     public void OnEchoUpgraded(GameSession s, int levels)
     {
@@ -152,8 +127,4 @@ public sealed partial class TaskService
     /// <summary>106018: the member is at the Bonfire Party (once per event day, GuildCampfireService).</summary>
     public void OnCampfireJoined(GameSession s) =>
         _loop.PostOwned(s, () => ProgressAsync(s, TCampfire, t => t.Length == 2 ? 1 : 0), "quest campfire");
-
-    /// <summary>106010: today's seconds in a Tavern room (TavernService.SecondsToday), read like the AFK seconds of
-    /// 106901 so a quest accepted later in the day still sees the time already spent.</summary>
-    public Func<GameSession, long>? TavernSecondsToday { get; set; }
 }

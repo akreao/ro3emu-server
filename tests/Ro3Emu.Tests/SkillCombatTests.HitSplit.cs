@@ -14,7 +14,7 @@ public sealed partial class SkillCombatTests
     {
         await using var alice = await InWorld("Alice");
         await Gm("alice", "!job 1200"); await Teach("alice", 11120);
-        await Wield("alice", 2050120); // Pierce needs a spear (_iSkillCondition, CombatService.Companions)
+        await Wield("alice", 2050120); // Pierce needs a spear (_iSkillCondition, CombatService.ClassCompanions)
         var monster = await Target("alice", stationary: true);
         await Loop.InvokeAsync(() => { monster.Hp = 1_000_000; return Task.CompletedTask; });
         var pierce = SkillConfig.Get(_app.Services.GetRequiredService<GameData>(), 1112001);

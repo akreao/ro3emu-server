@@ -28,7 +28,9 @@ public sealed partial class StallsService
         int skill = (int)Param("StallsPlaidMerchantSkill", 16005);
         int level = s.Progress!.Skills.GetValueOrDefault(skill);
         var param = _data.SkillLevelRow(skill, level) is { ValueKind: System.Text.Json.JsonValueKind.Object } row ? Field(row, "_kSpSkillParam") : [];
-        return (int)Param("StallsDefaultPlaidNum", 10) + (param.Length > 1 ? (int)param[1] : 0);
+        // An advanced pass adds slots (PassPrivileges.StallSlotAdd).
+        return (int)Param("StallsDefaultPlaidNum", 10) + (param.Length > 1 ? (int)param[1] : 0)
+            + PassPrivileges.Added(_data, s, PassPrivileges.StallSlotAdd);
     }
 
     private async Task StartAsync(GameSession s, PlayerStartStallsReq req)

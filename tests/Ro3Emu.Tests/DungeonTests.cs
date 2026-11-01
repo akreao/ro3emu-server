@@ -78,7 +78,7 @@ public sealed partial class DungeonTests : IAsyncLifetime
     private async Task Gm(BotClient bot, string command)
     {
         using var client = new HttpClient();
-        (await client.PostAsync($"{_http}/ro3emu/gm?account={bot.Account}", new StringContent(command))).EnsureSuccessStatusCode();
+        (await client.PostAsync($"{_http}/ro3emu/gm?account={bot.Account}", Operator.Command(command))).EnsureSuccessStatusCode();
     }
 
     private GameSession Session(BotClient bot) => Service<SessionRegistry>().All()
@@ -149,6 +149,7 @@ public sealed partial class DungeonTests : IAsyncLifetime
 
     private async Task Kill(BotClient bot, MonsterUnit actor)
     {
+        await SwingWait.UntilDoneAsync(Service<GameLoop>(), Session(bot), actor.Uid);
         await OnLoop(async () =>
         {
             Assert.True(actor.Hp > 1);
@@ -166,7 +167,6 @@ public sealed partial class DungeonTests : IAsyncLifetime
             var role = Session(bot);
             role.Attack = null;
             if (role.SkillCast is { } swing) { swing.Cancelled = true; role.SkillCast = null; }
-            role.LastNormalAttack = null;
         });
         await bot.SendGameAsync(CombatService.UseSkill, new CastSkillReq { SkillId = 1000001, TargetId = actor.Uid });
         Assert.Equal(0, (await Next(bot, CombatService.UseSkill, CastSkillRsp.Parser)).Result);

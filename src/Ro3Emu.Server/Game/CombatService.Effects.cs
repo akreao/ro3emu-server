@@ -54,6 +54,11 @@ public sealed partial class CombatService
             await handler(s, row);
             if (!CurrentCastMap(s, action)) return;
         }
+        if (OwnSkillLanded != null && OwnSkillAdmit?.Invoke(s, action.Request.SkillId) != null)
+        {
+            await OwnSkillLanded(s, row);
+            return;
+        }
         if (Script(row) == "Resurrection")
         {
             var target = FindPlayer(s, action.Request.TargetId, dead: true);
@@ -235,7 +240,7 @@ public sealed partial class CombatService
             targets.RemoveAll(m => !selected.Contains(m.Uid));
             await HitEventPlayersAsync(s, playerTargets.Where(p => selected.Contains(p.Role!.Id)).ToArray(),
                 row, action.Request.SkillId, HitEffect(GameData.Int(row, "_iScriptShow")), action.Id, CanApplyMoreEffects,
-                action.GuardianDamage == null ? null : (id, amount) => RecordGuardianDamage(action, id, amount));
+                action.GuardianDamage == null ? null : (id, amount) => RecordGuardianDamage(action, id, amount), center);
             if (IsGuardianEffect(row))
                 await GuardianPlayerDebuffsAsync(s, row, playerTargets.Where(p => selected.Contains(p.Role!.Id)),
                     alreadySlowed, castingRole.Id, CanApplyMoreEffects);
@@ -255,19 +260,24 @@ public sealed partial class CombatService
             else
             {
                 float radius = field?.Radius ?? (float)(Numbers(row, "_kRange").FirstOrDefault(0) / 100);
+                // As SelectEnemies: an area released around the caster (_iRelease 0, 2-6) is centred on it, not on the point
+                // the client sent, which nothing checks for those releases.
+                var around = field != null || new SkillConfig(row).Release is SkillRelease.DragRect or SkillRelease.DragCircle
+                    ? center : action.Origin;
                 allies.AddRange(_world.PlayersIn(s.WorldScene).Where(p => !p.Dead && Relation(row, true, p == s)
-                    && (p == s || radius > 0 && Distance(p.Position, center) <= radius))
-                    .OrderBy(p => Distance(p.Position, center)).Take((int)Math.Max(1, GameData.Int(row, "_iTargetMax"))));
+                    && (p == s || radius > 0 && Distance(p.Position, around) <= radius))
+                    .OrderBy(p => Distance(p.Position, around)).Take((int)Math.Max(1, new SkillConfig(row).TargetMax)));
                 if (allies.Count == 0 && Relation(row, true, true)) allies.Add(s);
             }
         }
         var stats = _character.Stats(s);
-        var attacker = PlayerAttacker(s, stats);
+        int attackElement = AttackElement(s, row);
+        var attacker = PlayerAttacker(s, stats, attackElement);
         var hit = new SkillHitInfo
         {
             SrcID = field?.Uid ?? action.SourceId, SkillId = action.Request.SkillId, SessionId = action.Id,
             RootCtxGuid = action.Id, ComboIndex = action.Request.ComboIndex, ShowPoint = HitEffect(GameData.Int(row, "_iScriptShow")),
-            SrcElement = stage is { Element: > 0 } ? stage.Element : (int)Math.Max(1, GameData.Int(row, "_iEleType")),
+            SrcElement = stage is { Element: > 0 } ? stage.Element : attackElement,
         };
         // One bolt (or one packet) of several is one number; its buffs, procs and pushes come with the first one only.
         int shownHits = stage is { Split: > 0 } ? stage.Split : bolts > 1 ? 1 : HitSplit(row);
@@ -341,11 +351,7 @@ public sealed partial class CombatService
                 if (CanApplyMoreEffects() && firstBolt && KnockUps.Contains(script) && !target.Dead && target.Hp > 0)
                     await _buffs.ShowOnUnitAsync(target, KnockUpBuff, KnockUpMs, castingRole.Id);
                 if (CanApplyMoreEffects() && script is ("Provoke" or "Taunt")) _monsters.Engage(target, s);
-                if (CanApplyMoreEffects() && firstBolt && !target.Dead && target.Hp > 0)
-                {
-                    if (field is { PushMeters: > 0 }) await PushFromFieldAsync(s, action, field, target);
-                    else await DisplaceTargetAsync(s, action, target);
-                }
+                if (CanApplyMoreEffects() && firstBolt && !target.Dead && target.Hp > 0) await DisplaceTargetAsync(s, action, target, center);
             }
             // Buff1 is self for hostile selectors, but actual friend recipients for ally selectors (Detoxify, Blessing).
             foreach (var recipient in friendly ? allies : new List<GameSession> { s })
@@ -409,7 +415,9 @@ public sealed partial class CombatService
                 hit.Dsts.AddRange(shownOnly); // display only: no statistics, energy or charges
                 var sourceViewers = CurrentCaster() ? _world.Viewers(s).Append(s) : Enumerable.Empty<GameSession>();
                 var recipients = shownOnly.Count > 0 ? allies.Where(a => shownOnly.Any(d => d.DstID == a.Role?.Id)) : Enumerable.Empty<GameSession>();
-                foreach (var viewer in processed.SelectMany(t => t.Viewers).Concat(sourceViewers).Concat(recipients).Distinct()) await viewer.SendGameAsync(SkillHit, hit);
+                var hitViewers = processed.SelectMany(t => t.Viewers).Concat(sourceViewers).Concat(recipients).Distinct().ToArray();
+                await SendHitBulletsAsync(hitViewers, row, hit, castingRole.Id);
+                foreach (var viewer in hitViewers) await viewer.SendGameAsync(SkillHit, hit);
                 if (CurrentCaster() && field?.Trap == true)
                     await ToPlayerAndViewersAsync(s, TrapDamage, new TrapDamageNtf { SkillConfigId = action.Request.SkillId, DamageValue = hit.Dsts.Sum(d => d.Damage), Pos = center.Clone() });
             }
@@ -640,58 +648,113 @@ public sealed partial class CombatService
 
     internal static readonly HashSet<string> KnockUps = ["Sonicblast", "PinpointAttack2", "BombSuicide2"];
 
-    internal enum DisplaceKind { CasterForward, CasterBack, TargetPush, TargetPull, CasterToTarget, CasterToPoint, PullToCenter }
+    /// <summary>Who a displacement moves: the caster, a target away from / toward the caster, a target away from /
+    /// toward the centre of the skill's area (its target point, or a field's position), or the caster to its target or
+    /// to the chosen point (charges and leaps).</summary>
+    internal enum DisplaceKind { CasterForward, CasterBack, TargetPush, TargetPull, CenterPush, CenterPull, CasterToTarget, CasterToPoint }
 
     /// <summary>
-    /// Skills whose show has a displacement EffectData (m_kPoint.m_bMovement) and whose description names the
-    /// distance: _kDescData index, or -1 for a pull "in front of you". Who moves and which way comes from the
-    /// description and the effect's curve name (击退 knockback, 拉人 pull); the server choice of skills is (inferred).
-    /// ShieldsProtection's 1161341 knockback belongs to its periodic aura, which is not simulated.
+    /// Skills whose description says they move the caster or knock back / pull what they hit. The distance is the
+    /// _kDescData index the description names, or, at -1, <c>Metres</c>: a pull stops that far from the caster or the
+    /// centre, and a knockback whose description names no distance goes that far. Who moves and which way comes from
+    /// the description and the effect's curve name (击退 knockback, 拉人 pull); the server choice of skills, the distances
+    /// at -1 (1 m for a pull "in front of you" or "toward the centre", 3 m for an unnamed knockback, as the bosses' and
+    /// Arrow Repel's) and a periodic pull applying once per hit are (inferred).
+    /// Not here: ShieldsProtection's 1161341 knockback belongs to its periodic aura, which is not simulated; Axe Tornado's
+    /// enhanced form (AxeTornadoProS1BD2) pulls only under Enhance; knock-ups (Sonic Burst, Energy Release) move nobody.
     /// </summary>
-    internal static readonly IReadOnlyDictionary<string, (DisplaceKind Kind, int DescIndex)> Displacements =
-        new Dictionary<string, (DisplaceKind, int)>
+    internal static readonly IReadOnlyDictionary<string, (DisplaceKind Kind, int DescIndex, float Metres)> Displacements =
+        new Dictionary<string, (DisplaceKind, int, float)>
         {
-            ["BackSlide"] = (DisplaceKind.CasterBack, 0),
-            ["RetreatingShadows"] = (DisplaceKind.CasterBack, 0),
-            ["RetreatingShadowsS1"] = (DisplaceKind.CasterBack, 0),
-            ["WolvesDash"] = (DisplaceKind.CasterForward, 0),
-            ["HighspeedSlide"] = (DisplaceKind.CasterForward, 0),
-            ["HighspeedSlideMecha"] = (DisplaceKind.CasterForward, 0),
-            ["PinpointAttack"] = (DisplaceKind.CasterForward, 3),
-            ["ArrowRepel"] = (DisplaceKind.TargetPush, 3),
-            ["PileBunker"] = (DisplaceKind.TargetPush, 5),
-            ["PhantomThrust"] = (DisplaceKind.TargetPull, -1),
-            // "knocking them back ${4} m" (Jupitel Thunder 1210210 is its 击退 effect).
-            ["Jupitel_Thunder"] = (DisplaceKind.TargetPush, 3),
+            ["BackSlide"] = (DisplaceKind.CasterBack, 0, 0),
+            ["RetreatingShadows"] = (DisplaceKind.CasterBack, 0, 0),
+            ["RetreatingShadowsS1"] = (DisplaceKind.CasterBack, 0, 0),
+            ["WolvesDash"] = (DisplaceKind.CasterForward, 0, 0),
+            ["HighspeedSlide"] = (DisplaceKind.CasterForward, 0, 0),
+            ["HighspeedSlideMecha"] = (DisplaceKind.CasterForward, 0, 0),
+            ["PinpointAttack"] = (DisplaceKind.CasterForward, 3, 0),
+            ["ArrowRepel"] = (DisplaceKind.TargetPush, 3, 0),
+            ["PileBunker"] = (DisplaceKind.TargetPush, 5, 0),
+            ["Spear_Stab"] = (DisplaceKind.TargetPush, 3, 0),
+            ["Sightrasher"] = (DisplaceKind.TargetPush, 4, 0),
+            ["Jupitel_Thunder"] = (DisplaceKind.TargetPush, 3, 0),
+            ["PinpointAttack2"] = (DisplaceKind.TargetPush, -1, 3),       // Fearless Charge: "inflicts Knockback"
+            ["PinpointAttack3"] = (DisplaceKind.TargetPush, -1, 3),       // Earthshaker: "the final hit inflicts Knockback"
+            ["Fire_Wall"] = (DisplaceKind.CenterPush, 4, 0),              // "knocks the enemy back ${5} meters" off the wall
+            ["bianhualuanwu"] = (DisplaceKind.TargetPush, 7, 0),          // Whirling Whip: "${8} meters of Knockback"
+            ["lianhuanbaopo"] = (DisplaceKind.TargetPush, -1, 3),         // Ninja Art: Chain Blast: "knocking them back"
+            ["PetSkill_2_2_BuChongJin"] = (DisplaceKind.TargetPush, 3, 0),
+            ["PhantomThrust"] = (DisplaceKind.TargetPull, -1, 1),
+            ["MoonSlasher2"] = (DisplaceKind.TargetPull, -1, 1),          // Spear Formation - Crescent Moon: "pulls the targets closer"
+            ["MoonSlasher2s1"] = (DisplaceKind.TargetPull, -1, 1),
+            ["AxeTornadoProS1BD1"] = (DisplaceKind.TargetPull, -1, 1),    // "pulling them toward the tornado's center" (around you)
+            ["AxeLeapAttackS1BD2"] = (DisplaceKind.TargetPull, -1, 1),    // "pulling them toward the center of the attack" (below you)
+            ["AxeLeapAttack2S1BD2"] = (DisplaceKind.TargetPull, -1, 1),
+            ["QunTiShouShu"] = (DisplaceKind.TargetPull, -1, 1),          // AoE Surgery: "Aliot pulls in up to ${2} enemies"
+            ["Pet_AncientTree_23452"] = (DisplaceKind.TargetPull, -1, 1),
+            ["TetraVortex"] = (DisplaceKind.CenterPull, -1, 1),           // "applying 【Pull】" around the target point
+            ["TetraVortex2"] = (DisplaceKind.CenterPull, -1, 1),
+            ["TetraVortexcopy"] = (DisplaceKind.CenterPull, -1, 1),
+            ["TetraVortex2copy"] = (DisplaceKind.CenterPull, -1, 1),
+            ["VectorShock"] = (DisplaceKind.CenterPull, -1, 1),           // Gravitational Impact: "continuously pulling them in"
+            ["VectorShock1"] = (DisplaceKind.CenterPull, -1, 1),
+            ["VectorShock_Copy"] = (DisplaceKind.CenterPull, -1, 1),
+            ["VectorShock1_Copy"] = (DisplaceKind.CenterPull, -1, 1),
             // "Charge at a designated enemy" (1111203): the caster ends next to the target.
-            ["Charge_Attack"] = (DisplaceKind.CasterToTarget, -1),
+            ["Charge_Attack"] = (DisplaceKind.CasterToTarget, -1, 1),
             // "Dives toward a designated location" (Rift Impact 1130109), "Leap to a selected area" (Twilight 1160707).
-            ["IgnitionBreak"] = (DisplaceKind.CasterToPoint, -1),
-            ["HesperusLit"] = (DisplaceKind.CasterToPoint, -1),
-            // "applying 【Knockback】 for ${4} meters" (Spear Stab), "knocking them back ${5} meters" (Sightrasher).
-            ["Spear_Stab"] = (DisplaceKind.TargetPush, 3),
-            ["Sightrasher"] = (DisplaceKind.TargetPush, 4),
-            // "Pulls the targets closer" (Spear Formation - Crescent Moon).
-            ["MoonSlasher2"] = (DisplaceKind.TargetPull, -1),
-            // "applying 【Pull】" (Tetra Vortex), "continuously pulling them in" (Gravitational Impact): toward the chosen
-            // target, around which the area is centred (inferred: they end 1 m from it).
-            ["TetraVortex"] = (DisplaceKind.PullToCenter, -1),
-            ["VectorShock"] = (DisplaceKind.PullToCenter, -1),
+            ["IgnitionBreak"] = (DisplaceKind.CasterToPoint, -1, 1),
+            ["HesperusLit"] = (DisplaceKind.CasterToPoint, -1, 1),
             // "Swing your Axe to Move rapidly in front of the target" (Heavy Axe Smash 1630505 冲锋攻击).
-            ["PowerSwing"] = (DisplaceKind.CasterToTarget, -1),
+            ["PowerSwing"] = (DisplaceKind.CasterToTarget, -1, 1),
             // "Charges to a point ${5} meters in front of the target" (Dark Illusion 1540104).
-            ["hesehuanying"] = (DisplaceKind.CasterToTarget, 4),
+            ["hesehuanying"] = (DisplaceKind.CasterToTarget, 4, 0),
             // "Choose a direction to dash ${1} meters as a phantom" (Flowing Shadow 1542101).
-            ["yingliu"] = (DisplaceKind.CasterForward, 0),
-            // "Move ${12} meters in that direction" (Fearless Charge 1162411 黄昏之光水平移动). Its _kDescData has 11 values,
-            // so ${12} is missing; the 12 m of ${1}, the area's length, stands in (inferred).
-            ["PinpointAttack2"] = (DisplaceKind.CasterForward, 0),
+            ["yingliu"] = (DisplaceKind.CasterForward, 0, 0),
             // Warg Hunt's ranged form: "If you are more than ${5}m from the target, you also dash in front of it" (show
             // 13330's 1333014 and 133301's 13330113 are its move).
-            ["WolvesShadowFar"] = (DisplaceKind.CasterToTarget, -1),
-            ["PetSkill_2_2_BuChongJin"] = (DisplaceKind.TargetPush, 3),
-            ["Pet_AncientTree_23452"] = (DisplaceKind.TargetPull, -1),
+            ["WolvesShadowFar"] = (DisplaceKind.CasterToTarget, -1, 1),
         };
+
+    /// <summary>
+    /// The displacement EffectData a rule sends instead of its show's first one. The client moves a unit only on a 31112
+    /// that names an effect and looks it up by id alone (LC_PerformEffect_Agent.SkillStartMove), so a skill whose show
+    /// (and hit effects) carry none borrows a like one: knockbacks take Pile Bunker's flat 200 ms push 1631405, pulls
+    /// Gravitational Impact's 200 ms 1234212 (Ancient Tree's rows on show 23454 the 2345207 of its own 23452). Fearless
+    /// Charge and Melodic High-Energy Impact name their own: their show's first movement effect moves the caster
+    /// (1162411 the charge, 16307509 the slam with a height curve), 1162412 is Fearless Charge's knockback. Which curve
+    /// the original sent for the borrowed ones is (inferred).
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, int> MovementEffectOverrides = new Dictionary<string, int>
+    {
+        ["Spear_Stab"] = 1631405,
+        ["Sightrasher"] = 1631405,
+        ["PinpointAttack2"] = 1162412,
+        ["PinpointAttack3"] = 1631405,
+        ["bianhualuanwu"] = 1631405,
+        ["lianhuanbaopo"] = 1631405,
+        ["MoonSlasher2"] = 1234212,
+        ["MoonSlasher2s1"] = 1234212,
+        ["AxeTornadoProS1BD1"] = 1234212,
+        ["AxeLeapAttackS1BD2"] = 1234212,
+        ["AxeLeapAttack2S1BD2"] = 1234212,
+        ["QunTiShouShu"] = 1234212,
+        ["Pet_AncientTree_23452"] = 2345207,
+        ["VectorShock1"] = 1234212,
+        ["VectorShock1_Copy"] = 1234212,
+    };
+
+    /// <summary>A displacement EffectData by id (see <see cref="MovementEffectOverrides"/>): its id and time, or (0, 0).</summary>
+    internal static (int Id, int Ms) MovementEffectById(GameData data, int id) =>
+        data.SkillTemplateTable("Lua_Config_EffectData").TryGetValue(id.ToString(System.Globalization.CultureInfo.InvariantCulture), out var e)
+            && Movement(e) is var (ms, _) ? (id, ms) : (0, 0);
+
+    /// <summary>An EffectData's displacement (m_kPoint.m_bMovement): its time and move curve's name, or null.</summary>
+    private static (int Ms, string Curve)? Movement(JsonElement e) =>
+        e.TryGetProperty("m_kPoint", out var point) && point.TryGetProperty("m_bMovement", out var moves) && moves.ValueKind == JsonValueKind.True
+            ? (point.TryGetProperty("m_iMovementTime", out var ms) && ms.TryGetInt32(out int t) ? t : 0,
+                point.TryGetProperty("m_kMoveCurveName", out var curve) && curve.ValueKind == JsonValueKind.String ? curve.GetString() ?? "" : "")
+            : null;
 
     private readonly System.Collections.Concurrent.ConcurrentDictionary<long, (int Id, int Ms)> _movementEffects = new();
 
@@ -711,22 +774,19 @@ public sealed partial class CombatService
     {
         var effects = data.SkillTemplateTable("Lua_Config_EffectData");
         for (long id = show * 100; id < show * 100 + 100; id++)
-            if (effects.TryGetValue(id.ToString(), out var e) && e.TryGetProperty("m_kPoint", out var point)
-                && point.TryGetProperty("m_bMovement", out var moves) && moves.ValueKind == JsonValueKind.True)
-                return ((int)id, point.TryGetProperty("m_iMovementTime", out var ms) && ms.TryGetInt32(out int t) ? t : 0,
-                    point.TryGetProperty("m_kMoveCurveName", out var curve) && curve.ValueKind == JsonValueKind.String ? curve.GetString() ?? "" : "");
+            if (effects.TryGetValue(id.ToString(), out var e) && Movement(e) is var (ms, curve))
+                return ((int)id, ms, curve);
         return (0, 0, "");
     }
 
     private (DisplaceKind Kind, float Distance, int EffectId, int Ms)? Displacement(JsonElement row)
     {
-        if (!Displacements.TryGetValue(Script(row), out var rule)) return null;
-        var (effect, ms) = MovementEffect(GameData.Int(row, "_iScriptShow"));
-        // The caster's own move needs the show's displacement effect (the client ignores a 31112 without one); a monster
-        // is moved by its position update alone when the show has none (Spear Stab, Sightrasher, Crescent Moon).
-        if (effect == 0 && rule.Kind is not (DisplaceKind.TargetPush or DisplaceKind.TargetPull or DisplaceKind.PullToCenter)) return null;
-        // (inferred) "pulling them in front of you": 1 m ahead of the caster; a charge also stops 1 m short.
-        float distance = rule.DescIndex < 0 ? 1 : (float)Numbers(row, "_kDescData").ElementAtOrDefault(rule.DescIndex);
+        string script = Script(row);
+        if (!Displacements.TryGetValue(script, out var rule)) return null;
+        var (effect, ms) = MovementEffectOverrides.TryGetValue(script, out int named) ? MovementEffectById(_data, named)
+            : MovementEffect(GameData.Int(row, "_iScriptShow"));
+        if (effect == 0) return null;
+        float distance = rule.DescIndex < 0 ? rule.Metres : (float)Numbers(row, "_kDescData").ElementAtOrDefault(rule.DescIndex);
         return distance > 0 ? (rule.Kind, distance, effect, ms) : null;
     }
 
@@ -778,23 +838,26 @@ public sealed partial class CombatService
         await _world.MoveAsync(s, new WalkReq { Pos = end, Dir = s.Face, Face = s.Face, BStop = true }, forceTeleport: true);
     }
 
-    private async Task DisplaceTargetAsync(GameSession s, ActiveSkillCast action, MonsterUnit target)
+    /// <summary>Where a target displacement starts from (the caster, or the area's centre) and whether it pushes; null for
+    /// a caster move or no rule.</summary>
+    private static (Vec3 From, bool Push)? TargetMove(DisplaceKind kind, GameSession s, Vec3 center) => kind switch
     {
-        if (Displacement(action.Row) is not { Kind: DisplaceKind.TargetPush or DisplaceKind.TargetPull or DisplaceKind.PullToCenter } move) return;
-        var from = s.Position;
-        if (move.Kind == DisplaceKind.PullToCenter)
-        {
-            // The centre is the chosen target (or the chosen point); the chosen target itself stays.
-            if (FindMonster(s.WorldScene, action.Request.TargetId) is { } centre) { if (centre == target) return; from = centre.Pos; }
-            else if (action.Request.TargetPos is { } point) from = point;
-            else return;
-        }
+        DisplaceKind.TargetPush => (s.Position, true),
+        DisplaceKind.TargetPull => (s.Position, false),
+        DisplaceKind.CenterPush => (center, true),
+        DisplaceKind.CenterPull => (center, false),
+        _ => null,
+    };
+
+    private async Task DisplaceTargetAsync(GameSession s, ActiveSkillCast action, MonsterUnit target, Vec3 center)
+    {
+        if (Displacement(action.Row) is not { } move || TargetMove(move.Kind, s, center) is not var (from, push)) return;
         float dx = target.X - from.X, dz = target.Z - from.Z;
         float length = MathF.Sqrt(dx * dx + dz * dz);
         if (length < 0.001f) return;
-        // A push goes away from the caster; a pull stops the given distance in front of it.
-        float distance = move.Kind == DisplaceKind.TargetPush ? move.Distance : -(length - move.Distance);
-        if (move.Kind != DisplaceKind.TargetPush && length <= move.Distance) return;
+        // A push goes away from the caster or the centre; a pull stops the given distance in front of it.
+        float distance = push ? move.Distance : -(length - move.Distance);
+        if (!push && length <= move.Distance) return;
         var start = target.Pos;
         var end = WalkableEnd(s.SceneEntry, start, dx / length * distance, dz / length * distance);
         target.Moving = false;
@@ -806,6 +869,36 @@ public sealed partial class CombatService
             MoveTimeMs = move.Ms > 0 ? move.Ms : 300,
         });
         await _world.MoveUnitAsync(target, new MovementChangeNtf { Uid = target.Uid, MovementInfo = target.CurrentMovement(Now) });
+    }
+
+    /// <summary>A PvP hit's knockback or pull of the player it struck, as the same skill moves a monster.</summary>
+    private Task DisplacePlayerAsync(GameSession s, GameSession target, JsonElement row, int skillId, Vec3? center) =>
+        target.WorldScene == s.WorldScene && Displacement(row) is { } move && TargetMove(move.Kind, s, center ?? s.Position) is var (from, push)
+            ? KnockPlayerAsync(target, from.X, from.Z, push ? move.Distance : -move.Distance, skillId, move.EffectId, move.Ms > 0 ? move.Ms : 300)
+            : Task.CompletedTask;
+
+    /// <summary>
+    /// A knockback or pull of a player along the line from (<paramref name="fromX"/>, <paramref name="fromZ"/>): a push of
+    /// <paramref name="go"/> m away, or with a negative value a pull that stops that far in front of the source (31112,
+    /// MoveType 2, on the effect's curve). Shared by boss skills and PvP hits.
+    /// </summary>
+    private async Task KnockPlayerAsync(GameSession p, float fromX, float fromZ, float go, int skillId, int effectId, int ms)
+    {
+        if (p.Dead || p.SceneLoading || p.Role is not { } role) return;
+        float dx = p.Position.X - fromX, dz = p.Position.Z - fromZ, length = MathF.Sqrt(dx * dx + dz * dz);
+        if (length < 0.001f || go < 0 && length <= -go) return;
+        float distance = go >= 0 ? go : -(length + go);
+        var start = p.Position.Clone();
+        var end = WalkableEnd(p.SceneEntry, start, dx / length * distance, dz / length * distance);
+        await ToPlayerAndViewersAsync(p, SkillMove, new SkillStartMoveNotify
+        {
+            EntityID = (ulong)role.Id, StartPos = start, EndPos = end, SkillConfigId = skillId, EffectId = effectId,
+            MoveType = 2, StartTimestampMs = Now, Face = p.Face, MoveTimeMs = Math.Max(1, ms),
+        });
+        p.PreviousPosition = start;
+        p.Position = end;
+        p.Walking = false;
+        await _world.MoveAsync(p, new WalkReq { Pos = end, Dir = p.Face, Face = p.Face, BStop = true }, forceTeleport: true);
     }
 
     private Vec3 WalkableEnd(long sceneId, Vec3 start, float dx, float dz)

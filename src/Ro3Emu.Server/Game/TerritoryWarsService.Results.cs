@@ -22,7 +22,20 @@ public sealed partial class TerritoryWarsService
                     Id = p.Id, Area = 1, Name = p.Name, Job = p.Job, GuildId = p.Guild,
                     RewardData = new StatisticsAwardCheckData { PlayerLevel = p.Level, Job = p.Job }
                 },
-                TotalDamage = p.Damage, TotalBeDamage = p.Taken, TotalCure = p.Healed, Totalscore = p.Score
+                TotalDamage = p.Damage, TotalBeDamage = p.Taken, TotalCure = p.Healed, Totalscore = p.Score,
+                // EStatisticsModuleEnum keys the personal record reads
+                // (UI_Sys_TerritoryWars_PushUp_Achievements_ListWidgetCtrl, UI_Sys_TerritoryWarsReportListWidgetCtrl).
+                ExtraData =
+                {
+                    [1001001] = new ExtraValueData { LongValue = p.Damage }, // Damage
+                    [1001002] = new ExtraValueData { LongValue = p.Taken }, // TakeDamage
+                    [1001003] = new ExtraValueData { LongValue = p.Healed }, // heal
+                    [1001004] = new ExtraValueData { LongValue = p.Kills }, // KillPlayer
+                    [1001005] = new ExtraValueData { LongValue = p.Assists }, // AssistKill
+                    [1021002] = new ExtraValueData { LongValue = p.MachineKills }, // DestroyMachinery
+                    [1021003] = new ExtraValueData { LongValue = p.MachineDamage }, // MachineryDamage
+                    [1031001] = new ExtraValueData { LongValue = p.Score }, // TerritoryWarPersonIntegral (inferred: the score)
+                },
             };
         foreach (long guild in r.Guilds)
             if (_guildStore.Get(guild) is { } g)
@@ -83,7 +96,9 @@ public sealed partial class TerritoryWarsService
                 AddAward(goods, Param(p.Guild == winner ? "TerritoryStrongHoldOccupyAuctionAward" : "TerritoryStrongHoldJoinAuctionAward", 1001006), recipient);
                 // Settlement tables are rank/qualification awards. Roll once here and persist the exact goods.
                 AddRankAward(goods, "SiegeSettlementPrimaryAward", rank, recipient);
-                if (p.Score > 0) AddRankAward(goods, "SiegeSettlementHonorAward", rank, recipient);
+                // SiegeSettlementHonorAward is the Battle Merit season reward by board place (the client's
+                // BattleFeatsSettlementPanel and Season Honor widgets), mailed once per season by BattleGlorySeason;
+                // paying it per battle as well would pay it twice.
                 if (p.Guild == winner && r.Round >= 2) AddRankAward(goods, "SiegeSettlementSeniorAward", rank, recipient);
             }
             role.Pending[awardKey] = goods.GroupBy(x => (x.Entry, x.Bind)).Select(g => new Grant(g.Key.Entry, checked(g.Sum(x => x.Count)), g.Key.Bind)).ToList();
@@ -121,6 +136,9 @@ public sealed partial class TerritoryWarsService
         });
         foreach (var p in r.Players.Values.Where(p => p.Loaded))
             foreach (var handler in BattleSettled) handler(p.Id, r.Round);
+        // The battle's war machines end with it, outside the territory gate (their owners' slots are the guild's).
+        if (_battles.GetValueOrDefault(key) is { } room)
+            _loop.PostLegacy(async () => { await EndPlatformsAsync(room); await EndWarMachinesAsync(room.Room); });
         await PublishAsync();
     }
     private void AddRankAward(List<Grant> grants, string table, int rank, GameSession s)

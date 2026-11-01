@@ -184,13 +184,13 @@ public sealed class ParticipationTargetTests : IAsyncLifetime
     }
 
     /// <summary>The guild To-Do tasks' stand-in target 106010 (TaskService.GuildEvents.cs): taking part completes them;
-    /// the Daily Tavern quest is counted by TavernService.</summary>
+    /// the Tavern quest that owns the target reads today's time in a room instead.</summary>
     [ClientDataFact]
     public async Task GuildEventToDoTasksCompleteOnTakingPart()
     {
         var bot = await InWorld();
         var tasks = Service<TaskService>();
-        Assert.True(tasks.TargetsSupported(2000)); // Daily Tavern Quest, [106010,1200]: seconds in a Tavern room
+        Assert.True(tasks.TargetsSupported(2000)); // Daily Tavern Quest, [106010,1200]: today's time in a room (TavernTests)
         foreach (long task in new long[] { 1602050, 1602060, 1602070, 1603011, 1603012, 1603013, 1603014 })
             Assert.True(tasks.TargetsSupported(task), $"task {task}");
         await Accept(1602060); // Stronghold War

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using Ro3Emu.Server.Data;
+using Ro3Emu.Server.Data.Config;
 
 namespace Ro3Emu.Server.Maps;
 
@@ -78,10 +79,13 @@ public sealed class MapWorld
     public IReadOnlyList<SpawnGroup> SpawnGroups { get; init; } = [];
     public IReadOnlyList<GatheringSpawnPoint> GatheringPoints { get; init; } = [];
     public IReadOnlyDictionary<long, MapRegion> Regions { get; init; } = new Dictionary<long, MapRegion>();
-    /// <summary>Scene-editor guide points (m_kGuidePoints): paths the client draws as a guide arrow line (PGuideWayList).</summary>
-    public IReadOnlySet<long> GuidePoints { get; init; } = new HashSet<long>();
-    /// <summary>Scene-editor air walls (m_kAirWalls): raised by the client while dungeon var 133 CAirWallList names them.</summary>
-    public IReadOnlySet<long> AirWalls { get; init; } = new HashSet<long>();
+    /// <summary>The scene editor's air walls (SceneEditorAirWalls), off until a dungeon switches them on (var 133).</summary>
+    public IReadOnlyDictionary<long, SceneAirWall> AirWalls { get; init; } = new Dictionary<long, SceneAirWall>();
+    /// <summary>The scene editor's guide routes (SceneEditorGuides), drawn when a scene sets dungeon var 10021.</summary>
+    public IReadOnlyList<long> GuideRoutes { get; init; } = [];
+    /// <summary>The points of each guide route, id -> (x, y, z) list (a scripted ride walks one).</summary>
+    public IReadOnlyDictionary<long, IReadOnlyList<(float X, float Y, float Z)>> GuidePaths { get; init; } =
+        new Dictionary<long, IReadOnlyList<(float X, float Y, float Z)>>();
 
     /// <summary>Dungeon m_kGroups joined to m_kMonsterSpawnPoints; templates/timing belong to PetFloorConfig.</summary>
     public IReadOnlyDictionary<int, IReadOnlyList<SpawnPoint>> DungeonGroups { get; init; } = new Dictionary<int, IReadOnlyList<SpawnPoint>>();
@@ -190,6 +194,9 @@ public sealed partial class WorldData(IOptions<ServerOptions> options, GameData 
     /// <summary>NPCConfig._iNPCSubType of the "flying trigger" air portals, skipped until flying exists.</summary>
     private const int SubTypeAirTeleport = 300;
 
+    /// <summary>Written by the data export next to config/ (Ro3Emu.DataExport.ClientScenes.FileName).</summary>
+    public const string ClientSceneList = "client-scenes.json";
+
     private readonly Dictionary<long, MapWorld?> _maps = new();
     private readonly object _sync = new();
     private HashSet<long>? _kafraDestinations;
@@ -256,6 +263,50 @@ public sealed partial class WorldData(IOptions<ServerOptions> options, GameData 
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Fly Wing spots of map {Scene} failed; every walkable spot stays in use")]
     private static partial void FlyWingSpotsFailed(ILogger logger, long scene, Exception? error);
+
+    private HashSet<string>? _clientMissingScenes;
+
+    /// <summary>
+    /// Whether the game client can show this scene: the export's client-scenes.json lists the MapResource scenes
+    /// (_kResource) the client has no Unity scene for (Ro3Emu.DataExport.ClientScenes; Glast Heim and five eastern towns
+    /// in the October 2026 client). A client sent there retries "Failed to load the area" forever. Without the list (data
+    /// exported before it) every scene counts as shown, as before.
+    /// </summary>
+    public bool ClientHasScene(long sceneEntry)
+    {
+        var missing = ClientMissingScenes();
+        if (missing.Count == 0) return true;
+        long resource = MapConfig.Get(data, sceneEntry)?.MapResourceId ?? DungeonConfig.Get(data, sceneEntry)?.MapResourceId ?? 0;
+        return MapResource.Get(data, resource)?.Resource is not { Length: > 0 } name || !missing.Contains(name);
+    }
+
+    /// <summary>Tests on the real data: the list an export would have written.</summary>
+    internal void UseClientSceneListForTest(IEnumerable<string> missing)
+    {
+        lock (_sync) _clientMissingScenes = new HashSet<string>(missing, StringComparer.OrdinalIgnoreCase);
+    }
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "No {File} in the game data: a warp to a map the game client cannot show is not refused; export the game data again")]
+    private static partial void LogNoClientSceneList(ILogger logger, string file);
+
+    private HashSet<string> ClientMissingScenes()
+    {
+        lock (_sync)
+        {
+            if (_clientMissingScenes != null) return _clientMissingScenes;
+            _clientMissingScenes = new(StringComparer.OrdinalIgnoreCase);
+            if (DataFiles.Find(options.Value.GameDataDir ?? options.Value.DataDir, ClientSceneList) is not { } path)
+            {
+                LogNoClientSceneList(log, ClientSceneList);
+                return _clientMissingScenes;
+            }
+            using var doc = JsonDocument.Parse(File.ReadAllBytes(path));
+            if (doc.RootElement.TryGetProperty("Missing", out var list) && list.ValueKind == JsonValueKind.Array)
+                foreach (var name in list.EnumerateArray().Where(n => n.ValueKind == JsonValueKind.String))
+                    _clientMissingScenes.Add(name.GetString()!);
+            return _clientMissingScenes;
+        }
+    }
 
     private MapWorld? Load(long sceneEntry)
     {
@@ -349,7 +400,8 @@ public sealed partial class WorldData(IOptions<ServerOptions> options, GameData 
         {
             SceneEntry = sceneEntry, Born = born, Revive = revive, Npcs = npcs, Points = points, Nav = map.Nav, SpawnGroups = spawnGroups,
             GatheringPoints = LoadGatheringPoints(se, sceneEntry), DungeonGroups = LoadDungeonGroups(se), Regions = LoadRegions(se),
-            GuidePoints = LoadIds(se, "m_kGuidePoints"), AirWalls = LoadIds(se, "m_kAirWalls"),
+            GuideRoutes = SceneEditorGuides.RouteIds(se), GuidePaths = SceneEditorGuides.Paths(se),
+            AirWalls = SceneEditorAirWalls.Read(se)
         };
     }
 
@@ -396,7 +448,7 @@ public sealed partial class WorldData(IOptions<ServerOptions> options, GameData 
         return groups;
     }
 
-    private static List<SpawnGroup> LoadSpawnGroups(JsonElement se)
+    internal static List<SpawnGroup> LoadSpawnGroups(JsonElement se)
     {
         var points = new Dictionary<int, List<SpawnPoint>>();
         if (se.TryGetProperty("m_kWorldMonsterSpawnPoints", out var ps) && ps.ValueKind == JsonValueKind.Object)

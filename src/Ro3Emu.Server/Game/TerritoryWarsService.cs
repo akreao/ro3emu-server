@@ -28,6 +28,7 @@ public sealed partial class TerritoryWarsService : IGameTicker
     private readonly RoleStore _roles;
     private readonly GuildStore _guildStore;
     private readonly GuildService _guilds;
+    private readonly TeamService _teams;
     private readonly CharacterService _character;
     private readonly FunctionService _functions;
     private readonly TerritoryWarsClock _clock;
@@ -39,6 +40,8 @@ public sealed partial class TerritoryWarsService : IGameTicker
     private readonly World _world;
     private readonly MonsterService _monsters;
     private readonly BuffService _buffs;
+    private readonly CombatService _combat;
+    private readonly AwardService _awards;
     private readonly RewardService _rewards;
     private readonly MailService _mail;
     private readonly NewActivityService _activities;
@@ -169,14 +172,14 @@ public sealed partial class TerritoryWarsService : IGameTicker
         GuildService guilds, CharacterService character, FunctionService functions, TerritoryWarsClock clock, TimedTodoSchedule siegeSchedule,
         SessionRegistry sessions, InstanceService instances, SceneService scene, WorldData maps, World world,
         MonsterService monsters, CombatService combat, BuffService buffs, RewardService rewards, MailService mail, NewActivityService activities,
-        GameLoop loop, ILogger<TerritoryWarsService> log)
+        TeamService teams, AwardService awards, GameLoop loop, ILogger<TerritoryWarsService> log)
     {
         this._data = data; this._accounts = accounts; this._roles = roles; this._guildStore = guildStore;
         this._guilds = guilds; this._character = character; this._functions = functions; this._clock = clock;
         this._siegeSchedule = siegeSchedule;
         this._sessions = sessions; this._instances = instances; this._scene = scene; this._maps = maps;
-        this._world = world; this._monsters = monsters; this._buffs = buffs; this._rewards = rewards; this._mail = mail;
-        this._activities = activities;
+        this._world = world; this._monsters = monsters; this._buffs = buffs; this._combat = combat; this._awards = awards; this._rewards = rewards; this._mail = mail;
+        this._activities = activities; this._teams = teams;
         activities.TerritoryWarState = BuildActivityState;
         this._loop = loop; this._log = log;
         state = accounts.ReadSync<byte[]?>(new TerritoryRealmReadPlan(RealmStateKind.TerritoryWars)) is { } saved
@@ -187,6 +190,12 @@ public sealed partial class TerritoryWarsService : IGameTicker
         scene.LoadedKeys.Add(SceneKeys);
         scene.Leaving.Add(LeavingAsync);
         scene.Leaving.Add(SiegeLeavingAsync);
+        scene.Leaving.Add(GloryLeavingAsync);
+        scene.Leaving.Add(CannonLeavingAsync);
+        scene.Leaving.Add(VehicleLeavingAsync);
+        scene.WalkBlocked = SiegeWalkBlocked;
+        scene.WalkBridged = SiegeWalkBridged;
+        monsters.Spares = SiegeSpares;
         combat.Killed.Add(KilledAsync);
         combat.Killed.Add(SiegeKilledAsync);
         combat.Killed.Add(WorldKilledAsync);
@@ -194,15 +203,35 @@ public sealed partial class TerritoryWarsService : IGameTicker
         // DiedAsync publishes the battle's own countdown for a recorded participant.
         combat.ReviveInfoOwners.Add(s => s.TerritoryBattle is { } battle && s.Role is { } role && battle.State.Players.ContainsKey(role.Id));
         combat.PlayerDied.Add(WorldDiedAsync);
+        combat.PlayerDied.Add(CannonDiedAsync);
+        combat.PlayerDied.Add(VehicleDiedAsync);
+        combat.PlayerDied.Add(PlatformLeavingAsync);
+        scene.Leaving.Add(PlatformLeavingAsync);
+        world.PlayerEntered.Add(PlatformActivatorSeenAsync);
+        combat.GrantedSkill.Add(SeatSkill);
+        combat.AfterLethalPublication.Add(MachineDestroyedAsync);
+        combat.Killed.Add(MachineKilledAsync);
+        SiegeSettled.Add(SiegeMachinesSettled);
+        world.PlayerEntered.Add(VehicleRiderSeenAsync);
         combat.EventDamageRecorded.Add(DamageRecordedAsync);
         combat.EventDamageRecorded.Add(SiegeDamageRecordedAsync);
+        combat.EventDamageRecorded.Add(MachineDamageRecordedAsync);
         combat.PlayerHostile = Hostile;
         combat.MonsterTargetAllowed = CanHitObjective;
-        combat.BlockedMonsterEndpointAllowed = SiegeCrystalBlockedEndpointAllowed;
+        combat.SkillLineBlocked = SiegeSkillLineBlocked;
+        combat.DamageAdjusters.Add((_, target, row, _, damage) => SiegeTagDamage(target, row, damage));
         combat.PvpDealtAsync.Add(PvpRecordedAsync);
         combat.PvpDealtAsync.Add(SiegePvpRecordedAsync);
         combat.HealedAsync.Add(BattleHealRecordedAsync);
         combat.HealedAsync.Add(SiegeHealRecordedAsync);
+        combat.OwnSkillAdmit = CommandSkillAdmit;
+        combat.OwnSkillCast = CommandSkillCastAsync;
+        combat.OwnSkillLanded = CommandSkillLandedAsync;
+        combat.PlayerKilled.Add(GloryKilledAsync);
+        combat.PvpDealtAsync.Add(GloryHitAsync);
+        character.StateChanged.Add(s => _ = SyncGloryAsync(s));
+        guilds.WarSideOf = WarSide;
+        guilds.WarMachines = new MachineSite(this);
     }
 
     public sealed class RoleState
@@ -221,6 +250,8 @@ public sealed partial class TerritoryWarsService : IGameTicker
         public Dictionary<string, int> WorldLandClaims { get; set; } = new();
         public Dictionary<string, List<Grant>> Pending { get; set; } = new();
         public HashSet<string> Paid { get; set; } = new();
+        public GloryState Glory { get; set; } = new();
+        public Dictionary<string, GloryState> GlorySeasons { get; set; } = [];
     }
     public sealed record Grant(int Entry, int Count, int Bind = 0);
     public sealed record RoleSeason(long Honor, long Valor, long Donated, Dictionary<long, long> Donations);
@@ -241,6 +272,8 @@ public sealed partial class TerritoryWarsService : IGameTicker
         public Dictionary<int, long> WorldActivityRespawns { get; set; } = new();
         public Dictionary<int, long> WorldActivityOccurrences { get; set; } = new();
         public Dictionary<string, WorldPickupOccurrence> WorldPickupOccurrences { get; set; } = new();
+        /// <summary>Past seasons whose Battle Merit standings are still to be mailed (TerritoryWarsService.BattleGlorySeason).</summary>
+        public List<string> GlorySettle { get; set; } = [];
     }
     private static T Copy<T>(T value) => JsonSerializer.Deserialize<T>(JsonSerializer.SerializeToUtf8Bytes(value))!;
     private async Task SaveAsync(WorldState value, string kind = "state", GameSession? actor = null,
@@ -356,8 +389,8 @@ public sealed partial class TerritoryWarsService : IGameTicker
             or StageNotify or History or ResultNotify or AuctionTimeNotify or MarkerNotify or Minimap or FatigueNotify
             or QueueNotify or QueueEnter or QueueCancel or QueueArea or SubmitDrop or Bid or AuctionQuery or AutoSet
             or AutoCancel or AutoQuery or AutoNotify or RankNotify or WarHall or SiegeBaseQuery or SiegeHistoryQuery or SiegeResultNotify
-            or SiegeToolAssign or SiegeToolExchange or SiegeToolList or SiegeToolPermissionNotify or SiegeToolChangeNotify
-            or SiegeToolPrepay or SiegeToolBuild or SiegeToolCancel or SiegeToolAdd or SiegeVehicleUse;
+            or SiegeToolAdd
+            or SetMark or GatherMark or CommandMark or TeleportResponse or GloryRankReward;
 
     /// <summary>Route only shared packets that this territory family can actually consume.</summary>
     internal bool IsSharedOwnerRequest(GameSession session, uint id, ReadOnlyMemory<byte> body)
@@ -414,14 +447,12 @@ public sealed partial class TerritoryWarsService : IGameTicker
                 case WarHall: await WarHallAsync(s); break;
                 case SiegeBaseQuery: await SiegeBaseAsync(s, GetSiegeBaseInfoReq.Parser.ParseFrom(body.Span)); break;
                 case SiegeHistoryQuery: await SiegeHistoryAsync(s, SiegeCityHistoryInfoReq.Parser.ParseFrom(body.Span)); break;
-                case SiegeToolList: await SiegeToolListAsync(s); break;
-                case SiegeToolAssign: await SiegeToolAssignAsync(s, GuildWartimeToolBelongOperReq.Parser.ParseFrom(body.Span)); break;
-                case SiegeToolExchange: await SiegeToolExchangeAsync(s, GuildWartimeToolExchangeOperReq.Parser.ParseFrom(body.Span)); break;
-                case SiegeToolPrepay: await Send(s, id, new GuildWartimeStorePrepayResp { Result = ErrorCodes.FeatureUnavailable }); break;
-                case SiegeToolBuild: await Send(s, id, new GuildAttackCityBuildResp { Result = ErrorCodes.FeatureUnavailable }); break;
-                case SiegeToolCancel: await Send(s, id, new GuildWartimeStoreItemCancelUseResp { Result = ErrorCodes.FeatureUnavailable }); break;
                 case SiegeToolAdd: await Send(s, id, new GuildWartimeStoreItemAddResp { Result = ErrorCodes.FeatureUnavailable }); break;
-                case SiegeVehicleUse: await Send(s, id, new GuildVehicleUseRsp { Result = ErrorCodes.FeatureUnavailable }); break;
+                case SetMark: await SetMarkAsync(s, DungeonSetMarkPosReq.Parser.ParseFrom(body.Span)); break;
+                case GatherMark: await GatherAsync(s, DungeonGatherMarkPosReq.Parser.ParseFrom(body.Span)); break;
+                case CommandMark: await CommandMarkAsync(s, GvgWarUpdateCommandMarkReq.Parser.ParseFrom(body.Span)); break;
+                case TeleportResponse: await TeleportResponseAsync(s, DungeonTeleportResponseReq.Parser.ParseFrom(body.Span)); break;
+                case GloryRankReward: await GloryRewardAsync(s, BattleGloryRankRewardReq.Parser.ParseFrom(body.Span)); break;
             }
         }
         finally { stagedTerritoryState.Dispose(); _gate.Release(); reservation?.Dispose(); }
@@ -459,10 +490,12 @@ public sealed partial class TerritoryWarsService : IGameTicker
             s.TerritoryWars = aligned;
             _seasonRoleProjectionPending.Remove(roleId);
         }
+        foreach (var handler in CampChanged) handler(s); // the quests settled at login before this state was loaded
         // Epoch alignment just committed this role projection. An empty outbox needs no reload
         // after that write invalidates the login snapshot; nonempty delivery still checks its source.
         if (s.TerritoryWars!.Pending.Count != 0) await DeliverAsync(s);
         await Send(s, StageNotify, StageData());
+        await SyncGloryAsync(s);
         await Send(s, MapNotify, new TerritoryWarsMapDataNotify { Data = MapData() });
         await Send(s, GuildNotify, new TerritoryWarsNotifySiegeCampChange { GuildData = GuildData(Own(s)?.Id ?? 0) });
         await SyncActivityAsync(s);
@@ -623,6 +656,7 @@ public sealed partial class TerritoryWarsService : IGameTicker
             : remain > 0 ? ErrorCodes.TerritoryCampCombat : 0;
         if (error == 0) { role.Camp = (int)req.Type; role.LastCampChange = _clock.Now; await SaveRoleAsync(s.Role!.Id, role); s.TerritoryWars = role; }
         await Send(s, Camp, new PvpSetRoleCampResp { Result = error, Type = (EPvpRoleCampNum)role.Camp, PeaceTimeInterval = remain });
+        if (error == 0) foreach (var handler in CampChanged) handler(s);
     }
 
     private Task HistoryAsync(GameSession s, GetTerritoryWarsHistoryStatisticsReq req)
@@ -681,6 +715,7 @@ public sealed partial class TerritoryWarsService : IGameTicker
         try { await ReconcileLockedAsync(); }
         finally { stagedTerritoryState.Dispose(); _gate.Release(); reservation?.Dispose(); }
         await FlushActivityAsync();
+        await SettleGlorySeasonsAsync();
     }
     private async Task ReconcileLockedAsync()
     {

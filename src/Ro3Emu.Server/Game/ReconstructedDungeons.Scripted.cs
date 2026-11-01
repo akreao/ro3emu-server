@@ -37,11 +37,11 @@ public sealed partial class ReconstructedDungeons
     public sealed record StepSlide(float Side, float Down);
 
     /// <summary>
-    /// What ends a step the player cannot otherwise finish: after <paramref name="Ms"/>, counted from the step's start
-    /// or (<paramref name="FromMount"/>) from a participant mounting a vehicle actor, the step completes as if its first
-    /// trigger had come and the participants are moved to the scene-editor point <paramref name="Teleport"/> (0: none).
+    /// What ends a step the player cannot otherwise finish: <paramref name="Ms"/> after the step's start, the step
+    /// completes as if its first trigger had come and the participants are moved to the scene-editor point
+    /// <paramref name="Teleport"/> (0: none).
     /// </summary>
-    public sealed record StepFallback(int Ms, long Teleport, bool FromMount);
+    public sealed record StepFallback(int Ms, long Teleport);
 
     /// <summary>
     /// One scripted step. <paramref name="Story"/> is a PlotInterpretation id the client plays at the step's start
@@ -53,26 +53,51 @@ public sealed partial class ReconstructedDungeons
     /// casts a skill at the nearest monster of the step's fight (the airship's cannons); with Shots above 0, that many
     /// strikes defeat a monster whatever the skill's damage. <paramref name="Seek"/>: the step is a hide-and-seek game
     /// whose hiding places are its Point triggers; walking there does not complete it, winning the game does.
+    /// <paramref name="Companions"/>: the actors marked "companion", shown as allied fighters (CompanionUnit) instead of
+    /// plain scene actors; they are not in <paramref name="Actors"/>.
+    /// <paramref name="React"/>: what the step's speaker says, and the effect shown, when it begins, when an ignored event
+    /// arrives and when it completes.
     /// </summary>
     public sealed record ScriptedStep(string Stage, int Quest, (int Done, int Total) Goal, IReadOnlyList<SceneActor> Actors,
         long Story, IReadOnlyList<StepTrigger> Complete, IReadOnlyList<StepTrigger> Ignore, long TeleportAfter,
         IReadOnlyList<Spawn> Fight, bool All, IReadOnlyList<(long Interaction, long Skill, int Shots)>? Strikes = null,
-        Seek? Seek = null, Shelter? Shelter = null)
+        Seek? Seek = null, Shelter? Shelter = null, Reaction? React = null)
     {
+        public IReadOnlyList<SceneActor> Companions { get; init; } = [];
+
         /// <summary>Story lines said while the step runs and as it completes (inferred timings).</summary>
         public IReadOnlyList<StepLine> Lines { get; init; } = [];
         public IReadOnlyList<StepLine> DoneLines { get; init; } = [];
         public StepSlide? Slide { get; init; }
         public StepFallback? Fallback { get; init; }
-        /// <summary>
-        /// Scene-editor guide points (m_kGuidePoints) the client draws as a guide arrow line while the step runs
-        /// (dungeon var 10021 PGuideWayList); empty: none.
-        /// </summary>
-        public IReadOnlyList<long> Guide { get; init; } = [];
         /// <summary>The step names its goal: a fight step's tracker then shows it instead of the step's kills (the waves
         /// done of all waves).</summary>
         public bool FixedGoal { get; init; }
+
+        /// <summary>A scene-editor guide route (m_kGuidePoints) the actor a player used to complete the step walks, the
+        /// participants with it, before <see cref="TeleportAfter"/> and the next step (0: none; inferred).</summary>
+        public long RideAfter { get; init; }
+
+        /// <summary>Milliseconds the step stays on after it is completed, before the next step or the settlement (0: none;
+        /// inferred): a bubble of the actors it showed is still being read, or a defeated enemy is still falling.</summary>
+        public int HoldAfterMs { get; init; }
     }
+
+    /// <summary>
+    /// A step's reactions (inferred, Louie's 3120703 shell game: his lines and the right/wrong Bell effects are client rows
+    /// that nothing in the client sends). <paramref name="Speaker"/> is the step's actor whose uid the lines carry;
+    /// <paramref name="Start"/> ChatConfig rows go out one after another when the step begins, each when the previous one's
+    /// _iTime has run out. <paramref name="Ignored"/> answers an event the step ignores, <paramref name="Complete"/> the
+    /// event that completes it.
+    /// </summary>
+    public sealed record Reaction(int Speaker, IReadOnlyList<int> Start, Response? Ignored, Response? Complete);
+
+    /// <summary>
+    /// One reaction: the ChatConfig row <paramref name="Say"/> (0: none) and the BuffConfig row <paramref name="Buff"/>
+    /// (0: none) put on the step's <paramref name="On"/> actor that stands at the point of the actor the player used. A
+    /// completing reaction holds the next step (or the settlement) until its line's _iTime has run out.
+    /// </summary>
+    public sealed record Response(int Say, int Buff, int On);
 
     /// <summary>
     /// Cover from a boss's sweeping attack (inferred, the story Pharaoh's 3120702 after the raid Pharaoh's "Pharaoh is
@@ -99,11 +124,9 @@ public sealed partial class ReconstructedDungeons
     /// <summary>
     /// A scene. <paramref name="Unplayed"/> are DungeonQuestConfig quests of the scene that no step shows: the branch
     /// that shows them cannot be reached in the reconstruction (each has its reason in the json, "unplayed").
-    /// <paramref name="Next"/> is the scene a won run goes straight on to (DungeonConfig _iSameDupLoadingType 2 on it),
-    /// 0 when the players are sent back out.
     /// </summary>
     public sealed record ScriptedScene(long Scene, string Name, string Confidence, IReadOnlyList<ScriptedStep> Steps,
-        IReadOnlyList<int> Unplayed, long Next = 0)
+        IReadOnlyList<int> Unplayed)
     {
         /// <summary>Scene-editor air walls (m_kAirWalls) raised for the whole run (dungeon var 133 CAirWallList).</summary>
         public IReadOnlyList<long> AirWalls { get; init; } = [];
@@ -129,8 +152,7 @@ public sealed partial class ReconstructedDungeons
             var unplayed = entry.Value.TryGetProperty("unplayed", out var u)
                 ? u.EnumerateArray().Select(q => q.GetProperty("quest").GetInt32()).ToArray() : [];
             _scripted[scene] = new ScriptedScene(scene, entry.Value.GetProperty("name").GetString() ?? "",
-                entry.Value.GetProperty("confidence").GetString() ?? "", steps, unplayed,
-                entry.Value.TryGetProperty("next", out var next) ? next.GetProperty("scene").GetInt64() : 0)
+                entry.Value.GetProperty("confidence").GetString() ?? "", steps, unplayed)
             {
                 AirWalls = entry.Value.TryGetProperty("airWalls", out var walls) ? [.. walls.EnumerateArray().Select(w => w.GetInt64())] : [],
             };
@@ -140,11 +162,9 @@ public sealed partial class ReconstructedDungeons
     private static ScriptedStep Step(JsonElement s)
     {
         var goal = s.TryGetProperty("goal", out var g) ? (g[0].GetInt32(), g[1].GetInt32()) : (0, 1);
-        var actors = s.TryGetProperty("actors", out var a)
-            ? a.EnumerateArray().Select(x => new SceneActor(x.GetProperty("npc").GetInt32(), x.GetProperty("point").GetInt64(),
-                x.TryGetProperty("buffs", out var b) ? b.EnumerateArray().Select(v => v.GetInt32()).ToArray() : [],
-                x.TryGetProperty("offset", out var o) ? o[0].GetSingle() : 0, x.TryGetProperty("offset", out o) ? o[1].GetSingle() : 0)).ToArray()
-            : [];
+        var listed = s.TryGetProperty("actors", out var a) ? a.EnumerateArray().ToArray() : [];
+        bool IsCompanion(JsonElement x) => x.TryGetProperty("companion", out var c) && c.GetBoolean();
+        var actors = listed.Where(x => !IsCompanion(x)).Select(Actor).ToArray();
         var complete = Triggers(s, "complete");
         var fight = s.TryGetProperty("fight", out var f)
             ? f.EnumerateArray().Select(x => new Spawn(x.GetProperty("point").GetInt64(), x.GetProperty("npc").GetInt32(),
@@ -170,17 +190,19 @@ public sealed partial class ReconstructedDungeons
                 ? new Shelter(shelter.GetProperty("boss").GetInt32(), shelter.GetProperty("cover").GetInt32(), shelter.GetProperty("tip").GetInt32(),
                     shelter.GetProperty("skill").GetInt64(), shelter.GetProperty("everyMs").GetInt32(), shelter.GetProperty("warnMs").GetInt32(),
                     shelter.GetProperty("width").GetSingle(), shelter.GetProperty("depth").GetSingle())
-                : null)
+                : null,
+            s.TryGetProperty("react", out var react) ? ParseReaction(react) : null)
         {
+            Companions = [.. listed.Where(IsCompanion).Select(Actor)],
+            RideAfter = s.TryGetProperty("after", out var rideAfter) && rideAfter.TryGetProperty("ride", out var ride) ? ride.GetInt64() : 0,
+            HoldAfterMs = s.TryGetProperty("after", out var holdAfter) && holdAfter.TryGetProperty("hold", out var hold) ? hold.GetInt32() : 0,
             Lines = Lines(s, "lines"),
             DoneLines = Lines(s, "doneLines"),
             Slide = s.TryGetProperty("slide", out var slide)
                 ? new StepSlide(slide.GetProperty("side").GetSingle(), slide.GetProperty("down").GetSingle()) : null,
             Fallback = s.TryGetProperty("fallback", out var fb)
-                ? new StepFallback(fb.GetProperty("ms").GetInt32(), fb.TryGetProperty("teleport", out var t) ? t.GetInt64() : 0,
-                    fb.TryGetProperty("from", out var from) && from.GetString() == "mount")
+                ? new StepFallback(fb.GetProperty("ms").GetInt32(), fb.TryGetProperty("teleport", out var t) ? t.GetInt64() : 0)
                 : null,
-            Guide = s.TryGetProperty("guide", out var guide) ? guide.EnumerateArray().Select(v => v.GetInt64()).ToArray() : [],
             FixedGoal = s.TryGetProperty("goal", out _),
         };
     }
@@ -189,6 +211,20 @@ public sealed partial class ReconstructedDungeons
         ? list.EnumerateArray().Select(l => new StepLine(l.GetProperty("chat").GetInt32(),
             l.TryGetProperty("by", out var by) ? by.GetInt32() : 0, l.TryGetProperty("ms", out var ms) ? ms.GetInt32() : 0)).ToArray()
         : [];
+
+    private static SceneActor Actor(JsonElement x) => new(x.GetProperty("npc").GetInt32(), x.GetProperty("point").GetInt64(),
+        x.TryGetProperty("buffs", out var b) ? b.EnumerateArray().Select(v => v.GetInt32()).ToArray() : [],
+        x.TryGetProperty("offset", out var o) ? o[0].GetSingle() : 0, x.TryGetProperty("offset", out o) ? o[1].GetSingle() : 0);
+
+    private static Reaction ParseReaction(JsonElement r) => new(r.GetProperty("speaker").GetInt32(),
+        r.TryGetProperty("start", out var start) ? [.. start.EnumerateArray().Select(v => v.GetInt32())] : [],
+        r.TryGetProperty("ignored", out var ignored) ? ParseResponse(ignored) : null,
+        r.TryGetProperty("complete", out var complete) ? ParseResponse(complete) : null);
+
+    private static Response ParseResponse(JsonElement r) => new(
+        r.TryGetProperty("say", out var say) ? say.GetInt32() : 0,
+        r.TryGetProperty("buff", out var buff) ? buff.GetInt32() : 0,
+        r.TryGetProperty("on", out var on) ? on.GetInt32() : 0);
 
     private static IReadOnlyList<StepTrigger> Triggers(JsonElement step, string field)
     {

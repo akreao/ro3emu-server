@@ -91,7 +91,7 @@ public sealed class AchievementTests : IAsyncLifetime
     private async Task Gm(string account, string line)
     {
         using var http = new HttpClient();
-        (await http.PostAsync($"{_http}/ro3emu/gm?account={account}", new StringContent(line))).EnsureSuccessStatusCode();
+        (await http.PostAsync($"{_http}/ro3emu/gm?account={account}", Operator.Command(line))).EnsureSuccessStatusCode();
     }
 
     private GameSession Session(string name) => Service<SessionRegistry>().All().Single(s => s.Role?.Name == name);
@@ -170,7 +170,7 @@ public sealed class AchievementTests : IAsyncLifetime
         Assert.Equal(134, rows.Count);
         Assert.All(rows, r => Assert.All(r.Required, required => Assert.True(required > 0, $"{r.Id} has no R")));
         var blocked = rows.Where(r => r.Blocked).ToList();
-        Assert.Equal(9, blocked.Count); // 316002 (Echo Resonance) and the Tavern rows (106007/106008) have sources
+        Assert.Equal(9, blocked.Count); // 316002 (Echo Resonance) is read from the worn Soul Echoes, 106007/106008 from the Tavern
         Assert.All(blocked, r => Assert.Contains(r.Targets[0][0],
             new long[] { 303001, 302007, 326003, 303004 }));
         Assert.Single(blocked, r => r.Targets[0][0] == 303004); // the fashion-grid variant only

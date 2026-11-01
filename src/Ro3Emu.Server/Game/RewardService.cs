@@ -3,6 +3,7 @@ using Microsoft.Extensions.Options;
 using Romsg;
 using Ro3Emu.Server.Accounts;
 using Ro3Emu.Server.Data;
+using Ro3Emu.Server.Data.Config;
 using Ro3Emu.Server.Maps;
 
 namespace Ro3Emu.Server.Game;
@@ -26,9 +27,11 @@ public sealed class RewardService
     private readonly GameData _data;
     private readonly ILogger<RewardService> _log;
     private readonly IOptions<ServerOptions> _options;
-    private readonly Random _random = new();
+    private Random _random = new();
     private Dictionary<int, long>? _expCorrection;
     private readonly DropAttenuation _attenuation;
+    private readonly FieldExpRule[] _configuredFieldExp; // Ro3Emu:FieldExpRates (inferred), empty unless an operator set it
+    private volatile FieldExpRule[] _fieldExp; // the rules in force: the configured ones until a GM changes them
 
     /// <summary>Field AFK selects the enhanced _iDrop table only for qualified ordinary field kills.
     /// Other kills use environment 0, preserving ordinary rewards (localization 10960000077; mapping inferred).</summary>
@@ -44,7 +47,8 @@ public sealed class RewardService
     public RewardService(CombatService combat, CharacterService character, TeamService teams, GameData data, ILogger<RewardService> log,
         IOptions<ServerOptions> options)
     {
-        this._options = options;
+        _options = options;
+        _fieldExp = _configuredFieldExp = FieldExpRates.Valid(options.Value);
         this._character = character;
         this._teams = teams;
         this._data = data;
@@ -61,8 +65,8 @@ public sealed class RewardService
         internal long BaseExp;
         internal long JobExp;
         internal bool Published;
-        /// <summary>The committed bag instances of this kill's goods (per-instance equipment rows in the drop notice).</summary>
-        internal List<InvItem>? Granted;
+        /// <summary>The bag items the committed kill created (auto-decomposed ones are gone).</summary>
+        internal List<InvItem> Granted = [];
     }
     private readonly System.Runtime.CompilerServices.ConditionalWeakTable<MonsterUnit, KillOutcome> _outcomes = new();
     internal Func<GameSession, MonsterUnit, (List<(int Entry, int Count)> Items, long BaseExp, long JobExp)>? ResolveKillForTest { get; set; }
@@ -103,6 +107,8 @@ public sealed class RewardService
             if (!_outcomes.TryGetValue(monster, out var outcome))
             {
                 var (items, baseExp, jobExp) = ResolveKill(player, monster, bonus);
+                // An advanced pass raises a currency's drops (PassPrivileges.CopperEffAdd).
+                items = PassPrivileges.BoostDrops(_data, player, items);
                 outcome = new KillOutcome { Role = role, Items = items, BaseExp = baseExp, JobExp = jobExp };
                 _outcomes.Add(monster, outcome);
             }
@@ -112,9 +118,9 @@ public sealed class RewardService
             StageAfkKill?.Invoke(player, monster, settlement, outcome.Items, outcome.BaseExp, outcome.JobExp);
             StageHuntKill?.Invoke(player, monster, settlement);
             settlement.LibraryMonster = monster.Template.NpcId;
-            outcome.Granted = await _character.ExchangeLockedAsync(player, [], outcome.Items, popup: false, sync: outcome.Items.Count > 0,
-                baseExp: outcome.BaseExp, jobExp: outcome.JobExp, rewardSettlement: settlement,
-                persist: settlement.Enlist, committed: settlement.Applied);
+            outcome.Granted = await _character.ExchangeLockedAsync(player, [], outcome.Items, popup: false,
+                sync: outcome.Items.Count > 0, baseExp: outcome.BaseExp, jobExp: outcome.JobExp, rewardSettlement: settlement,
+                persist: settlement.Enlist, committed: settlement.Applied) ?? [];
         }
         catch
         {
@@ -142,7 +148,7 @@ public sealed class RewardService
         }
     }
 
-    private (List<(int Entry, int Count)> Items, long BaseExp, long JobExp) ResolveKill(GameSession player, MonsterUnit monster, bool bonus)
+    internal (List<(int Entry, int Count)> Items, long BaseExp, long JobExp) ResolveKill(GameSession player, MonsterUnit monster, bool bonus)
     {
         if (ResolveKillForTest != null) return ResolveKillForTest(player, monster);
         // Team-boss personal awards have their own durable dungeon obligation; ordinary loot stays empty.
@@ -152,23 +158,13 @@ public sealed class RewardService
         var drops = new List<(int Entry, int Count)>();
         // The party's item drop bonus (TeamService.DropBonus, +30% per extra member on the map) multiplies the server rate.
         double chanceRate = Rate(_options.Value.Rates.ItemDrop) * _teams.DropBonus(player) / 10000;
-        // (inferred) NPCDropConfig environment 0 is reduced and 1 is Bonus Time: the former carries
-        // small EXP at player levels 1-99, the latter larger EXP. Fatigue environment 2 has no proven trigger.
-        // _iNormalDrop remains additive under its own level/map conditions; no numeric multiplier is invented.
-        if (Resolve(GameData.Int(npc, "_iDrop")) is var dropId and > 0 && _data.Row("NPCDropConfig", dropId) is { } nd
-            && nd.ValueKind == JsonValueKind.Object && nd.TryGetProperty(bonus ? "1" : "0", out var env))
-            RollPools(env, player, drops, monster.Template.Level, chanceRate);
-        int dropTableCount = drops.Count;
-        if (npc.TryGetProperty("_iNormalDrop", out var normals) && normals.ValueKind == JsonValueKind.Array)
+        var dropRows = KillDropRows(_data, npc, bonus).ToList();
+        int environmentRows = KillDropEnvironment(_data, npc, bonus) is null ? 0 : 1, dropTableCount = 0;
+        for (int i = 0; i < dropRows.Count; i++)
         {
-            foreach (var n in normals.EnumerateArray())
-            {
-                if (GameData.Number(n) is not { } nid || Resolve((long)nid) is not (var id and > 0) || _data.Row("NpcNormalDropConfig", id) is not { } row) continue;
-                if (row.TryGetProperty("_iMapId", out var maps) && maps.ValueKind == JsonValueKind.Array && maps.GetArrayLength() > 0
-                    && !maps.EnumerateArray().Any(m => GameData.Number(m) == player.SceneEntry))
-                    continue;
-                RollPools(row, player, drops, monster.Template.Level, chanceRate);
-            }
+            var (row, maps) = dropRows[i];
+            if (maps.Count == 0 || maps.Contains(player.SceneEntry)) RollPools(row, player, drops, monster.Template.Level, chanceRate);
+            if (i < environmentRows) dropTableCount = drops.Count;
         }
 
         // Beta footage (Poring 5, Boa 23, Willow 9 Base EXP) matches the _iNormalDrop amount alone, not the sum with the
@@ -186,6 +182,7 @@ public sealed class RewardService
             long gap = player.Progress!.Level - monster.Template.Level;
             baseExp = baseExp * Correction((int)Math.Clamp(gap, -200, 200)) / 10000;
             baseExp = Math.Max(1, baseExp * _teams.ExpBonus(player) / 10000);
+            baseExp = ScaleFieldExp(monster.Template.NpcId, player.Progress!.Level, baseExp);
         }
         // Job EXP is 20% of the kill's Base EXP before the catch-up bonus (CharacterService.JobExpFromBase).
         // BaseExpAddConfig catch-up below the server level raises Base EXP only (CharacterService.LevelRules);
@@ -218,6 +215,25 @@ public sealed class RewardService
     private bool IsCurrency(int entry) => _data.Row("ItemConfig", entry) is { } row && GameData.Int(row, "_iType") == ItemTypeCurrency;
     private const int ItemTypeCurrency = 1;
 
+    /// <summary>FieldExpRates (inferred): an open-field monster (NPCConfig._iWildMonsters 1) pays the rate of the killer's level.</summary>
+    internal long ScaleFieldExp(int npcId, long level, long exp)
+    {
+        var rules = _fieldExp;
+        return rules.Length > 0 && NPCConfig.Get(_data, npcId)?.WildMonsters == 1 ? FieldExpRates.Scale(rules, level, exp) : exp;
+    }
+
+    /// <summary>Tests: the drop rolls follow this seed, so two kills of one monster roll the same.</summary>
+    internal void SeedRollsForTest(int seed) => _random = new Random(seed);
+
+    /// <summary>The field EXP rules in force.</summary>
+    public IReadOnlyList<FieldExpRule> FieldExpRules => _fieldExp;
+
+    /// <summary>"!fieldexp": replaces the rules in force, in memory until the next start (the configuration is not written).</summary>
+    public void SetFieldExpRules(IEnumerable<FieldExpRule> rules) => _fieldExp = FieldExpRates.Valid(rules);
+
+    /// <summary>"!fieldexp reset": the rules of Ro3Emu:FieldExpRates again.</summary>
+    public void ResetFieldExpRules() => _fieldExp = _configuredFieldExp;
+
     private async Task KilledAsync(GameSession player, MonsterUnit monster)
     {
         await PrepareKilledAsync(player, monster); // also covers existing service/test callbacks
@@ -236,14 +252,9 @@ public sealed class RewardService
                     Position = monster.Pos, TargetEntry = monster.Template.NpcId,
                     TargetUid = role.Id, RewardType = { RewardDrop }
                 };
-                var shown = new HashSet<InvItem>(ReferenceEqualityComparer.Instance);
+                var unshown = new List<InvItem>(outcome.Granted);
                 foreach (var (entry, count) in outcome.Items)
-                    if (_character.AddAcquiredEquipmentRows(player, notify.Rewards, entry, count, 0, outcome.Granted, shown) is var left and > 0)
-                        notify.Rewards.Add(new ItemBaseInfo
-                        {
-                            ItemEntry = entry, Stack = left,
-                            ItemInfos = { [10001] = new ItemAttrValue { LongVal = 0 } }
-                        });
+                    notify.Rewards.AddRange(DropInfos(unshown, entry, count));
                 await player.SendGameAsync(CharacterService.GetRewardNotify, notify);
             }
         }
@@ -258,48 +269,110 @@ public sealed class RewardService
         _log.LogDebug("{Name} durable loot from {Npc}: exp {Exp}, source {Source}",
             role.Name, monster.Template.NpcId, outcome.BaseExp, monster.RewardSource!.Key);
     }
-    /// <summary>MultiverseGroupConfig id → the playbook's value, else _iValue_default (playbook 0 here).</summary>
-    private long Resolve(long multiverseId) =>
-        multiverseId > 0 && _data.Row("MultiverseGroupConfig", multiverseId) is { } mg ? GameData.Int(mg, "_iValue_default") : 0;
-
     /// <summary>
-    /// Every _iDropPoolN of a row; each pool slot [group, chance per million, rolls, picks] is rolled "rolls" times
-    /// independently (MVP first-strike pool 21001 = [2020, 100%, 30, 1] = 30 x 1000 Minted Coin), and each successful
-    /// roll draws "picks" distinct rows (<see cref="DropPicks"/>).
+    /// The 31322 drop notice's entries for one looted row. The client keeps these infos for the pickup float and passes them to
+    /// FastUseManager.AddFastUse (LC_DroppedItemManager -> LC_TipHelper.PopRewardTip, ManifestTypeFloat), whose
+    /// LC_EquipmentHelper.CanFastEquip offers to wear a piece only when its kEquipInfo is appraised, it has an
+    /// instance id and its iScore beats the worn one. So each piece of equipment that reached the bag is described as
+    /// the bag item itself; anything else stays entry and count. (inferred) the original's drop notice carries the same.
     /// </summary>
-    /// <summary>A kill's pools: <paramref name="monsterLevel"/> is the slain monster's level (DropAttenuationConfig);
-    /// <paramref name="chanceRate"/> is the server's ItemDrop rate.</summary>
-    private void RollPools(JsonElement row, GameSession player, List<(int, int)> drops, int monsterLevel, double chanceRate = 1)
+    private IEnumerable<ItemBaseInfo> DropInfos(List<InvItem> unshown, int entry, int count)
     {
-        foreach (var p in row.EnumerateObject().Where(p => p.Name.StartsWith("_iDropPool", StringComparison.Ordinal)))
-            if (GameData.Number(p.Value) is { } poolId)
-                RollPool((long)poolId, player.Progress!, drops, null, monsterLevel, chanceRate, task => QuestActive(player, task));
+        for (int index; count > 0 && (index = unshown.FindIndex(item => item.Entry == entry)) >= 0; count--)
+        {
+            var piece = unshown[index];
+            unshown.RemoveAt(index);
+            if (_character.EquipmentInfo(piece) is not { } info) break;
+            yield return info;
+        }
+        if (count > 0)
+            yield return new ItemBaseInfo
+            {
+                ItemEntry = entry, Stack = count, ItemInfos = { [10001] = new ItemAttrValue { LongVal = 0 } }
+            };
     }
 
-    /// <summary>DropGroupConfig._iQuestLimit: the row drops only while the killer has that quest accepted and not yet
-    /// handed in (TaskConfig 10102100 "The Fate of an Egg Thief" drops the Card: Poring its next quest's card guide uses).
-    /// Finished counts too: the kill that completes the quest's objective still rolls its quest drop.</summary>
-    internal static bool QuestActive(GameSession player, long task) =>
-        player.Tasks?.Infos.TryGetValue(task, out var info) == true && info.Status is TaskState.Running or TaskState.Finish;
+    /// <summary>MultiverseGroupConfig id → the playbook's value, else _iValue_default (playbook 0 here).</summary>
+    private long Resolve(long multiverseId) => Resolve(_data, multiverseId);
 
-    private void RollPool(long poolId, GameSession player, List<(int, int)> drops, List<(int Entry, int Count, int Bind)>? bound = null)
-        => RollPool(poolId, player.Progress!, drops, bound);
+    private static long Resolve(GameData data, long multiverseId) =>
+        multiverseId > 0 && data.Row("MultiverseGroupConfig", multiverseId) is { } mg ? GameData.Int(mg, "_iValue_default") : 0;
 
-    private void RollPool(long poolId, RoleProgress progress, List<(int, int)> drops, List<(int Entry, int Count, int Bind)>? bound = null,
-        int monsterLevel = DropAttenuation.NoMonster, double chanceRate = 1, Func<long, bool>? questActive = null)
+    /// <summary>
+    /// The drop rows a kill of <paramref name="npc"/> rolls, each with the maps it is limited to (empty: every map):
+    /// the NPCDropConfig environment row of _iDrop, then each _iNormalDrop NpcNormalDropConfig row. The web panel's
+    /// monster database lists the same rows.
+    /// </summary>
+    internal static IEnumerable<(JsonElement Row, IReadOnlyList<long> Maps)> KillDropRows(GameData data, JsonElement npc, bool bonus)
     {
-        if (_data.Row("DropPoolConfig", poolId) is not { } pool) return;
+        // (inferred) NPCDropConfig environment 0 is reduced and 1 is Bonus Time: the former carries
+        // small EXP at player levels 1-99, the latter larger EXP. Fatigue environment 2 has no proven trigger.
+        // _iNormalDrop remains additive under its own level/map conditions; no numeric multiplier is invented.
+        if (KillDropEnvironment(data, npc, bonus) is { } env) yield return (env, []);
+        if (!npc.TryGetProperty("_iNormalDrop", out var normals) || normals.ValueKind != JsonValueKind.Array) yield break;
+        foreach (var n in normals.EnumerateArray())
+        {
+            if (GameData.Number(n) is not { } nid || Resolve(data, (long)nid) is not (var id and > 0) || data.Row("NpcNormalDropConfig", id) is not { } row) continue;
+            var maps = new List<long>();
+            if (row.TryGetProperty("_iMapId", out var list) && list.ValueKind == JsonValueKind.Array)
+                foreach (var m in list.EnumerateArray())
+                    if (GameData.Number(m) is { } map) maps.Add((long)map);
+            yield return (row, maps);
+        }
+    }
+
+    /// <summary>The NPCDropConfig environment row of the npc's _iDrop (1 in Bonus Time, else 0), if any.</summary>
+    internal static JsonElement? KillDropEnvironment(GameData data, JsonElement npc, bool bonus) =>
+        Resolve(data, GameData.Int(npc, "_iDrop")) is var dropId and > 0 && data.Row("NPCDropConfig", dropId) is { } nd
+            && nd.ValueKind == JsonValueKind.Object && nd.TryGetProperty(bonus ? "1" : "0", out var env) ? env : null;
+
+    /// <summary>The DropPoolConfig ids a drop row names in its _iDropPoolN fields.</summary>
+    internal static IEnumerable<long> DropPools(JsonElement row)
+    {
+        foreach (var p in row.EnumerateObject().Where(p => p.Name.StartsWith("_iDropPool", StringComparison.Ordinal)))
+            if (GameData.Number(p.Value) is { } poolId) yield return (long)poolId;
+    }
+
+    /// <summary>A DropPoolConfig row's slots _iDropGroup_1..16: [group, chance per million, rolls, picks].</summary>
+    internal static IEnumerable<(long Group, double Chance, int Rolls, int Picks)> PoolSlots(JsonElement pool)
+    {
         for (int slot = 1; slot <= 16; slot++)
         {
             if (!pool.TryGetProperty($"_iDropGroup_{slot}", out var g) || g.ValueKind != JsonValueKind.Array || g.GetArrayLength() < 2) continue;
             long group = (long)(GameData.Number(g[0]) ?? 0);
             double chance = GameData.Number(g[1]) ?? 0;
-            chance = ScaledChance(chance, chanceRate);
             int rolls = g.GetArrayLength() >= 3 ? Math.Clamp((int)(GameData.Number(g[2]) ?? 1), 1, 1000) : 1;
             int picks = g.GetArrayLength() >= 4 ? Math.Max(1, (int)(GameData.Number(g[3]) ?? 1)) : 1;
+            yield return (group, chance, rolls, picks);
+        }
+    }
+
+    /// <summary>A kill's pools: <paramref name="monsterLevel"/> is the slain monster's level (DropAttenuationConfig);
+    /// <paramref name="chanceRate"/> is the server's ItemDrop rate; a DropGroupConfig row with an _iQuestLimit drops only
+    /// while the killer has that quest under way.</summary>
+    private void RollPools(JsonElement row, GameSession player, List<(int, int)> drops, int monsterLevel, double chanceRate = 1)
+    {
+        foreach (long poolId in DropPools(row))
+            RollPool(poolId, player.Progress!, drops, null, monsterLevel, chanceRate, quest => TaskService.IsActive(player, quest));
+    }
+
+    private void RollPool(long poolId, GameSession player, List<(int, int)> drops, List<(int Entry, int Count, int Bind)>? bound = null)
+        => RollPool(poolId, player.Progress!, drops, bound);
+
+    /// <summary>
+    /// One DropPoolConfig row; each slot [group, chance per million, rolls, picks] is rolled "rolls" times
+    /// independently (MVP first-strike pool 21001 = [2020, 100%, 30, 1] = 30 x 1000 Minted Coin), and each successful
+    /// roll draws "picks" distinct rows (<see cref="DropPicks"/>).
+    /// </summary>
+    private void RollPool(long poolId, RoleProgress progress, List<(int, int)> drops, List<(int Entry, int Count, int Bind)>? bound = null,
+        int monsterLevel = DropAttenuation.NoMonster, double chanceRate = 1, Func<long, bool>? questActive = null)
+    {
+        if (_data.Row("DropPoolConfig", poolId) is not { } pool) return;
+        foreach (var (group, chance, rolls, picks) in PoolSlots(pool))
+        {
             for (int r = 0; r < rolls; r++)
             {
-                if (_random.NextDouble() * 1_000_000 >= chance) continue;
+                if (_random.NextDouble() * 1_000_000 >= ScaledChance(chance, chanceRate)) continue;
                 PickFromGroup(group, progress, drops, bound, monsterLevel, picks, questActive);
             }
         }
@@ -312,19 +385,15 @@ public sealed class RewardService
     public List<(int Entry, int Count)> RollAward(long multiverseId, GameSession player)
     {
         var drops = new List<(int, int)>();
-        if (Resolve(multiverseId) is var awardId and > 0 && _data.Row("AwardConfig", awardId) is { ValueKind: JsonValueKind.Array } rows
-            && rows.GetArrayLength() > 0 && GameData.Int(rows[0], "_iDropPool") is var pool and > 0)
-            RollPool(pool, player, drops);
+        if (AwardPool(_data, multiverseId) is var pool and > 0) RollPool(pool, player, drops);
         return drops.GroupBy(d => d.Item1).Select(g => (g.Key, g.Sum(d => d.Item2))).ToList();
     }
 
-    /// <summary>One DropPoolConfig draw for this player, same item ids merged (GM panel GmDropPool).</summary>
-    public List<(int Entry, int Count)> RollDropPool(long poolId, GameSession player)
-    {
-        var drops = new List<(int, int)>();
-        if (_data.Row("DropPoolConfig", poolId) != null) RollPool(poolId, player, drops);
-        return drops.GroupBy(d => d.Item1).Select(g => (g.Key, g.Sum(d => d.Item2))).ToList();
-    }
+    /// <summary>The DropPoolConfig id an award id rolls (MultiverseGroupConfig → AwardConfig[0]._iDropPool), else 0.
+    /// The web panel's monster database lists an MVP's rewards from the same pools.</summary>
+    internal static long AwardPool(GameData data, long multiverseId) =>
+        Resolve(data, multiverseId) is var awardId and > 0 && data.Row("AwardConfig", awardId) is { ValueKind: JsonValueKind.Array } rows
+            && rows.GetArrayLength() > 0 && GameData.Int(rows[0], "_iDropPool") is var pool and > 0 ? pool : 0;
 
     /// <summary>One DropPoolConfig draw for this player, each chosen DropGroupConfig._iBind retained, same goods merged.</summary>
     public List<(int Entry, int Count, int Bind)> RollPoolBound(long poolId, RoleProgress progress)

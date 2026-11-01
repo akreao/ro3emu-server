@@ -97,11 +97,12 @@ public sealed partial class CombatService
         return tuples;
     }
 
-    /// <summary>A player attacking, with its secondary stats.</summary>
-    internal Fighter PlayerAttacker(GameSession s, StatSheet stats) =>
-        new(stats[103], stats[104], stats[109], stats[111], s.Progress!.Level, 1)
+    /// <summary>A player attacking, with its secondary stats; <paramref name="element"/> is the skill's attack element
+    /// (<see cref="AttackElement"/>, the equipped arrow's for arrow skills).</summary>
+    internal Fighter PlayerAttacker(GameSession s, StatSheet stats, int element = 1) =>
+        new(stats[103], stats[104], stats[109], stats[111], s.Progress!.Level, element)
         {
-            Stats = stats, Race = PlayerRace, Size = PlayerSize, Covered = Covered(s),
+            FixedDamage = (s.GmCombat & GmCombatSwitches.FixedDamage) != 0, Stats = stats, Race = PlayerRace, Size = PlayerSize, Covered = Covered(s),
             NormalAttackElement = HasBuffGroup(s, AspersioGroup) ? HolyElement : PoisonsNormalAttack(s) ? PoisonElement : 0,
         };
 
@@ -110,6 +111,7 @@ public sealed partial class CombatService
         new(0, 0, 0, 0, p.Progress!.Level, 1)
         {
             Def = stats[105], Mdef = stats[106], Flee = stats[110], ResCri = stats[112],
+            FixedDamage = (p.GmCombat & GmCombatSwitches.FixedDamage) != 0,
             Stats = stats, Race = PlayerRace, Size = PlayerSize, Covered = DefenderCovered(p),
         };
 

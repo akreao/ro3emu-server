@@ -15,9 +15,11 @@ The full guide behind the README's three steps.
 4. Log in with any account name and password: the account is created on first login. Keep the RO3Emu window open
    while you play; press **Q** there (or close it) to stop the server.
 
-**Don't have the game?** RO3Emu.exe downloads it from the Genesis update servers (about 24 GB) and checks every
-file against the publisher's signature: it offers this when it finds no game folder, or run `RO3Emu.exe install`.
-RO3Emu never hosts game files. Tested with the Genesis client releases of 7, 16, 21 and 23 October 2026 (2026.10.23.1,
+**Don't have the game?** RO3Emu.exe downloads it from Genesis' update servers (about 24 GB) and checks every
+file against Genesis' signature: it offers this when it finds no game folder, or run `RO3Emu.exe install`.
+If it cannot reach the servers, your internet provider may block Genesis' mirror: connect through Cloudflare WARP
+(or another VPN) and try again, or install the game with the Genesis launcher and choose "I have the game" (issue #104).
+RO3Emu never hosts game files. Tested with the Genesis client releases of 7, 16, 21, 23, 25, 29 and 30 October 2026 (2026.10.30.1,
 the current one); the 20 October release passes `RO3Emu.exe check` and the data export. Genesis is a private server,
 not the official one: the official Ragnarok Online 3 server has not launched yet.
 
@@ -27,17 +29,22 @@ not the official one: the official Ragnarok Online 3 server has not launched yet
 | `RO3Emu.exe join <address>` | play on someone else's server (`host`, `host:port` or `http://host:port`) |
 | `... --account <name>` | (`start`, `host`, `join`) log in for the player: the game skips its login and server screens and opens on character select (the password is asked, or taken from `--password` or `RO3EMU_PASSWORD`) |
 | `RO3EmuDesktop.exe` | (in the same zip) the window launcher, works on its own without RO3Emu.exe: server list, login, *Update DLLs* (newest CI build) and *Play* (gets a newer CI build of the DLLs when there is one, then the same patch, login and start as `join`) |
-| `RO3Emu.exe host` | your server, open to friends (`--gm <account>` for GM commands) |
-| `RO3Emu.exe install [folder]` / `update [folder]` | the game from the Genesis update servers, every file checked |
-| `RO3Emu.exe restore` | undo the patch: the game talks to the Genesis servers again |
+| `RO3Emu.exe host` | your server, open to friends (`--gm <account>` for GM commands, once per account: `--gm you --gm friend`) |
+| `RO3Emu.exe panel [address]` | opens the [web panel](panel.md) of your server (or of the server at `address`) in the browser and prints its address |
+| `RO3Emu.exe install [folder]` / `update [folder]` | the game from Genesis' update servers, every file checked |
+| `RO3Emu.exe restore` | undo the patch: the game talks to Genesis' servers again |
 | `RO3Emu.exe check` | does this game version fit this RO3Emu? (changes nothing) |
 | `RO3Emu.exe diag` | makes `RO3Emu-diagnostics.zip` for a bug report |
 | `RO3Emu.exe delete-character [address]` | delete one of your characters (the game has no delete button); log out first |
+
+Your server also serves a [web panel](panel.md) on `http://127.0.0.1:5381` (your account, characters, rankings, and
+an admin area for GM accounts). `--panel-port <n>` moves it, `--no-panel` turns it off; two servers on one PC need
+different ports for it too (`--http-port`, `--micro-port`, `--game-port`, `--panel-port`).
 
 **What it changes.** In the game folder: a few DLLs in `ro3_Data\Managed` (the originals are kept in `ro3emu-backup`)
 and `ro3emu\loc_en.tsv` (English texts, built from your own game files). Next to RO3Emu.exe: `data\` (game data and
 your characters), `logs\` and `RO3Emu.settings.json`.
 
 > [!WARNING]
-> Don't let the publisher's launcher repair a patched game folder: it puts the original DLLs back. Run RO3Emu.exe
+> Don't let the Genesis launcher repair a patched game folder: it puts the original DLLs back. Run RO3Emu.exe
 > again and it patches the game again.

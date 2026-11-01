@@ -11,8 +11,8 @@ namespace Ro3Emu.Tests;
 /// <summary>Story boss encounters (Reconstructed/story-encounters.json, DungeonService.Encounter).</summary>
 public sealed partial class DungeonTests
 {
-    private const long Eddga = 1022001;
-    private const int EddgaNpc = 5300001, Wule = 5300081, Boya = 5300080;
+    private const long EddgaScene = 1022001;
+    private const int EddgaNpc = 5300001, EncounterWule = 5300081, EncounterBoya = 5300080;
 
     [ClientDataFact]
     public void EveryStoryEncounterNamesClientRows()
@@ -89,25 +89,25 @@ public sealed partial class DungeonTests
     public async Task EddgaFightPlaysAsTheGenesisCaptureShowsIt()
     {
         await using var alice = await InWorld("Alice");
-        await Gm(alice, "!lvl 60"); // Eddga's skills should not end the run before the companions do their part
+        await Gm(alice, "!lvl 60"); // EddgaScene's skills should not end the run before the companions do their part
         await Gm(alice, "!quest accept 10102200");
-        Assert.Equal(0, await Enter(alice, new EnterDungeonReq { SceneEntry = Eddga }));
-        long instance = await Load(alice, Eddga);
+        Assert.Equal(0, await Enter(alice, new EnterDungeonReq { SceneEntry = EddgaScene }));
+        long instance = await Load(alice, EddgaScene);
         var boss = await BossIn(instance, EddgaNpc);
         // 830 x 26.052 = 21623.16: Genesis showed 21624 (rounded up), this server rounds to the nearest.
         Assert.InRange(boss.Template.MaxHp, 21623, 21624);
-        var boya = await BossIn(instance, Boya);
-        await BossIn(instance, Wule);
+        var boya = await BossIn(instance, EncounterBoya);
+        await BossIn(instance, EncounterWule);
         Assert.Equal(1, boss.HpFloor); // he cannot fall before the adventurers arrive
         await Next(alice, DungeonService.BaseInfo, DungeonBaseInfoNotify.Parser,
             info => info.Vars.Any(v => v.VarId == DungeonService.AirWallVar && v.Vi64.SequenceEqual([32L])));
 
-        // Stage 1 "Cover Boya and Wule": the narrator's line, then Boya's bubble (1022 with her uid).
+        // Stage 1 "Cover EncounterBoya and EncounterWule": the narrator's line, then EncounterBoya's bubble (1022 with her uid).
         await Next(alice, DungeonService.Event, DungeonEventNotify.Parser,
             e => e.CliFuncname == "Shouting" && e.Params[0].IntParams.Single() == 5300019);
         await Next(alice, 1022, SystemBoardCastMsgNtf.Parser, m => m.ChatId == 5300018 && m.PlayerId == boya.Uid);
 
-        // The stage ends at 15 s (moved forward here): black screen, quest done, Eddga's self-buff a second later.
+        // The stage ends at 15 s (moved forward here): black screen, quest done, EddgaScene's self-buff a second later.
         await OnLoop(() => { Session(alice).DungeonAttempt!.Encounter!.StageStartMs -= 15_000; return Task.CompletedTask; });
         var dark = await Next(alice, DungeonService.Event, DungeonEventNotify.Parser, e => e.CliFuncname == "BlackScreenMs");
         Assert.Equal(1000, dark.Params[0].IntParams.Single());
@@ -137,7 +137,7 @@ public sealed partial class DungeonTests
 
         // The won story run sends the player back out about 3 s after its last line, without a countdown (Genesis).
         Assert.Equal(0, (await Next(alice, DungeonService.Leave, LeaveDungeonRsp.Parser)).Result);
-        await Next(alice, MsgId.SwitchSceneLine, SwitchSceneLineResp.Parser, m => m.SceneEntry != Eddga); // back where the run began
+        await Next(alice, MsgId.SwitchSceneLine, SwitchSceneLineResp.Parser, m => m.SceneEntry != EddgaScene); // back where the run began
     }
 
     private Task<MonsterUnit[]> Party(long instance) => Service<GameLoop>().InvokeAsync(() => Task.FromResult(Service<World>().AllUnits()
@@ -150,8 +150,8 @@ public sealed partial class DungeonTests
         await using var alice = await InWorld("Alice");
         await Gm(alice, "!lvl 60");
         await Gm(alice, "!quest accept 10102200");
-        Assert.Equal(0, await Enter(alice, new EnterDungeonReq { SceneEntry = Eddga }));
-        long instance = await Load(alice, Eddga);
+        Assert.Equal(0, await Enter(alice, new EnterDungeonReq { SceneEntry = EddgaScene }));
+        long instance = await Load(alice, EddgaScene);
         var boss = await BossIn(instance, EddgaNpc);
         var dungeons = Service<DungeonService>();
 

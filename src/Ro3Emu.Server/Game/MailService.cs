@@ -348,6 +348,23 @@ public sealed partial class MailService(AccountStore accounts, RoleStore roles, 
             attachments is { Count: > 0 } ? 30 : 7);
 
     /// <summary>
+    /// <see cref="SendRawAsync"/> delivered once per <paramref name="deliveryKey"/>, with the source's state saved by
+    /// <paramref name="persist"/> in the same SQLite transaction (as <see cref="SendTemplateOnceAsync"/>). A plan that
+    /// <paramref name="persist"/> adds may throw to refuse the delivery; nothing of it is then written.
+    /// </summary>
+    public Task<string> SendRawOnceAsync(long role, string title, string content, IReadOnlyList<Attachment> attachments,
+        string deliveryKey, Action<RoleItemPlanBuilder> persist)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(deliveryKey);
+        ArgumentNullException.ThrowIfNull(attachments);
+        ArgumentNullException.ThrowIfNull(persist);
+        return DeliverAsync(role, new Letter
+        {
+            Title = title, Content = content, DeliveryKey = deliveryKey, Attachments = [.. attachments]
+        }, null, attachments.Count > 0 ? 30 : 7, persist);
+    }
+
+    /// <summary>
     /// A member's guild group mail (GuildService.BroadEmail): raw Guild Mail (category 3) with the member as sender, kept
     /// MailTextTimeMax days like other text mail. The guild operation holds every recipient, so it delivers in its context.
     /// </summary>
@@ -390,11 +407,12 @@ public sealed partial class MailService(AccountStore accounts, RoleStore roles, 
         int category = 1, int importantType = 0) =>
         SendTemplateAsync(role, templateId, ResolveTemplateAward(templateId), expiresAt, category, importantType);
 
-    /// <summary>Source-owned once-only delivery with the source's state saved in the same SQLite transaction.</summary>
+    /// <summary>Source-owned once-only delivery with the source's state saved in the same SQLite transaction;
+    /// <paramref name="contentParams"/> (strings or integers) fill the template's ${n}.</summary>
     public Task<string> SendTemplateOnceAsync(long role, int templateId, IReadOnlyList<Attachment> attachments,
         string sourceKey, Action<RoleItemPlanBuilder> persist, Ownership.OwnerContext? ownerContext = null,
         Action<EscrowEconomyIntent>? authorize = null,
-        Func<IReadOnlyList<EconomyEffect>, EconomyEnvelope>? parentEconomy = null, object[]? contentParams = null)
+        Func<IReadOnlyList<EconomyEffect>, EconomyEnvelope>? parentEconomy = null, IReadOnlyList<object>? contentParams = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sourceKey);
         ArgumentNullException.ThrowIfNull(persist);
@@ -406,7 +424,7 @@ public sealed partial class MailService(AccountStore accounts, RoleStore roles, 
         return DeliverAsync(role, new Letter
         {
             TemplateId = templateId, SenderId = "0", DeliveryKey = sourceKey,
-            Attachments = attachments.ToList(), ContentParams = EncodeLanguageData(contentParams ?? [])
+            Attachments = attachments.ToList(), ContentParams = EncodeLanguageData(contentParams?.ToArray() ?? []),
         }, null, days > 0 ? days : 30, persist, ownerContext, authorize,
             parentEconomy);
     }
@@ -766,7 +784,7 @@ public sealed partial class MailService(AccountStore accounts, RoleStore roles, 
                             baseExp: baseExp, jobExp: jobExp, committed: () => box = next, asyncCommit: true);
                         if (granted == null) continue;
                     }
-                    catch (Exception e) when (e is SqliteException or InvalidOperationException)
+                    catch (Exception e) when (e is SqliteException or PersistenceException or InvalidOperationException)
                     {
                         log.LogWarning(e, "Mail {Mail} grant transaction failed", id);
                         refusal = ErrorCodes.Unknown;

@@ -1,173 +1,117 @@
 using System.Text.Json;
-using Google.Protobuf;
-using Romsg;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.Extensions.DependencyInjection;
+using Ro3Emu.Bot;
+using Ro3Emu.Server;
 using Ro3Emu.Server.Accounts;
-using Ro3Emu.Server.Accounts.Persistence;
+using Ro3Emu.Server.Data;
+using Ro3Emu.Server.Data.Config;
 using Ro3Emu.Server.Game;
-using Ro3Emu.Server.Micro;
 
 namespace Ro3Emu.Tests;
 
-/// <summary>
-/// Rank reward settlement (RankService.Rewards) on the synthetic fixture: board 1011 pays rank 1 the 9501 gift and
-/// ranks 2-3 the 9502 gift by letter 9601, daily at 05:00 (_kPrizesTimeNew [[1, 5]]).
-/// </summary>
-public sealed class RankRewardTests
+/// <summary>LeaderBoardsGiftConfig rank rewards: the settlement times of _kPrizesTimeNew and the mailed rank bands.</summary>
+public sealed class RankRewardTests : IAsyncLifetime
 {
-    private const int Letter = 9601, Currency = 102;
+    private readonly string _dataDir = Path.Combine(Path.GetTempPath(), "ro3emu-rankreward-" + Guid.NewGuid().ToString("N"));
+    private WebApplication? _app;
+    private string _http = "";
+    private T Service<T>() where T : notnull => _app!.Services.GetRequiredService<T>();
 
+    private readonly TestClock _clock = new();
+
+    /// <summary>From Thursday 8 Oct 2026, 12:00 UTC, in a UTC realm.</summary>
     private sealed class TestClock : TimeProvider
     {
-        private long _seconds = new DateTimeOffset(2026, 10, 6, 4, 0, 0, TimeSpan.Zero).ToUnixTimeSeconds();
+        private long _seconds = new DateTimeOffset(2026, 10, 8, 12, 0, 0, TimeSpan.Zero).ToUnixTimeSeconds();
         public override DateTimeOffset GetUtcNow() => DateTimeOffset.FromUnixTimeSeconds(Interlocked.Read(ref _seconds));
+        public void AdvanceDays(int count) => Interlocked.Add(ref _seconds, count * 86400L);
         public override TimeZoneInfo LocalTimeZone => TimeZoneInfo.Utc;
-        public void Advance(TimeSpan by) => Interlocked.Add(ref _seconds, (long)by.TotalSeconds);
     }
 
-    [Fact]
-    public async Task TheTopRanksArePaidOncePerPeriodAndARestartKeepsTheSavedWinners()
+    public Task InitializeAsync() => Task.CompletedTask;
+
+    private async Task StartAsync()
     {
-        var clock = new TestClock();
-        await using var host = await SyntheticHost.StartAsync(clock: clock);
-        var roles = host.Service<RoleStore>();
-        long alice = Role(roles, "Alice"), bob = Role(roles, "Bob"), carol = Role(roles, "Carol"), dave = Role(roles, "Dave");
-        // The first start only records the latest boundary (2026-10-05 05:00): nobody is paid.
-        long first = new DateTimeOffset(2026, 10, 5, 5, 0, 0, TimeSpan.Zero).ToUnixTimeSeconds();
-        await Until(() => Settled(host)?.Period == first, "the start-up settlement");
-        Assert.Empty(Settled(host)!.Winners);
-        Climb(roles, alice, 94);
-        Climb(roles, bob, 93);
-        Climb(roles, carol, 92);
-        Climb(roles, dave, 91);
-
-        clock.Advance(TimeSpan.FromHours(1)); // 2026-10-06 05:00
-        await Until(() => Rewards(roles, carol).Count == 1, "the 2026-10-06 rank letters");
-        Assert.Equal([5L], Rewards(roles, alice).Select(l => Amount(l)));
-        Assert.Equal([2L], Rewards(roles, bob).Select(l => Amount(l)));
-        Assert.Equal([2L], Rewards(roles, carol).Select(l => Amount(l)));
-        Assert.Empty(Rewards(roles, dave));
-        // ${1} is the rank.
-        Assert.Equal(1, LanguageData.Parser.ParseFrom(Rewards(roles, alice)[0].ContentParams).Param[0].IntParam);
-        Assert.Equal(3, LanguageData.Parser.ParseFrom(Rewards(roles, carol)[0].ContentParams).Param[0].IntParam);
-
-        // Dave climbs to the top, the server restarts in the same period: the saved winners stand, nobody is paid twice.
-        Climb(roles, dave, 94, remain: 99);
-        await host.RestartAsync();
-        roles = host.Service<RoleStore>();
-        await Task.Delay(1500); // the resume check re-sends the saved winners, already delivered
-        Assert.Single(Rewards(roles, alice));
-        Assert.Empty(Rewards(roles, dave));
-
-        clock.Advance(TimeSpan.FromDays(1)); // 2026-10-07 05:00: Dave first, Alice second
-        await Until(() => Rewards(roles, dave).Count == 1, "the 2026-10-07 rank letters");
-        Assert.Equal(5L, Amount(Rewards(roles, dave)[0]));
-        await Until(() => Rewards(roles, alice).Count == 2, "Alice's second letter");
-        Assert.Equal(2L, Amount(Rewards(roles, alice)[1]));
-        Assert.Single(Rewards(roles, carol)); // fourth now
-    }
-
-    [Fact]
-    public async Task AnInterruptedPeriodIsFinishedBeforeTheNextOneIsRecorded()
-    {
-        var clock = new TestClock();
-        await using var host = await SyntheticHost.StartAsync(clock: clock);
-        var roles = host.Service<RoleStore>();
-        long alice = Role(roles, "Alice"), bob = Role(roles, "Bob");
-        long first = new DateTimeOffset(2026, 10, 5, 5, 0, 0, TimeSpan.Zero).ToUnixTimeSeconds();
-        await Until(() => Settled(host)?.Period == first, "the start-up settlement");
-        Climb(roles, alice, 94);
-        Climb(roles, bob, 93);
-        // The 10-05 winners were saved but the server stopped before Bob's letter went out.
-        var interrupted = new RankService.RewardState
+        var (httpPort, microPort, gamePort) = TestPorts.FreePorts();
+        _app = ServerHost.Create([], o =>
         {
-            Boards = { [1011] = new RankService.BoardSettlement { Period = first, Winners = { [1] = bob } } },
-        };
-        await host.Service<AccountStore>().WriteLegacyAsync<int>(
-            new SeasonStateWritePlan(RankService.RewardStateKey, JsonSerializer.Serialize(interrupted)));
+            o.DataDir = _dataDir; o.GameDataDir = Path.Combine(ClientData.RepoRoot, "data");
+            o.HttpPort = httpPort; o.MicroGatePort = microPort; o.GameGatePort = gamePort;
+        }, _clock);
+        await _app.StartAsync();
+        _http = $"http://127.0.0.1:{httpPort}";
+    }
 
-        // It comes back after the next boundary: Bob is paid for 10-05, then 10-06 (missed while down) is only recorded.
-        clock.Advance(TimeSpan.FromHours(1));
-        await host.RestartAsync();
-        roles = host.Service<RoleStore>();
-        await Until(() => Settled(host)?.Period == first + 86400, "the 10-06 record");
-        Assert.Equal([5L], Rewards(roles, bob).Select(l => Amount(l)));
-        Assert.Empty(Rewards(roles, alice));
-        Assert.Empty(Settled(host)!.Winners);
+    public async Task DisposeAsync()
+    {
+        if (_app != null) { await _app.StopAsync(); await _app.DisposeAsync(); }
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        try { Directory.Delete(_dataDir, true); } catch (IOException) { }
+    }
+
+    private async Task<long> Role(string name)
+    {
+        await using var bot = new BotClient(_http, File.ReadAllText(Path.Combine(_dataDir, "gate_rsa_public.pem")));
+        await bot.LoginAsync(name.ToLowerInvariant(), "pw"); await bot.EnterGateAsync();
+        return (await bot.CreateRoleAsync(name)).RoleBaseInfo.Id;
+    }
+
+    private List<MailService.Letter> Letters(long role) => Service<RoleStore>().LoadMailbox(role) is { } box
+        ? JsonSerializer.Deserialize<MailService.Mailbox>(box)!.Letters : [];
+
+    [Theory]
+    [InlineData(2026, 10, 8, 4, 59, "2026-10-07 05:00")] // before 05:00: yesterday's settlement
+    [InlineData(2026, 10, 8, 5, 0, "2026-10-08 05:00")]
+    [InlineData(2026, 10, 8, 23, 0, "2026-10-08 05:00")]
+    public void DailySettlementIsTheLastFiveOClock(int y, int m, int d, int h, int min, string expected)
+    {
+        var at = RankRewardService.LastSettlement([[1, 5]], new DateTime(y, m, d, h, min, 0));
+        Assert.Equal(DateTime.Parse(expected, System.Globalization.CultureInfo.InvariantCulture), at);
     }
 
     [Fact]
-    public async Task MissedBoundariesAreOnlyRecorded()
+    public void WeeklySettlementIsTheLastWeekdayAtItsHour()
     {
-        var clock = new TestClock();
-        await using var host = await SyntheticHost.StartAsync(clock: clock);
-        var roles = host.Service<RoleStore>();
-        long alice = Role(roles, "Alice");
-        long first = new DateTimeOffset(2026, 10, 5, 5, 0, 0, TimeSpan.Zero).ToUnixTimeSeconds();
-        await Until(() => Settled(host)?.Period == first, "the start-up settlement");
-        Climb(roles, alice, 94);
-
-        // 10-06 and 10-07 both pass before the next check: 10-07 is recorded with no winners and nobody is paid.
-        clock.Advance(TimeSpan.FromHours(25));
-        await Until(() => Settled(host)?.Period == first + 2 * 86400, "the 10-07 record");
-        Assert.Empty(Settled(host)!.Winners);
-        Assert.Empty(Rewards(roles, alice));
-
-        clock.Advance(TimeSpan.FromDays(1)); // 10-08 directly follows the recorded 10-07: paid
-        await Until(() => Rewards(roles, alice).Count == 1, "the 10-08 letter");
-        Assert.Equal(5L, Amount(Rewards(roles, alice)[0]));
+        // Thursday 8 Oct 2026: [2, 1, 5] is Monday 5 Oct 05:00; [2, 4, 5] before 05:00 is the Thursday a week ago.
+        Assert.Equal(new DateTime(2026, 10, 5, 5, 0, 0), RankRewardService.LastSettlement([[2, 1, 5]], new DateTime(2026, 10, 8, 12, 0, 0)));
+        Assert.Equal(new DateTime(2026, 10, 1, 5, 0, 0), RankRewardService.LastSettlement([[2, 4, 5]], new DateTime(2026, 10, 8, 4, 0, 0)));
+        Assert.Equal(new DateTime(2026, 10, 4, 5, 0, 0), RankRewardService.LastSettlement([[2, 7, 5]], new DateTime(2026, 10, 8, 12, 0, 0)));
+        Assert.Null(RankRewardService.LastSettlement([[3, 118]], new DateTime(2026, 10, 8, 12, 0, 0)));
     }
 
-    [Fact]
-    public async Task AFailedSettlementOfABoundaryTheServerSawCloseStillPaysOnRetry()
+    private Task<bool> Settle(LeaderBoardsConfig board, string period) =>
+        Service<GameLoop>().InvokeAsync(() => Service<RankRewardService>().SettleAsync(board, period));
+
+    [ClientDataFact]
+    public async Task EveryRewardedBoardSettlesDailyAndMailsItsBandOncePerSettlement()
     {
-        var clock = new TestClock();
-        await using var host = await SyntheticHost.StartAsync(clock: clock);
-        var roles = host.Service<RoleStore>();
-        var rank = host.Service<RankService>();
-        long alice = Role(roles, "Alice");
-        long first = new DateTimeOffset(2026, 10, 5, 5, 0, 0, TimeSpan.Zero).ToUnixTimeSeconds();
-        await Until(() => Settled(host)?.Period == first, "the start-up settlement");
-        Climb(roles, alice, 94);
-        int attempts = 0;
-        rank.RewardRetryEvery = TimeSpan.FromMilliseconds(200);
-        rank.BeforeRankForTest = _ => Interlocked.Increment(ref attempts) == 1
-            ? throw new InvalidOperationException("transient failure") : Task.CompletedTask;
+        await StartAsync();
+        var data = Service<GameData>();
+        var service = Service<RankRewardService>();
+        var due = service.Due().ToList();
+        Assert.Equal(LeaderBoardsConfig.All(data).Where(b => b.RankRewards.Length > 0).Select(b => b.Id).Order(),
+            due.Select(d => d.Board.Id).Order());
+        Assert.All(due, d => Assert.Equal("2026100805", d.Period));
 
-        // The first attempt at 10-06 05:00 fails; the retry still pays the boundary it saw close.
-        clock.Advance(TimeSpan.FromHours(1));
-        await Until(() => Rewards(roles, alice).Count == 1, "the retried 10-06 letter");
-        Assert.Equal(2, attempts);
-        Assert.Equal(first + 86400, Settled(host)!.Period);
-        Assert.Equal(alice, Settled(host)!.Winners[1]);
-    }
-
-    private static RankService.BoardSettlement? Settled(SyntheticHost host) =>
-        host.Service<AccountStore>().ReadSync<string?>(new SeasonStateReadPlan(RankService.RewardStateKey)) is { Length: > 0 } saved
-            ? JsonSerializer.Deserialize<RankService.RewardState>(saved)!.Boards.GetValueOrDefault(1011) : null;
-
-    private static long Role(RoleStore roles, string name) =>
-        roles.Create("rankreward" + name.ToLowerInvariant(), 1, name, 1, 1100, 1)!.Id;
-
-    private static void Climb(RoleStore roles, long role, int floor, int remain = 0)
-    {
-        var tower = new DBClimTower { LayerConfID = floor, RemainDuration = remain, CompleteTime = 1000 };
-        tower.PetIds.Add([0, 0, 0, 0]);
-        roles.SaveTower(role, tower.ToByteArray());
-    }
-
-    private static List<MailService.Letter> Rewards(RoleStore roles, long role) =>
-        (roles.LoadMailbox(role) is { Length: > 0 } blob ? JsonSerializer.Deserialize<MailService.Mailbox>(blob)!.Letters : [])
-            .Where(l => l.TemplateId == Letter).OrderBy(l => l.CreatedTime).ThenBy(l => l.DeliveryKey).ToList();
-
-    private static long Amount(MailService.Letter letter) => letter.Attachments.Single(a => a.Entry == Currency).Count;
-
-    private static async Task Until(Func<bool> done, string what)
-    {
-        var watch = System.Diagnostics.Stopwatch.StartNew();
-        while (!done())
+        long first = await Role("Champion"), second = await Role("Runnerup");
+        var board = LeaderBoardsConfig.Get(data, 1301)!.Value;
+        service.Standings = (id, count) => Task.FromResult<IReadOnlyList<(long, long)>>(
+            id == board.Id ? [(first, 900), (second, 800)] : []);
+        Assert.True(await Settle(board, "2026100805"));
+        Assert.True(await Settle(board, "2026100805")); // the same settlement again pays nothing more
+        var band = LeaderBoardsGiftConfig.Get(data, board.RankRewards[0])!.Value;
+        var goods = Service<AwardService>().ResolveForProgress(Service<RoleStore>().LoadProgress(first), band.Reward, 101).Grants;
+        foreach (long role in new[] { first, second })
         {
-            if (watch.Elapsed > TimeSpan.FromSeconds(10)) throw new TimeoutException("Timed out waiting for " + what);
-            await Task.Delay(50);
+            var letter = Assert.Single(Letters(role), l => l.TemplateId == board.MailId);
+            Assert.Equal(goods.Select(g => (g.Entry, g.Count)), letter.Attachments.Select(a => (a.Entry, a.Count)));
         }
+
+        // The next day's 05:00 settlement comes from the server's own tick.
+        _clock.AdvanceDays(1);
+        for (int i = 0; i < 100 && Letters(second).Count(l => l.TemplateId == board.MailId) < 2; i++) await Task.Delay(100);
+        Assert.Equal(2, Letters(first).Count(l => l.TemplateId == board.MailId));
+        Assert.Equal(2, Letters(second).Count(l => l.TemplateId == board.MailId));
     }
 }

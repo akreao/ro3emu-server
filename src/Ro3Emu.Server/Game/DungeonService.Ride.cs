@@ -1,187 +1,144 @@
-using System.Text.Json;
 using Romsg;
+using Kind = Ro3Emu.Server.Game.ReconstructedDungeons.TriggerKind;
 using Ro3Emu.Server.Data;
+using Ro3Emu.Server.Data.Config;
+using Ro3Emu.Server.Maps;
 
 namespace Ro3Emu.Server.Game;
 
 /// <summary>
-/// How a scripted step moves its players besides walking:
-/// <list type="bullet">
-/// <item>A slide (step "slide"): the client's own LC_Movement_Controller_Slide, which the player's movement
-/// (LC_Movement_AStarAgentNew.SetCustomData) creates for the local player on its first slide custom data. The server
-/// pushes Player_SlideSpeed (5400003, ListLong [side, down] in cm/s) and then Player_SlideState (5400001, Int 1) in
-/// 31018 CustomDataChange; the client then slides the player downhill, the A/D keys steer and the position is
-/// reported as walks every 0.1 s. State 0 stops it. The pushes are not stored as the role's custom data: a slide never
-/// outlives its step.</item>
-/// <item>A vehicle ride: an interaction whose GameplayStatusConfig is type 3 on a vehicle scene actor
-/// (DungeonCatalog.VehicleSeat) seats the player, as WorldInteractionService does for world NPCs: 32702
-/// InteractChangeNtf (EType 3, the status, the interaction and the actor's uid) and 32704 Change3CNtf (the seat's
-/// _iChange3C controls). The seat's button (_kGameplayBtnId, 32703) or its exit interaction (_iExitNpcAction, 32700)
-/// gets the player off; so does the end of the step.</item>
-/// <item>A fallback (step "fallback"): the step completes by itself after its time, so a ride or slide that never
-/// reaches its region cannot block the run.</item>
-/// <item>A won scene with a "next" scene goes straight on to it (DungeonConfig _iSameDupLoadingType 2 on that scene),
-/// as the client's quest tracker entry would.</item>
-/// </list>
+/// A scripted ride (ScriptedStep.RideAfter): the actor a player used to complete a step walks a guide route of the scene
+/// editor (m_kGuidePoints) and the participants move with it, before the step's teleport and the next step. The client
+/// has no ride rule: the route and the scene's camera animation are data without a trigger, and the original's server
+/// script is not shipped. So (inferred) the carrier walks at its own UnitConfig._fSpeed, both it and the players are
+/// moved in short forced-position steps, and the camera animation is not played. The carrier stays where the route ends
+/// (only a scene's last step has a ride, so no later step shows it again).
 /// </summary>
 public sealed partial class DungeonService
 {
-    internal sealed record Ride(SceneActorUnit Vehicle, int Interaction, int StatusId, JsonElement Seat);
+    private const int RideTickMs = 100;
 
-    /// <summary>LC_Movement_Controller_Slide's custom data ids (enum_CustomData Player_SlideState, Player_SlideSpeed).</summary>
-    internal const long SlideStateData = 5400001, SlideSpeedData = 5400003;
-    /// <summary>The pause before a won scene goes on to its next one, so its last line is read (inferred).</summary>
-    private static readonly TimeSpan ContinueDelay = TimeSpan.FromSeconds(3);
-
-    private async Task StartSlideAsync(Attempt a, ReconstructedDungeons.StepSlide slide)
-    {
-        foreach (var s in Present(a).Where(m => a.Loaded.Contains(m) && m.Role != null))
-        {
-            var speed = new CustomParam { Tp = CustomParam.Types.ParamType.ListLong };
-            speed.ListLongParam.Add([(long)MathF.Round(slide.Side * 100), (long)MathF.Round(slide.Down * 100)]);
-            // Speed first: the controller enters the slide on state 1 with the speed it already has.
-            await SendSlideAsync(a, s, new CustomData { Id = SlideSpeedData, CustomParam = speed }, SlideState(1));
-            a.Sliding.Add(s);
-        }
-    }
-
-    private static CustomData SlideState(long state) =>
-        new() { Id = SlideStateData, CustomParam = new CustomParam { Tp = CustomParam.Types.ParamType.Int, IntParam = state } };
-
-    private async Task SendSlideAsync(Attempt a, GameSession s, params CustomData[] values)
-    {
-        var change = new CustomDataChange { EntityId = s.Role!.Id, CustomDatas = { values } };
-        await SendQuietAsync(s, WorldCoreService.CustomChange, change);
-        foreach (var viewer in Present(a).Where(v => v != s && a.Loaded.Contains(v)))
-            await SendQuietAsync(viewer, WorldCoreService.CustomChange, change);
-    }
-
-    private async Task StopSlideAsync(Attempt a, GameSession s)
-    {
-        if (!a.Sliding.Remove(s) || s.Role == null) return;
-        await SendSlideAsync(a, s, SlideState(0));
-    }
-
-    /// <summary>A step ends: its slides stop and its riders get off.</summary>
-    private async Task EndStepMovementAsync(Attempt a)
-    {
-        foreach (var s in a.Sliding.ToArray()) await StopSlideAsync(a, s);
-        foreach (var s in a.Riders.Keys.ToArray()) await DismountAsync(a, s, interrupt: true);
-    }
-
-    /// <summary>A participant leaves the room: nothing of the run's movement follows them out.</summary>
-    private async Task EndMovementAsync(Attempt a, GameSession s)
-    {
-        await StopSlideAsync(a, s);
-        await DismountAsync(a, s, interrupt: true);
-    }
+    /// <summary>How long the Deniro keeps a rider seated on the first, failing ride before it puts them down (inferred: the
+    /// ride's skill 5362501 lasts 1 ms and nothing in the client says; the quest after it says the first ride fails).</summary>
+    private const int SeatedRideMs = 2000;
 
     /// <summary>
-    /// After a successful 32700 on a scene actor: true when the interaction was a ride (getting on or off), which is
-    /// not a step event of its own.
+    /// An actor interaction that seats its user (NPCInteractConfig _iStatusID of a vehicle status, the Deniro's 5300005)
+    /// puts the player in the actor's seat, the client's own gameplay state; the actor puts them down after
+    /// <see cref="SeatedRideMs"/>, or when they leave the scene, or at once through the client's exit button.
     /// </summary>
-    private async Task<bool> RideInteractionAsync(Attempt a, GameSession s, SceneActorUnit actor, int interaction)
+    private async Task SeatRiderAsync(Attempt a, GameSession s, SceneActorUnit actor, int interaction)
     {
-        if (a.Riders.TryGetValue(s, out var ride))
+        // Only the interaction the current step waits on seats anyone: the client may send any of an actor's interactions.
+        if (!_vehicles.IsRide(interaction) || !StepWaitsOn(a, interaction)) return;
+        long token = await _vehicles.SeatOnSceneActorAsync(s, actor.Uid, actor.NpcId, interaction);
+        if (token != 0) _loop.ScheduleLegacy(Paced(SeatedRideMs), () => _vehicles.PutDownFromSceneActorAsync(s, token), "dungeon rider put down");
+    }
+
+    /// <summary>Whether the running step is completed by this actor interaction, directly or by its dungeon message.</summary>
+    private bool StepWaitsOn(Attempt a, long interaction) => !a.StepDone && Step(a) is { } step
+        && step.Complete.Any(t => t.Kind == Kind.Interaction && t.Id == interaction
+            || t.Kind == Kind.Message && _catalog.DungeonMessage(interaction) == t.Id);
+
+    private sealed record Ride(IReadOnlyList<(float X, float Y, float Z)> Path, SceneActorUnit Carrier, float Length,
+        int Generation, long StartMs, double DurationMs)
+    {
+        /// <summary>Metres along the route the last tick moved the riders to; -1 before the first tick.</summary>
+        public float Walked { get; set; } = -1;
+    }
+
+    /// <summary>The carrier's walking speed in metres per second: UnitConfig._fSpeed (cm/s) of its NPC's _iUnitID, 0 if none.</summary>
+    private float RideSpeed(SceneActorUnit carrier) =>
+        NPCConfig.Get(_data, carrier.NpcId) is { } npc && UnitConfig.Get(_data, npc.UnitId) is { } unit ? (float)unit.Speed / 100f : 0f;
+
+    /// <summary>The horizontal length of a route in metres, as the monsters' walks count distance.</summary>
+    internal static float RideLength(IReadOnlyList<(float X, float Y, float Z)> path)
+    {
+        float length = 0;
+        for (int i = 1; i < path.Count; i++) length += MonsterService.Distance(path[i - 1].X, path[i - 1].Z, path[i].X, path[i].Z);
+        return length;
+    }
+
+    /// <summary>The position and heading after <paramref name="metres"/> along a route (clamped to its ends).</summary>
+    internal static (float X, float Y, float Z, float Face) RideAt(IReadOnlyList<(float X, float Y, float Z)> path, float metres)
+    {
+        float left = Math.Max(0, metres);
+        for (int i = 1; i < path.Count; i++)
         {
-            if (ride.Vehicle == actor && interaction == GameData.Int(ride.Seat, "_iExitNpcAction")) await DismountAsync(a, s, false);
-            return interaction == GameData.Int(ride.Seat, "_iExitNpcAction") || _catalog.VehicleSeat(actor.NpcId, interaction) != null;
-        }
-        if (_catalog.VehicleSeat(actor.NpcId, interaction) is not { } seat) return false;
-        // One driver seat, and only while the step opens the ride: the actor carries the buff its condition asks for,
-        // as the client checks before it offers the button.
-        if (a.Riders.Values.Any(r => r.Vehicle == actor)
-            || !_catalog.BuffGates(interaction).All(group => actor.Buffs.Any(b => _data.Row("BuffConfig", b.ConfigId) is { } buff
-                && GameData.Int(buff, "_iBuffID") == group))) return true;
-        ride = new Ride(actor, interaction, seat.StatusId, seat.SeatRow);
-        a.Riders[s] = ride;
-        _log.LogInformation("{Role} rides scene actor {Npc} in scene {Scene} step {Step}", s.Role?.Id, actor.NpcId,
-            a.Plan.SceneEntry, a.Wave + 1);
-        await BroadcastAsync(a, WorldInteractionService.Change, new InteractChangeNtf
-        {
-            Uid = s.Role!.Id,
-            DataInfo = new InteractInfo
+            var (a, b) = (path[i - 1], path[i]);
+            float segment = MonsterService.Distance(a.X, a.Z, b.X, b.Z);
+            float face = MonsterService.Angle(a.X, a.Z, b.X, b.Z);
+            if (left <= segment || i == path.Count - 1)
             {
-                EType = (InteractInfo.Types.EState)3, StateId = seat.StatusId, InteractConfigId = interaction, ActiveObjId = actor.Uid,
-            },
-        });
-        await SendQuietAsync(s, WorldInteractionService.Change3C, new Change3CNtf { CfgId = (int)GameData.Int(seat.SeatRow, "_iChange3C") });
-        if (Step(a) is { Fallback: { FromMount: true } fallback }) ScheduleFallback(a, fallback);
-        return true;
-    }
-
-    private async Task DismountAsync(Attempt a, GameSession s, bool interrupt)
-    {
-        if (!a.Riders.Remove(s) || s.Role == null) return;
-        var off = new InteractChangeNtf
-        {
-            Uid = s.Role.Id, DataInfo = new InteractInfo { EType = InteractInfo.Types.EState.Idle }, Interrupt = interrupt,
-        };
-        await SendQuietAsync(s, WorldInteractionService.Change, off);
-        foreach (var viewer in Present(a).Where(v => v != s && a.Loaded.Contains(v)))
-            await SendQuietAsync(viewer, WorldInteractionService.Change, off);
-    }
-
-    /// <summary>32703 while riding a scene actor: the seat's own buttons get the player off. False when not riding one.</summary>
-    public async Task<bool> TryUseActionAsync(GameSession s, UseInteractActionReq req)
-    {
-        if (s.DungeonAttempt is not { } a || !a.Riders.TryGetValue(s, out var ride)) return false;
-        bool exit = ride.Seat.TryGetProperty("_kGameplayBtnId", out var buttons) && buttons.ValueKind == JsonValueKind.Array
-            && buttons.EnumerateArray().Any(b => (long)(GameData.Number(b) ?? 0) == req.ButtonId);
-        await s.SendGameAsync(WorldInteractionService.Action, new UseInteractActionRes { Result = exit ? 0 : ErrorCodes.NpcParameter });
-        if (exit) await DismountAsync(a, s, false);
-        return true;
-    }
-
-    /// <summary>31074 while riding a scene actor: the driver turns. False when not riding one.</summary>
-    public async Task<bool> TrySyncVehicleAsync(GameSession s, SyncVehicleReq req)
-    {
-        if (s.DungeonAttempt is not { } a || !a.Riders.ContainsKey(s)) return false;
-        if (float.IsFinite(req.Face) && req.Face >= 0 && req.Face <= 360) await _world.TurnAsync(s, req.Face);
-        return true;
-    }
-
-    private void ScheduleFallback(Attempt a, ReconstructedDungeons.StepFallback fallback)
-    {
-        int wave = a.Wave;
-        _loop.ScheduleLegacy(TimeSpan.FromMilliseconds(fallback.Ms), async () =>
-        {
-            if (a.Wave != wave || a.StepDone || a.Settled || a.Room.Closed || Step(a) is not { } step) return;
-            if (Present(a).FirstOrDefault(a.Loaded.Contains) is not { } s) return;
-            _log.LogInformation("Scripted scene {Scene} step {Step}: fallback after {Ms} ms", a.Plan.SceneEntry, wave + 1, fallback.Ms);
-            await EndStepMovementAsync(a);
-            if (fallback.Teleport != 0 && _catalog.ScenePoint(a.Plan.SceneEntry, fallback.Teleport) is { } to)
-                foreach (var member in Present(a).Where(m => a.Loaded.Contains(m) && !m.SceneLoading))
-                    await _scenes.TeleportInMapAsync(member, to);
-            var t = step.Complete[0];
-            await StepEventAsync(a, s, [(t.Kind, t.Id)]);
-        });
+                float t = segment <= 0 ? 1 : Math.Min(1, left / segment);
+                return (a.X + (b.X - a.X) * t, a.Y + (b.Y - a.Y) * t, a.Z + (b.Z - a.Z) * t, face);
+            }
+            left -= segment;
+        }
+        return (path[0].X, path[0].Y, path[0].Z, 0);
     }
 
     /// <summary>
-    /// A won scripted scene with a next scene: the players go straight on to it instead of being sent out. When the
-    /// next scene cannot be entered now (DungeonService.Admission), the usual countdown sends them out.
+    /// Starts the step's ride when it has one and the player used an actor that can carry (a route with at least two
+    /// points, a positive speed). <paramref name="arrived"/> then runs when the route is walked; false means no ride
+    /// starts and the caller goes on at once.
     /// </summary>
-    private bool TryContinue(Attempt a)
+    private bool TryStartRide(Attempt a, ReconstructedDungeons.ScriptedStep step, SceneActorUnit? carrier, Func<Task> arrived)
     {
-        if (_reconstructed?.Scripted(a.Plan.SceneEntry) is not { Next: > 0 } scene || a.Plan.Multi != null) return false;
-        var members = Present(a).Where(a.Loaded.Contains).ToArray();
-        var leader = members.FirstOrDefault(m => m.Role?.Id == a.Leader) ?? members.FirstOrDefault();
-        var req = new EnterDungeonReq { SceneEntry = scene.Next };
-        if (leader == null || _catalog.Resolve(req) is not { } plan || members.Any(m => Admission(m, plan, continuation: true) != 0))
-            return false;
-        _loop.ScheduleLegacy(ContinueDelay, async () =>
-        {
-            if (!ReferenceEquals(leader.DungeonAttempt, a) || leader.InstanceId != a.Room.Id || leader.SceneLoading || leader.Role == null) return;
-            _log.LogInformation("Scripted scene {Scene} won: {Role} goes on to {Next}", a.Plan.SceneEntry, leader.Role.Id, scene.Next);
-            try { await EnterAsync(leader, req); }
-            catch (Exception e) { _log.LogWarning(e, "Scripted scene {Scene}: going on to {Next} failed", a.Plan.SceneEntry, scene.Next); }
-            // Anyone still in this room (the entry was refused after all) is sent out as usual.
-            foreach (var s in members)
-                if (ReferenceEquals(s.DungeonAttempt, a) && s.InstanceId == a.Room.Id && !s.SceneLoading && s.Role != null)
-                    try { await LeaveAsync(s); }
-                    catch (Exception e) { _log.LogWarning(e, "Dungeon leave after a refused continuation failed for {Role}", s.Role?.Id); }
-        });
+        if (step.RideAfter == 0 || carrier == null || _catalog.GuidePath(a.Plan.SceneEntry, step.RideAfter) is not { } path) return false;
+        float speed = RideSpeed(carrier), length = RideLength(path);
+        if (speed <= 0 || length <= 0) return false;
+        var ride = new Ride(path, carrier, length, a.StepGeneration, MonsterService.NowMs, Paced((int)(length / speed * 1000)).TotalMilliseconds);
+        _loop.PostLegacy(() => RideTickAsync(a, ride, arrived), "dungeon ride");
         return true;
+    }
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Scripted scene {Scene} ride: moving unit {Npc} failed")]
+    private partial void LogRideMoveFailed(Exception e, long scene, int npc);
+
+    /// <summary>The route's points past <paramref name="from"/> and before <paramref name="to"/> metres, in route order.</summary>
+    internal static IEnumerable<(float X, float Y, float Z, float Face)> RideCorners(IReadOnlyList<(float X, float Y, float Z)> path,
+        float from, float to)
+    {
+        float reached = 0;
+        for (int i = 0; i < path.Count; i++)
+        {
+            if (i > 0) reached += MonsterService.Distance(path[i - 1].X, path[i - 1].Z, path[i].X, path[i].Z);
+            if (reached > from && reached < to) yield return RideAt(path, reached);
+        }
+    }
+
+    private async Task RideTickAsync(Attempt a, Ride ride, Func<Task> arrived)
+    {
+        if (a.Settled || a.Room.Closed || a.StepGeneration != ride.Generation) return;
+        double done = Math.Min(1.0, (MonsterService.NowMs - ride.StartMs) / Math.Max(1.0, ride.DurationMs));
+        float walked = (float)(done * ride.Length);
+        // The position follows the wall clock, so a late tick (a loaded loop) jumps ahead: the riders still pass every
+        // point of the route walked since the last tick instead of being moved straight across its corners.
+        foreach (var corner in RideCorners(ride.Path, ride.Walked, walked)) await MoveRidersAsync(a, ride, corner);
+        ride.Walked = walked;
+        await MoveRidersAsync(a, ride, RideAt(ride.Path, walked));
+        if (done >= 1) await arrived();
+        else _loop.ScheduleLegacy(Paced(RideTickMs), () => RideTickAsync(a, ride, arrived), "dungeon ride");
+    }
+
+    private async Task MoveRidersAsync(Attempt a, Ride ride, (float X, float Y, float Z, float Face) at)
+    {
+        // A move that fails for one unit must not strand the step: the ride goes on and arrives.
+        try
+        {
+            ride.Carrier.X = at.X; ride.Carrier.Y = at.Y; ride.Carrier.Z = at.Z; ride.Carrier.Face = at.Face;
+            await _world.MoveUnitAsync(ride.Carrier, new MovementChangeNtf
+            {
+                Uid = ride.Carrier.Uid, TransType = MovementTransitionType.MoveTransForceTeleport,
+                MovementInfo = new MovementInfo { Pos = new Vec3 { X = at.X, Y = at.Y, Z = at.Z }, Face = at.Face, ServerTime = MonsterService.NowMs },
+            });
+        }
+        catch (Exception e) { LogRideMoveFailed(e, a.Plan.SceneEntry, ride.Carrier.NpcId); }
+        foreach (var member in Present(a).Where(m => a.Loaded.Contains(m) && !m.SceneLoading))
+        {
+            try { await _scenes.TeleportInMapAsync(member, new MapPoint(at.X, at.Y, at.Z, at.Face)); }
+            catch (Exception e) { LogRideMoveFailed(e, a.Plan.SceneEntry, 0); }
+        }
     }
 }

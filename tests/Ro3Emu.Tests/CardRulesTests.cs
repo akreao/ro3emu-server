@@ -66,7 +66,7 @@ public sealed class CardRulesTests : IAsyncLifetime
     private async Task Gm(string account, string command)
     {
         using var http = new HttpClient();
-        (await http.PostAsync($"{_httpUrl}/ro3emu/gm?account={account}", new StringContent(command))).EnsureSuccessStatusCode();
+        (await http.PostAsync($"{_httpUrl}/ro3emu/gm?account={account}", Operator.Command(command))).EnsureSuccessStatusCode();
     }
 
     private Task<T> OnLoop<T>(Func<T> action) => Service<GameLoop>().InvokeAsync(() => Task.FromResult(action()));
@@ -181,35 +181,28 @@ public sealed class CardRulesTests : IAsyncLifetime
     }
 
     [ClientDataFact]
-    public async Task HeadFaceAndMouthSocketsOpenAtTheLevelTheClientShows()
+    public async Task CostumeSocketsOpenAtTheirConditionAndTakeTheirCardParts()
     {
-        // EquipGridConfig rows 8-10 (by _iID, as the client keys them) open socket 1 at base level 20. The server used
-        // to look the grid up by _iEquipGridType and read the empty appearance rows, refusing a slot the client drew open.
-        const int head = 1420700, face = 1430800, mouth = 1430900; // _iCardPart 7 / 8 / 9
+        // EquipGridConfig _iID 8/9/10 (Head/Face/Mouth, category 3) open socket 1 by 4000007/8/9 = base level 20;
+        // card parts 7/8/9 (HeadAccessory/FaceAccessory/MouthAccessory) go there.
+        const int head = 1420700, face = 1430800, mouth = 1430900; // Card: Willow, Sketch Card: Orc Hero / Moonlight Flower
         await using var alice = await InWorld("Alice");
         var session = Session("Alice");
-        await Gm("alice", "!lvl 19");
         await Gm("alice", $"!item {head} 1");
         await Gm("alice", $"!item {face} 1");
         await Gm("alice", $"!item {mouth} 1");
-        long GuidOf(int entry) => session.Items.Single(i => i.Entry == entry).Guid;
+        long Guid(int entry) => session.Items.Single(i => i.Entry == entry && i.Grid == 0).Guid;
 
-        Assert.Equal(ErrorCodes.SlotSealed, await Insert(alice, 8, 1, GuidOf(head)));
-        Assert.Equal(ErrorCodes.SlotSealed, await Insert(alice, 9, 1, GuidOf(face)));
-        Assert.Equal(ErrorCodes.SlotSealed, await Insert(alice, 10, 1, GuidOf(mouth)));
-
+        Assert.Equal(ErrorCodes.SlotSealed, await Insert(alice, 8, 1, Guid(head)));
         await Gm("alice", "!lvl 20");
-        Assert.Equal(0, await Insert(alice, 8, 1, GuidOf(head)));
-        Assert.Equal(0, await Insert(alice, 9, 1, GuidOf(face)));
-        Assert.Equal(0, await Insert(alice, 10, 1, GuidOf(mouth)));
+        Assert.Equal(ErrorCodes.EquipSlot, await Insert(alice, 9, 1, Guid(head))); // a head card does not fit the face grid
+        Assert.Equal(ErrorCodes.SlotSealed, await Insert(alice, 8, 2, Guid(head))); // _kSocketOpen2 0: never
+        Assert.Equal(0, await Insert(alice, 8, 1, Guid(head)));
+        Assert.Equal(0, await Insert(alice, 9, 1, Guid(face)));
+        Assert.Equal(0, await Insert(alice, 10, 1, Guid(mouth)));
         Assert.Equal(head, session.Items.Single(i => i.Grid == CharacterService.CardGrid(8, 1)).Entry);
         Assert.Equal(face, session.Items.Single(i => i.Grid == CharacterService.CardGrid(9, 1)).Entry);
         Assert.Equal(mouth, session.Items.Single(i => i.Grid == CharacterService.CardGrid(10, 1)).Entry);
-
-        // Socket 2 of these grids is 0 in the config, and the client never draws it.
-        await Gm("alice", "!lvl 80");
-        await Gm("alice", "!item 1430700 1");
-        Assert.Equal(ErrorCodes.SlotSealed, await Insert(alice, 8, 2, GuidOf(1430700)));
     }
 
     [ClientDataFact]

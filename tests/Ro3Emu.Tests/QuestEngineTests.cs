@@ -61,7 +61,7 @@ public sealed class QuestEngineTests : IAsyncLifetime
     private async Task Gm(string line, string account = "questalice")
     {
         using var http = new HttpClient();
-        (await http.PostAsync($"{_http}/ro3emu/gm?account={account}", new StringContent(line))).EnsureSuccessStatusCode();
+        (await http.PostAsync($"{_http}/ro3emu/gm?account={account}", Operator.Command(line))).EnsureSuccessStatusCode();
     }
 
     private GameSession Alice => Service<SessionRegistry>().All().Single(s => s.Role?.Name == "QuestAlice");
@@ -126,6 +126,44 @@ public sealed class QuestEngineTests : IAsyncLifetime
         await Barrier(bot);
         Assert.Equal(TaskState.Running, (await State(10200150)).Status);
         Assert.False(await Read(s => s.Tasks!.Infos.ContainsKey(10200160))); // Falconry Mastery not learned
+    }
+
+    [ClientDataFact]
+    public async Task TheNovicePassActivityTaskGrantsTheAwardConfigRowItNames()
+    {
+        // 9201101's _iAward 920160 has no MultiverseGroupConfig row; AwardConfig 920160 is 2000 novice pass EXP (#166).
+        await using var bot = await InWorld();
+        await Gm("!quest done 9201101");
+        Assert.True(await Read(s => TaskService.IsDelivered(s, 9201101)));
+        var plan = Service<AwardService>().ResolveTask(Alice, 920160, null);
+        Assert.Equal(920160, plan.AwardId);
+        Assert.Contains(plan.Grants, g => g.Entry == NewActivityService.NovicePassExpCurrency && g.Count == 2000);
+    }
+
+    [ClientDataFact]
+    public async Task TheCaravanQuestMarksItsGuildActivityJoinAndIsDelivered()
+    {
+        // 1601000's _kEXECAction [115,3000]: ActionConfig 115 MarkGuildActivityJoin with GuildActivityConfig 3000 (#166).
+        await using var bot = await InWorld();
+        var joined = new List<long>();
+        Service<TaskService>().GuildActivityJoined.Add((_, activity) => joined.Add(activity));
+        await Gm("!quest done 1601000");
+        Assert.True(await Read(s => TaskService.IsDelivered(s, 1601000)));
+        Assert.Equal([3000L], joined);
+    }
+
+    [ClientDataFact]
+    public async Task TheThirdClassAdvancementStartsOnItsOwnAtItsLevel()
+    {
+        // 19991050 has no pre-task, _kAcceptTask [1] Auto and _iCondition 88000107 (base level 50): it follows no quest,
+        // so nothing offered it to a role that finished the main story.
+        const long thirdClass = 19991050;
+        await using var bot = await InWorld();
+        await Refresh();
+        Assert.False(await Read(s => s.Tasks!.Infos.ContainsKey(thirdClass)));
+        await Gm("!lvl 50");
+        await Refresh();
+        Assert.Equal(TaskState.Running, (await State(thirdClass)).Status);
     }
 
     [ClientDataFact]

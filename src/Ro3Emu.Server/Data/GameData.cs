@@ -168,9 +168,12 @@ public sealed class GameData(IOptions<ServerOptions> options, ILogger<GameData> 
     /// A localized text field [textId, param1, param2, ...]: the text with @{n} replaced by the n-th parameter, as the
     /// client's GetWordNew does (NPCConfig 7010001 _kName [10470000361, "1"] is "Lv. 1 Ore Vein").
     /// </summary>
-    public string TextOf(JsonElement row, string field)
+    public string TextOf(JsonElement row, string field) => row.TryGetProperty(field, out var v) ? TextOf(v) : "";
+
+    /// <summary>A localized text value [textId, param1, ...] as a config view reads it (a Raw field), placeholders filled.</summary>
+    public string TextOf(JsonElement? value)
     {
-        if (!row.TryGetProperty(field, out var v) || v.ValueKind != JsonValueKind.Array || v.GetArrayLength() == 0 || !v[0].TryGetInt64(out var id))
+        if (value is not { ValueKind: JsonValueKind.Array } v || v.GetArrayLength() == 0 || !v[0].TryGetInt64(out var id))
             return "";
         string text = Text(id);
         for (int i = 1; i < v.GetArrayLength(); i++)

@@ -4,247 +4,424 @@ using Romsg;
 using Ro3Emu.Bot;
 using Ro3Emu.Server;
 using Ro3Emu.Server.Game;
+using Ro3Emu.Server.Voice;
 
 namespace Ro3Emu.Tests;
 
 /// <summary>
-/// The Tavern (TavernService, MG_Barroom 82481-82514): rooms and the room list, chat channel 10, the mic, moderation,
-/// gifts and the Daily Tavern time (5043 DBBarRoomInfo).
+/// The Tavern (MG_Barroom 82481-82514, LC_BarRoomServer / LC_DAL_BarRoom / LC_BarRoomHelper): rooms and the
+/// PartyService room list, the mic seats and the owner's tools, gifts with heat and Star Power, the daily quest and
+/// its achievement, the room's chat channel 10 and its voice room on the relay.
 /// </summary>
 public sealed class TavernTests : IAsyncLifetime
 {
-    private readonly string _dataDir = Path.Combine(Path.GetTempPath(), "ro3emu-tavern-" + Guid.NewGuid().ToString("N"));
-    private static readonly TimeSpan Wait = TimeSpan.FromSeconds(10);
+    private readonly string _dir = Path.Combine(Path.GetTempPath(), "ro3emu-tavern-" + Guid.NewGuid().ToString("N"));
+    private static readonly TimeSpan Wait = TimeSpan.FromSeconds(8);
     private WebApplication _app = null!;
     private string _http = "";
+    private int _voicePort;
+
+    // BarroomTypeConfig: topic 1 Chitchat, 2 Tips; language 24 English, 25 Korean.
+    private const int Chitchat = 1, Tips = 2, English = 24, Korean = 25;
+    private const int HotCocoa = 1200801, Gingerbread = 1200802, GrapeWine = 1200804; // 110/111 = 1/1, 10/5, 400/300
 
     public async Task InitializeAsync()
     {
-        var (httpPort, microPort, gamePort) = TestPorts.FreePorts();
+        var (web, micro, game) = TestPorts.FreePorts();
+        _voicePort = TestPorts.FreePort();
         _app = ServerHost.Create([], o =>
         {
-            o.DataDir = _dataDir;
-            o.GameDataDir = Path.Combine(RepoRoot(), "data");
-            o.HttpPort = httpPort;
-            o.MicroGatePort = microPort;
-            o.GameGatePort = gamePort;
+            o.DataDir = _dir; o.GameDataDir = Path.Combine(ClientData.RepoRoot, "data");
+            o.HttpPort = web; o.MicroGatePort = micro; o.GameGatePort = game;
+            o.Voice.Port = _voicePort;
         });
         await _app.StartAsync();
-        _http = $"http://127.0.0.1:{httpPort}";
+        _http = $"http://127.0.0.1:{web}";
     }
 
     public async Task DisposeAsync()
     {
-        await _app.StopAsync();
-        await _app.DisposeAsync();
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
-        try { Directory.Delete(_dataDir, true); } catch (IOException) { }
+        await _app.StopAsync(); await _app.DisposeAsync();
+        using var db = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={Path.Combine(_dir, "ro3emu.db")}");
+        Microsoft.Data.Sqlite.SqliteConnection.ClearPool(db);
+        try { Directory.Delete(_dir, true); } catch (IOException) { }
     }
 
-    private static string RepoRoot()
+    private async Task<(BotClient Bot, long Id)> InWorld(string name, bool tavern = true)
     {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir != null && !File.Exists(Path.Combine(dir.FullName, "Ro3Emu.slnx"))) dir = dir.Parent;
-        return dir?.FullName ?? throw new InvalidOperationException("repo root not found");
+        var bot = new BotClient(_http, File.ReadAllText(Path.Combine(_dir, "gate_rsa_public.pem")));
+        await bot.LoginAsync(name.ToLowerInvariant(), "pw"); await bot.EnterGateAsync();
+        long id = (await bot.CreateRoleAsync(name)).RoleBaseInfo.Id;
+        await bot.EnterWorldAsync(id);
+        if (tavern) await Gm(name, "!lvl 36"); // FunctionConfig 2410 opens at level 36
+        return (bot, id);
     }
 
-    private T Service<T>() where T : notnull => _app.Services.GetRequiredService<T>();
-
-    private async Task<(BotClient Bot, long Id)> InWorld(string name)
+    private async Task Gm(string name, string command)
     {
-        var bot = new BotClient(_http, File.ReadAllText(Path.Combine(_dataDir, "gate_rsa_public.pem")));
-        await bot.LoginAsync(name.ToLowerInvariant(), "pw");
-        await bot.EnterGateAsync();
-        var role = await bot.CreateRoleAsync(name);
-        await bot.EnterWorldAsync(role.RoleBaseInfo.Id);
-        return (bot, role.RoleBaseInfo.Id);
+        using var client = new HttpClient();
+        (await client.PostAsync($"{_http}/ro3emu/gm?account={name.ToLowerInvariant()}", Operator.Command(command))).EnsureSuccessStatusCode();
     }
 
-    private static async Task<T> Next<T>(BotClient bot, uint msgId, Google.Protobuf.MessageParser<T> parser, Func<T, bool>? match = null)
+    private static async Task<T> Next<T>(BotClient bot, uint id, Google.Protobuf.MessageParser<T> parser, Func<T, bool>? match = null)
         where T : Google.Protobuf.IMessage<T>
     {
-        var e = await bot.Inbox.WaitAsync(e => e.IsGame(msgId) && (match == null || match(parser.ParseFrom(e.Body))), Wait);
+        var e = await bot.Inbox.WaitAsync(e => e.IsGame(id) && (match == null || match(parser.ParseFrom(e.Body))), Wait);
         return parser.ParseFrom(e.Body);
     }
 
-    private async Task Gm(string account, string line)
+    private static async Task<T> Ask<T>(BotClient bot, uint id, Google.Protobuf.IMessage request, Google.Protobuf.MessageParser<T> parser)
+        where T : Google.Protobuf.IMessage<T>
     {
-        using var http = new HttpClient();
-        (await http.PostAsync($"{_http}/ro3emu/gm?account={account}", new StringContent(line))).EnsureSuccessStatusCode();
+        using var reply = bot.Inbox.Expect(e => e.IsGame(id));
+        await bot.SendGameAsync(id, request);
+        return parser.ParseFrom((await reply.WaitAsync(Wait)).Body);
     }
 
-    private GameSession Session(string name) => Service<SessionRegistry>().All().Single(s => s.Role?.Name == name);
-    private Task<T> Read<T>(string name, Func<GameSession, T> read) =>
-        Service<GameLoop>().InvokeAsync(() => Task.FromResult(read(Session(name))));
-    private Task OnLoop(string name, Action<GameSession> change) =>
-        Service<GameLoop>().InvokeAsync(() => { change(Session(name)); return Task.CompletedTask; });
+    private static Task<CreateBarRoomResp> Create(BotClient bot, string name, int type = Chitchat, int language = English) =>
+        Ask(bot, TavernService.CreateMsg, new CreateBarRoomReq { BarRoomName = name, BarRoomType = type, LanguageType = language }, CreateBarRoomResp.Parser);
 
-    private async Task Until(string name, Func<GameSession, bool> condition, string what)
+    private static Task<EnterBarRoomResp> Enter(BotClient bot, long room) =>
+        Ask(bot, TavernService.EnterMsg, new EnterBarRoomReq { BarRoomGuid = room }, EnterBarRoomResp.Parser);
+
+    private static Task<BarRoomGetResp> Get(BotClient bot) => Ask(bot, TavernService.GetMsg, new BarRoomGetReq(), BarRoomGetResp.Parser);
+
+    private static Task<BarRoomInfoUpdateNotify> Changed(BotClient bot, long room) =>
+        Next(bot, TavernService.InfoChangeNotify, BarRoomInfoUpdateNotify.Parser, n => n.BarRoomGuid == room);
+
+    /// <summary>The room list as LC_BarRoomServer.PartyQuerySummaryRequest asks for it (Discover adds the two conditions).</summary>
+    private static async Task<List<BarRoomSummary>> List(BotClient bot, bool discover = false)
     {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
-        while (!await Read(name, condition))
+        object?[] conditions = discover
+            ?
+            [
+                new Dictionary<string, object?> { ["Key"] = "BaroomCreateTime", ["MinValue"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - 1800, ["MaxValue"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 2592000 },
+                new Dictionary<string, object?> { ["Key"] = "BaroomHeadCount", ["MinValue"] = 2, ["MaxValue"] = 30 },
+            ]
+            : [];
+        var reply = await bot.MicroPositionalAsync("PartyService", "getPartysSummary", [TavernService.PartyType, Array.Empty<object>(), conditions, Array.Empty<object>(), 0, 100, true]);
+        Assert.Equal(true, ((object?[])reply["Ret"]!)[0]);
+        return [.. ((object?[])reply["SummaryList"]!).Select(e => BarRoomSummary.Parser.ParseFrom((byte[])((Dictionary<object, object?>)e!)["GameSummaryData"]!))];
+    }
+
+    private GameSession Session(long role) => _app.Services.GetRequiredService<SessionRegistry>().All().First(s => s.Role?.Id == role);
+
+    private static async Task Eventually(Func<bool> condition, string what)
+    {
+        var until = DateTime.UtcNow + Wait;
+        while (!condition())
         {
-            if (DateTime.UtcNow > deadline) throw new TimeoutException(what);
+            if (DateTime.UtcNow > until) Assert.Fail("timed out waiting for " + what);
             await Task.Delay(50);
         }
     }
 
-    private static async Task<BarRoomTotalDetail> Open(BotClient bot, string name = "Pub")
-    {
-        await bot.SendGameAsync(TavernService.Create, new CreateBarRoomReq { BarRoomType = 1, BarRoomName = name, AreaId = 1 });
-        var created = await Next(bot, TavernService.Create, CreateBarRoomResp.Parser);
-        Assert.Equal(0, created.Result);
-        return created.Info;
-    }
-
-    private static async Task<EnterBarRoomResp> Enter(BotClient bot, long room)
-    {
-        await bot.SendGameAsync(TavernService.Enter, new EnterBarRoomReq { BarRoomGuid = room, AreaId = 1 });
-        return await Next(bot, TavernService.Enter, EnterBarRoomResp.Parser);
-    }
-
-    private static object?[] Rooms(Dictionary<object, object?> reply)
-    {
-        Assert.True(((object?[])reply["Ret"]!)[0] is true);
-        return (object?[])reply["SummaryList"]!;
-    }
-
-    private static object?[] Query(int partyType) => [partyType, Array.Empty<object>(), Array.Empty<object>(), Array.Empty<object>(), 0, 100];
-
     [ClientDataFact]
-    public async Task RoomsListJoinChatAndClose()
+    public async Task ARoomIsCreatedListedJoinedAndClosedWhenEmpty()
     {
-        var (alice, a) = await InWorld("Alice");
-        var (bob, b) = await InWorld("Bob");
-        var (carol, _) = await InWorld("Carol");
-        await using var _a = alice; await using var _b = bob; await using var _c = carol;
+        var (alice, aliceId) = await InWorld("Alice");
+        var (bob, bobId) = await InWorld("Bob");
+        await using var a = alice;
+        await using var b = bob;
 
-        await alice.SendGameAsync(TavernService.Create, new CreateBarRoomReq { BarRoomType = 99, BarRoomName = "Pub" });
-        Assert.Equal(2579, (await Next(alice, TavernService.Create, CreateBarRoomResp.Parser)).Result);
-        await alice.SendGameAsync(TavernService.Create, new CreateBarRoomReq { BarRoomType = 1, BarRoomName = new string('x', 19) });
-        Assert.Equal(2576, (await Next(alice, TavernService.Create, CreateBarRoomResp.Parser)).Result);
+        var created = await Create(alice, "Cheers");
+        Assert.Equal(0, created.Result);
+        long room = created.Info.BarRoomSummary.BarRoomGuid;
+        Assert.True(room >= VoiceRoomKey.TavernBase);
+        Assert.Equal(aliceId, created.Info.OwnerGuid);
+        Assert.Equal([aliceId], created.Info.BarRoomSummary.MemberList.Select(m => m.MemberId));
+        Assert.Equal(SpeakAuthorityType.Free, created.Info.ControlMicType);
+        await Next(alice, TavernService.Sync, DBBarRoomInfoIncrement.Parser, i => i.BarRoomId == room);
 
-        var room = await Open(alice);
-        long id = room.BarRoomSummary.BarRoomGuid;
-        Assert.Equal(a, room.OwnerGuid);
-        Assert.Equal(a, room.CurSpeaks.Single().UserId);
-        await Until("Alice", s => s.Tavern!.BarRoomId == id, "5043 barRoomId");
+        var listed = Assert.Single(await List(bob));
+        Assert.Equal((room, "Cheers", Chitchat, English), (listed.BarRoomGuid, listed.BarRoomName, listed.BarRoomType, listed.LanguageType));
+        Assert.Empty(await List(bob, discover: true)); // Discover wants 2..30 members
 
-        // The room list is PartyService partyType 4; team queries do not see it.
-        var listed = Rooms(await bob.MicroPositionalAsync("PartyService", "getPartysSummary", Query(TavernService.PartyType)));
-        var summary = BarRoomSummary.Parser.ParseFrom((byte[])((Dictionary<object, object?>)listed.Single()!)["GameSummaryData"]!);
-        Assert.Equal(id, summary.BarRoomGuid);
-        Assert.Equal("Pub", summary.BarRoomName);
-        Assert.Empty(Rooms(await bob.MicroPositionalAsync("PartyService", "getPartysSummary", Query(0))));
-
-        var entered = await Enter(bob, id);
+        var entered = await Enter(bob, room);
         Assert.Equal(0, entered.Result);
         Assert.Equal(2, entered.Info.BarRoomSummary.MemberList.Count);
-        Assert.Equal(b, (await Next(alice, TavernService.UserEnter, BarRoomUserEnterNotify.Parser)).UserId);
-        await Next(alice, TavernService.Get, BarRoomGetResp.Parser, r => r.Info?.BarRoomSummary.MemberList.Count == 2);
+        Assert.Equal(bobId, (await Next(alice, TavernService.UserEnterNotify, BarRoomUserEnterNotify.Parser)).UserId);
+        Assert.Equal(ErrorCodes.TavernAlreadyIn, (await Enter(bob, room)).Result);
+        Assert.Equal(room, Assert.Single(await List(alice, discover: true)).BarRoomGuid);
 
-        // Chat channel 10 admits members only.
-        await bob.JoinChatAsync($"10_{id}");
-        await alice.JoinChatAsync($"10_{id}");
-        await Assert.ThrowsAnyAsync<Exception>(() => carol.JoinChatAsync($"10_{id}"));
-        await bob.SendChatAsync($"10_{id}", 2, "cheers");
-        Assert.Equal("cheers", (await alice.NextChatLineAsync()).Content);
-
-        await bob.SendGameAsync(TavernService.Exit, new ExitBarRoomReq { BarRoomGuid = id });
-        Assert.Equal(0, (await Next(bob, TavernService.Exit, ExitBarRoomResp.Parser)).Result);
-        await Next(alice, TavernService.Get, BarRoomGetResp.Parser, r => r.Info?.BarRoomSummary.MemberList.Count == 1);
-        await Assert.ThrowsAnyAsync<Exception>(() => bob.JoinChatAsync($"10_{id}"));
-
-        await alice.SendGameAsync(TavernService.Exit, new ExitBarRoomReq { BarRoomGuid = id });
-        Assert.Equal(0, (await Next(alice, TavernService.Exit, ExitBarRoomResp.Parser)).Result);
-        Assert.Empty(Rooms(await bob.MicroPositionalAsync("PartyService", "getPartysSummary", Query(TavernService.PartyType))));
-        Assert.Equal(2552, (await Enter(bob, id)).Result);
+        // The owner leaves: Bob, the one left, owns the room; when he leaves too it closes.
+        Assert.Equal(0, (await Ask(alice, TavernService.ExitMsg, new ExitBarRoomReq { BarRoomGuid = room }, ExitBarRoomResp.Parser)).Result);
+        await Changed(bob, room);
+        Assert.Equal(bobId, (await Get(bob)).Info.OwnerGuid);
+        Assert.Equal(ErrorCodes.TavernNotInRoom, (await Get(alice)).Result);
+        Assert.Equal(0, (await Ask(bob, TavernService.ExitMsg, new ExitBarRoomReq { BarRoomGuid = room }, ExitBarRoomResp.Parser)).Result);
+        Assert.Empty(await List(alice));
+        Assert.Equal(ErrorCodes.TavernNotFound, (await Enter(alice, room)).Result);
     }
 
     [ClientDataFact]
-    public async Task OwnerRulesMicKickAndHandover()
+    public async Task CreationFollowsTheFunctionAndTheTables()
     {
-        var (alice, a) = await InWorld("Alice");
-        var (bob, b) = await InWorld("Bob");
-        await using var _a = alice; await using var _b = bob;
-        long id = (await Open(alice)).BarRoomSummary.BarRoomGuid;
-        Assert.Equal(0, (await Enter(bob, id)).Result);
+        var (novice, _) = await InWorld("Novice", tavern: false);
+        var (alice, _) = await InWorld("Alice");
+        await using var n = novice;
+        await using var a = alice;
 
-        // Only the owner changes settings.
-        await bob.SendGameAsync(TavernService.SetInfo, new SetBarRoomInfoReq { BarRoomGuid = id, BarRoomType = 2, BarRoomName = "Mine" });
-        Assert.Equal(2554, (await Next(bob, TavernService.SetInfo, SetBarRoomInfoResp.Parser)).Result);
+        Assert.Equal(ErrorCodes.FeatureUnavailable, (await Create(novice, "Early")).Result);
+        Assert.Equal(ErrorCodes.TavernNameInvalid, (await Create(alice, "   ")).Result);
+        Assert.Equal(ErrorCodes.TavernNameTooLong, (await Create(alice, new string('x', 19))).Result); // BarRoomNameLen 18
+        Assert.Equal(ErrorCodes.TavernBadType, (await Create(alice, "Room", type: English)).Result);
+        Assert.Equal(ErrorCodes.TavernBadLanguage, (await Create(alice, "Room", language: Tips)).Result);
+        long room = (await Create(alice, "Room")).Info.BarRoomSummary.BarRoomGuid;
 
-        // Free mode needs no request; in Set mode the owner approves one.
-        await bob.SendGameAsync(TavernService.ApplyMic, new ApplyOpenMicReq { BarRoomGuid = id });
-        Assert.Equal(2567, (await Next(bob, TavernService.ApplyMic, ApplyOpenMicResp.Parser)).Result);
-        Assert.True(await Read("Bob", _ => Service<TavernService>().MayTalk(b)));
-        await alice.SendGameAsync(TavernService.MicMode, new ModifyControlMicTypeReq { BarRoomGuid = id, ControlMicType = SpeakAuthorityType.Manual });
-        Assert.Equal(0, (await Next(alice, TavernService.MicMode, ModifyControlMicTypeResp.Parser)).Result);
-        Assert.False(await Read("Bob", _ => Service<TavernService>().MayTalk(b)));
-        await bob.SendGameAsync(TavernService.ApplyMic, new ApplyOpenMicReq { BarRoomGuid = id, Reason = "song" });
-        Assert.Equal(0, (await Next(bob, TavernService.ApplyMic, ApplyOpenMicResp.Parser)).Result);
-        Assert.Equal("song", (await Next(alice, TavernService.Get, BarRoomGetResp.Parser, r => r.Info?.ApplyUsers.ContainsKey(b) == true)).Info.ApplyUsers[b]);
-        await alice.SendGameAsync(TavernService.HandleMic, new OwnerHandleOpenMicReq { BarRoomGuid = id, ApplyerId = b, IsAgree = true });
-        Assert.Equal(0, (await Next(alice, TavernService.HandleMic, OwnerHandleOpenMicResp.Parser)).Result);
-        Assert.True(await Read("Bob", _ => Service<TavernService>().MayTalk(b)));
-
-        // A mute keeps its value equal to the role (LC_BarRoomHelper.CheckIsForbiddenUser).
-        await alice.SendGameAsync(TavernService.Forbid, new ForbiddenUserReq { BarRoomGuid = id, TargetGuid = b });
-        Assert.Equal(0, (await Next(alice, TavernService.Forbid, ForbiddenUserResp.Parser)).Result);
-        var muted = await Next(bob, TavernService.Get, BarRoomGetResp.Parser, r => r.Info?.ForbiddenSpeaker.ContainsKey(b) == true);
-        Assert.Equal(b, muted.Info.ForbiddenSpeaker[b]);
-        Assert.DoesNotContain(muted.Info.CurSpeaks, s => s.UserId == b);
-        await alice.SendGameAsync(TavernService.CancelForbid, new CanecelForbiddenUserReq { BarRoomGuid = id, TargetGuid = b });
-        Assert.Equal(0, (await Next(alice, TavernService.CancelForbid, CanecelForbiddenUserResp.Parser)).Result);
-
-        // A kick sends the target 82483 and blocks it.
-        await alice.SendGameAsync(TavernService.Kick, new KickUserReq { BarRoomGuid = id, TargetGuid = b });
-        Assert.Equal(0, (await Next(alice, TavernService.Kick, KickUserResp.Parser)).Result);
-        Assert.Equal(0, (await Next(bob, TavernService.Exit, ExitBarRoomResp.Parser)).Result);
-        Assert.Equal(2553, (await Enter(bob, id)).Result);
-        await alice.SendGameAsync(TavernService.CancelKick, new CancelKickUserReq { BarRoomGuid = id, TargetGuid = b });
-        Assert.Equal(0, (await Next(alice, TavernService.CancelKick, CancelKickUserResp.Parser)).Result);
-        Assert.Equal(0, (await Enter(bob, id)).Result);
-
-        // The owner leaving hands the room to the next member.
-        await alice.SendGameAsync(TavernService.Exit, new ExitBarRoomReq { BarRoomGuid = id });
-        var handed = await Next(bob, TavernService.Get, BarRoomGetResp.Parser, r => r.Info?.OwnerGuid == b);
-        Assert.Equal(b, handed.Info.CurSpeaks[0].UserId);
-        Assert.NotEqual(0, a);
+        // The owner edits it, then has to wait BarRoomSetInfoCd (5 s).
+        var edit = new SetBarRoomInfoReq { BarRoomGuid = room, BarRoomName = "Renamed", BarRoomType = Tips, LanguageType = Korean };
+        Assert.Equal(0, (await Ask(alice, TavernService.SetInfoMsg, edit, SetBarRoomInfoResp.Parser)).Result);
+        Assert.Equal(ErrorCodes.TavernTooQuick, (await Ask(alice, TavernService.SetInfoMsg, edit, SetBarRoomInfoResp.Parser)).Result);
+        var summary = (await Get(alice)).Info.BarRoomSummary;
+        Assert.Equal(("Renamed", Tips, Korean), (summary.BarRoomName, summary.BarRoomType, summary.LanguageType));
     }
 
     [ClientDataFact]
-    public async Task InviteGiftAndDailyTime()
+    public async Task SeatsAreAskedForGrantedAndGivenUp()
     {
-        var (alice, a) = await InWorld("Alice");
-        var (bob, b) = await InWorld("Bob");
-        await using var _a = alice; await using var _b = bob;
-        long id = (await Open(alice)).BarRoomSummary.BarRoomGuid;
+        var (alice, aliceId) = await InWorld("Alice");
+        var (bob, bobId) = await InWorld("Bob");
+        await using var a = alice;
+        await using var b = bob;
+        long room = (await Create(alice, "Stage")).Info.BarRoomSummary.BarRoomGuid;
+        await Enter(bob, room);
 
-        await alice.SendGameAsync(TavernService.Invite, new InviteEnterBarRoomReq { BarRoomGuid = id, TargetGuidList = { b }, InviterLevel = 1 });
-        Assert.Equal(b, (await Next(alice, TavernService.Invite, InviteEnterBarRoomResp.Parser)).TargetGuidList.Single());
-        var invite = await Next(bob, TavernService.InviteNotify, InviteEnterBarRoomNotify.Parser);
-        Assert.Equal(("Pub", a), (invite.RoomName, invite.InviterGuid));
-        await bob.SendGameAsync(TavernService.InviteResponse, new ResponseInviteEnterBarRoomReq { BarRoomGuid = id, InviterGuid = a, IsAccept = true });
-        Assert.Equal(0, (await Next(bob, TavernService.InviteResponse, ResponseInviteEnterBarRoomResp.Parser)).Result);
-        Assert.True((await Next(alice, TavernService.InviteResponse, ResponseInviteEnterBarRoomResp.Parser)).IsAccept);
-        Assert.True(await Read("Bob", _ => Service<TavernService>().InRoom(b, id)));
+        var apply = new ApplyOpenMicReq { BarRoomGuid = room, Reason = "a song" };
+        Assert.Equal(ErrorCodes.TavernNoApplyNeeded, (await Ask(bob, TavernService.ApplyMicMsg, apply, ApplyOpenMicResp.Parser)).Result); // Free mode
 
-        // Gingerbread: room Popularity 10 and Star Power 5 each.
-        await alice.SendGameAsync(TavernService.Gift, new PresentGiftReq { BarRoomGuid = id, TargetGuid = b, GiftId = 1200802, GiftNum = 2 });
-        Assert.Equal(154, (await Next(alice, TavernService.Gift, PresentGiftResp.Parser)).Result);
-        await Gm("alice", "!item 1200802 2");
-        await alice.SendGameAsync(TavernService.Gift, new PresentGiftReq { BarRoomGuid = id, TargetGuid = a, GiftId = 1200802, GiftNum = 1 });
-        Assert.Equal(2574, (await Next(alice, TavernService.Gift, PresentGiftResp.Parser)).Result);
-        await alice.SendGameAsync(TavernService.Gift, new PresentGiftReq { BarRoomGuid = id, TargetGuid = b, GiftId = 1200802, GiftNum = 2 });
-        var gift = await Next(alice, TavernService.Gift, PresentGiftResp.Parser);
-        Assert.Equal((0, 20, 10, b), (gift.Result, gift.HotAdd, gift.UserBarRoomHot, gift.ReceiveUser));
-        Assert.Equal(20, (await Next(bob, TavernService.Get, BarRoomGetResp.Parser, r => r.Info?.BarRoomSummary.HotValue == 20)).Info.BarRoomSummary.HotValue);
-        await Until("Bob", s => s.Tavern!.Popularity == 10 && s.Tavern.WeekPopularity == 10, "Star Power");
+        var manual = new ModifyControlMicTypeReq { BarRoomGuid = room, ControlMicType = SpeakAuthorityType.Manual, MicOrder = new SetMicOrderReq { BarRoomGuid = room } };
+        Assert.Equal(ErrorCodes.TavernNoPermission, (await Ask(bob, TavernService.MicTypeMsg, manual, ModifyControlMicTypeResp.Parser)).Result);
+        Assert.Equal(0, (await Ask(alice, TavernService.MicTypeMsg, manual, ModifyControlMicTypeResp.Parser)).Result);
+        await Changed(bob, room);
 
-        // 20 minutes in a room complete the day (task 2000's [106010, 1200]).
-        await OnLoop("Bob", s => s.TavernCountedAt -= 1300);
-        await Until("Bob", s => s.Tavern!.IsToDayActComplete && s.Tavern.ActDays == 1 && s.Tavern.InBarRoomTime >= 1200, "daily time");
-        Assert.True(await Read("Bob", s => Service<TavernService>().SecondsToday(s) >= 1200));
+        Assert.Equal(0, (await Ask(bob, TavernService.ApplyMicMsg, apply, ApplyOpenMicResp.Parser)).Result);
+        Assert.Equal(ErrorCodes.TavernAlreadyApplied, (await Ask(bob, TavernService.ApplyMicMsg, apply, ApplyOpenMicResp.Parser)).Result);
+        await Changed(alice, room);
+        Assert.Equal("a song", (await Get(alice)).Info.ApplyUsers[bobId]);
+
+        using (var told = bob.Inbox.Expect(e => e.IsGame(TavernService.HandleApplyMsg)))
+        {
+            var agree = new OwnerHandleOpenMicReq { BarRoomGuid = room, ApplyerId = bobId, IsAgree = true };
+            Assert.Equal(0, (await Ask(alice, TavernService.HandleApplyMsg, agree, OwnerHandleOpenMicResp.Parser)).Result);
+            Assert.True(OwnerHandleOpenMicResp.Parser.ParseFrom((await told.WaitAsync(Wait)).Body).IsAgree);
+        }
+        var detail = (await Get(alice)).Info;
+        Assert.Empty(detail.ApplyUsers);
+        Assert.Equal((bobId, 1), (detail.CurSpeaks.Single().UserId, detail.CurSpeaks.Single().MicOrder));
+        Assert.Equal(ErrorCodes.TavernAlreadyOnMic, (await Ask(bob, TavernService.ApplyMicMsg, apply, ApplyOpenMicResp.Parser)).Result);
+
+        Assert.Equal(ErrorCodes.TavernOwnerKeepsMic, (await Ask(alice, TavernService.DownMicMsg, new DownMicReq { BarRoomGuid = room }, DownMicResp.Parser)).Result);
+        Assert.Equal(0, (await Ask(bob, TavernService.DownMicMsg, new DownMicReq { BarRoomGuid = room }, DownMicResp.Parser)).Result);
+        Assert.Equal(ErrorCodes.TavernNotOnMic, (await Ask(bob, TavernService.DownMicMsg, new DownMicReq { BarRoomGuid = room }, DownMicResp.Parser)).Result);
+
+        // The owner's own list: more than BarroomSpeakNum (10) is refused, the owner needs no seat.
+        var order = new ModifyControlMicTypeReq { BarRoomGuid = room, ControlMicType = SpeakAuthorityType.Order, MicOrder = new SetMicOrderReq { BarRoomGuid = room } };
+        order.MicOrder.SpeakUsers.Add(new CurSpeakUsers { UserId = aliceId, MicOrder = 1 });
+        order.MicOrder.SpeakUsers.Add(new CurSpeakUsers { UserId = bobId, MicOrder = 2 });
+        var kept = await Ask(alice, TavernService.MicTypeMsg, order, ModifyControlMicTypeResp.Parser);
+        Assert.Equal([bobId], kept.MicOrder.SpeakUsers.Select(u => u.UserId));
+        Assert.Equal(SpeakAuthorityType.Order, (await Get(bob)).Info.ControlMicType);
+    }
+
+    [ClientDataFact]
+    public async Task TheOwnerMutesRemovesAndHandsOverTheRoom()
+    {
+        var (alice, aliceId) = await InWorld("Alice");
+        var (bob, bobId) = await InWorld("Bob");
+        await using var a = alice;
+        await using var b = bob;
+        long room = (await Create(alice, "Rules")).Info.BarRoomSummary.BarRoomGuid;
+        await Enter(bob, room);
+
+        // Mute: Bob's client gets the reply too ("The host has muted you."); a muted player cannot take the room.
+        using (var told = bob.Inbox.Expect(e => e.IsGame(TavernService.ForbidMsg)))
+        {
+            Assert.Equal(0, (await Ask(alice, TavernService.ForbidMsg, new ForbiddenUserReq { BarRoomGuid = room, TargetGuid = bobId }, ForbiddenUserResp.Parser)).Result);
+            await told.WaitAsync(Wait);
+        }
+        Assert.True((await Get(alice)).Info.ForbiddenSpeaker[bobId] > DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 86_000);
+        Assert.Equal(ErrorCodes.TavernMuted, (await Ask(alice, TavernService.TransferMsg, new TransferOwnerReq { BarRoomGuid = room, TargetGuid = bobId }, TransferOwnerResp.Parser)).Result);
+        Assert.Equal(0, (await Ask(alice, TavernService.UnforbidMsg, new CanecelForbiddenUserReq { BarRoomGuid = room, TargetGuid = bobId }, CanecelForbiddenUserResp.Parser)).Result);
+        Assert.Equal(ErrorCodes.TavernNotMuted, (await Ask(alice, TavernService.UnforbidMsg, new CanecelForbiddenUserReq { BarRoomGuid = room, TargetGuid = bobId }, CanecelForbiddenUserResp.Parser)).Result);
+
+        // 82514 reaches the member as 77003 on the room's voice id.
+        using (var muted = bob.Inbox.Expect(e => e.IsGame(TavernService.MuteInChannelNotify)))
+        {
+            var mute = await Ask(alice, TavernService.MuteMsg, new MuteBarRoomPlayerReq { BarRoomUid = room, TargetPlayerUid = bobId, IsMute = true }, MuteBarRoomPlayerResp.Parser);
+            Assert.Equal((0, room.ToString(System.Globalization.CultureInfo.InvariantCulture)), (mute.Result, mute.GroupId));
+            var notify = MutePlayerInChannelNotify.Parser.ParseFrom((await muted.WaitAsync(Wait)).Body);
+            Assert.True(notify.IsMute);
+        }
+        Assert.Equal(ErrorCodes.TavernNoPermission, (await Ask(bob, TavernService.MuteMsg, new MuteBarRoomPlayerReq { BarRoomUid = room, TargetPlayerUid = aliceId, IsMute = true }, MuteBarRoomPlayerResp.Parser)).Result);
+
+        // Close all mics, then open them again.
+        Assert.Equal(0, (await Ask(alice, TavernService.ShutUpMsg, new ShutUpAllReq { BarRoomGuid = room }, ShutUpAllResp.Parser)).Result);
+        Assert.True((await Get(bob)).Info.IsCloseMic);
+        Assert.Equal(0, (await Ask(alice, TavernService.UnshutUpMsg, new CancelShutUpAllReq { BarRoomGuid = room }, CancelShutUpAllResp.Parser)).Result);
+        Assert.False((await Get(bob)).Info.IsCloseMic);
+
+        // Hand-over, then BarRoomTransferRoomCd (30 s) holds the next one.
+        Assert.Equal(0, (await Ask(alice, TavernService.TransferMsg, new TransferOwnerReq { BarRoomGuid = room, TargetGuid = bobId }, TransferOwnerResp.Parser)).Result);
+        Assert.Equal(bobId, (await Get(alice)).Info.OwnerGuid);
+        Assert.Equal(ErrorCodes.TavernTransferCooldown, (await Ask(bob, TavernService.TransferMsg, new TransferOwnerReq { BarRoomGuid = room, TargetGuid = aliceId }, TransferOwnerResp.Parser)).Result);
+
+        // Removed: out of the room, on its Blocks list until lifted.
+        using (var left = alice.Inbox.Expect(e => e.IsGame(TavernService.Sync) && DBBarRoomInfoIncrement.Parser.ParseFrom(e.Body) is { HasBarRoomId: true, BarRoomId: 0 }))
+        {
+            Assert.Equal(0, (await Ask(bob, TavernService.KickMsg, new KickUserReq { BarRoomGuid = room, TargetGuid = aliceId }, KickUserResp.Parser)).Result);
+            await left.WaitAsync(Wait);
+        }
+        Assert.Equal(ErrorCodes.TavernBlocked, (await Enter(alice, room)).Result);
+        Assert.Contains(aliceId, (await Get(bob)).Info.BlackList.Keys);
+        Assert.Equal(0, (await Ask(bob, TavernService.UnkickMsg, new CancelKickUserReq { BarRoomGuid = room, TargetGuid = aliceId }, CancelKickUserResp.Parser)).Result);
+        Assert.Equal(ErrorCodes.TavernNotBlocked, (await Ask(bob, TavernService.UnkickMsg, new CancelKickUserReq { BarRoomGuid = room, TargetGuid = aliceId }, CancelKickUserResp.Parser)).Result);
+        Assert.Equal(0, (await Enter(alice, room)).Result);
+    }
+
+    [ClientDataFact]
+    public async Task InvitationsBringFriendsIn()
+    {
+        var (alice, aliceId) = await InWorld("Alice");
+        var (bob, bobId) = await InWorld("Bob");
+        await using var a = alice;
+        await using var b = bob;
+        long room = (await Create(alice, "Party")).Info.BarRoomSummary.BarRoomGuid;
+
+        var invite = await Ask(alice, TavernService.InviteMsg, new InviteEnterBarRoomReq { BarRoomGuid = room, TargetGuidList = { bobId }, RoomName = "?" }, InviteEnterBarRoomResp.Parser);
+        Assert.Equal((0, bobId), (invite.Result, invite.TargetGuidList.Single()));
+        var notify = await Next(bob, TavernService.InviteNotify, InviteEnterBarRoomNotify.Parser);
+        Assert.Equal((room, aliceId, "Party", "Alice", 36), (notify.BarRoomGuid, notify.InviterGuid, notify.RoomName, notify.InviterName, notify.InviterLevel));
+
+        using var answer = alice.Inbox.Expect(e => e.IsGame(TavernService.InviteResponseMsg));
+        var accepted = await Ask(bob, TavernService.InviteResponseMsg,
+            new ResponseInviteEnterBarRoomReq { BarRoomGuid = room, InviterGuid = aliceId, IsAccept = true }, ResponseInviteEnterBarRoomResp.Parser);
+        Assert.Equal((0, bobId, true), (accepted.Result, accepted.InviterGuid, accepted.IsAccept)); // the invitee's own copy opens the window
+        Assert.Equal(2, accepted.Info.BarRoomSummary.MemberList.Count);
+        var toInviter = ResponseInviteEnterBarRoomResp.Parser.ParseFrom((await answer.WaitAsync(Wait)).Body);
+        Assert.Equal((bobId, true), (toInviter.InviterGuid, toInviter.IsAccept)); // "Bob has accepted your invitation."
+    }
+
+    [ClientDataFact]
+    public async Task GiftsWarmTheRoomAndGiveStarPower()
+    {
+        var (alice, aliceId) = await InWorld("Alice");
+        var (bob, bobId) = await InWorld("Bob");
+        await using var a = alice;
+        await using var b = bob;
+        long room = (await Create(alice, "Bar")).Info.BarRoomSummary.BarRoomGuid;
+        await Enter(bob, room);
+        await Gm("Alice", $"!item {GrapeWine} 4");
+        await Gm("Alice", $"!item {HotCocoa} 1");
+
+        var gift = new PresentGiftReq { BarRoomGuid = room, TargetGuid = bobId, GiftId = GrapeWine, GiftNum = 4 };
+        Assert.Equal(ErrorCodes.TavernGiftSelf, (await Ask(alice, TavernService.GiftMsg, new PresentGiftReq(gift) { TargetGuid = aliceId }, PresentGiftResp.Parser)).Result);
+        Assert.Equal(ErrorCodes.ItemsShort, (await Ask(alice, TavernService.GiftMsg, new PresentGiftReq(gift) { GiftNum = 5 }, PresentGiftResp.Parser)).Result);
+        var given = await Ask(alice, TavernService.GiftMsg, gift, PresentGiftResp.Parser);
+        Assert.Equal((0, GrapeWine, 4, bobId), (given.Result, given.ItemId, given.ItemNum, given.ReceiveUser));
+        Assert.Equal((1200, 1600), (given.UserBarRoomHot, given.HotAdd)); // 4 x (111 GainStar 300, 110 GainBarroomHot 400)
+        await Next(bob, TavernService.Sync, DBBarRoomInfoIncrement.Parser, i => i.Popularity == 1200 && i.WeekPopularity == 1200);
+        Assert.Equal(1600, (await Get(bob)).Info.BarRoomSummary.HotValue);
+        Assert.Equal(0, _app.Services.GetRequiredService<CharacterService>().CountOf(Session(aliceId), GrapeWine));
+
+        // 102100600 "A Drink for a Story": 1000 Star Power (106008).
+        await Eventually(() => Session(bobId).Achievements?.Infos.GetValueOrDefault(102100600)?.Status == AchievementStatusType.Complete, "achievement 102100600");
+
+        Assert.Equal(ErrorCodes.Parameter, (await Ask(alice, TavernService.GiftMsg, new PresentGiftReq(gift) { GiftId = 1, GiftNum = 1 }, PresentGiftResp.Parser)).Result);
+        Assert.Equal(0, (await Ask(bob, TavernService.ExitMsg, new ExitBarRoomReq { BarRoomGuid = room }, ExitBarRoomResp.Parser)).Result);
+        Assert.Equal(ErrorCodes.TavernRecipientLeft, (await Ask(alice, TavernService.GiftMsg, new PresentGiftReq(gift) { GiftId = HotCocoa, GiftNum = 1 }, PresentGiftResp.Parser)).Result);
+    }
+
+    [ClientDataFact]
+    public async Task TwentyMinutesInARoomCompleteTheDailyQuest()
+    {
+        var (alice, aliceId) = await InWorld("Alice");
+        await using var a = alice;
+        await Create(alice, "Quest");
+        var session = Session(aliceId);
+        await Eventually(() => session.Tasks?.Infos.GetValueOrDefault(2000)?.Status == TaskState.Running, "the daily Tavern quest to be offered");
+
+        // GM op 141 GMAddBarroomToDayStayTimes: the day's 1200 s, as twenty minutes in the room would add them.
+        await alice.SendGameAsync(GmCommands.GeneralProcGm, new GeneralGMProcReq { GmType = (GmOpEnum)TavernService.GmAddStay, ParamString = "1200" });
+        await Next(alice, TavernService.Sync, DBBarRoomInfoIncrement.Parser, i => i.IsToDayActComplete && i.ActDays == 1);
+        await Eventually(() => TaskService.IsDelivered(session, 2000), "the daily Tavern quest to deliver itself");
+        var character = _app.Services.GetRequiredService<CharacterService>();
+        Assert.Equal(3, character.CountOf(session, HotCocoa)); // award 8000 -> 1008000
+        // (inferred) The first active day's drink (ServerOptions.TavernDayDrinks).
+        await Eventually(() => character.CountOf(session, Gingerbread) == 1 && session.Tavern?.DrinkOwed == 0, "the active day's Gingerbread");
+        await Eventually(() => session.Achievements?.Infos.GetValueOrDefault(102100500)?.Status == AchievementStatusType.Complete, "achievement 102100500");
+    }
+
+    [ClientDataFact]
+    public async Task OnlyMembersUseTheRoomsChannel()
+    {
+        var (alice, _) = await InWorld("Alice");
+        var (bob, _) = await InWorld("Bob");
+        await using var a = alice;
+        await using var b = bob;
+        long room = (await Create(alice, "Talk")).Info.BarRoomSummary.BarRoomGuid;
+        string channel = ChatService.TavernPrefix + room;
+
+        await alice.JoinChatAsync(channel);
+        await Assert.ThrowsAnyAsync<Exception>(() => bob.JoinChatAsync(channel));
+        await Enter(bob, room);
+        await bob.JoinChatAsync(channel);
+        await bob.SendChatAsync(channel, 2, "hello", channelIndex: 10);
+        Assert.Equal("hello", (await alice.NextChatLineAsync()).Content);
+    }
+
+    /// <summary>A ticket from the game gate, then Auth on the relay.</summary>
+    private async Task<VoiceTestClient> Relay(BotClient bot)
+    {
+        var ticket = await BotVoiceTicket.RequestAsync(bot, Wait);
+        var client = new VoiceTestClient(_voicePort) { Tag = ticket.RoleId.ToString(System.Globalization.CultureInfo.InvariantCulture) };
+        await client.ConnectAsync();
+        await client.AuthAsync(ticket.RoleId, ticket.Token, ticket.Secret);
+        await client.WaitTypeAsync(VoiceDown.AuthOk, Wait);
+        return client;
+    }
+
+    private static async Task<byte> JoinRoom(VoiceTestClient client, string room)
+    {
+        await client.JoinAsync(room);
+        return (await client.WaitTypeAsync(VoiceDown.JoinResult, Wait)).Payload[0];
+    }
+
+    private static bool MicIs(byte type, byte[] p, long role, bool on) =>
+        type == VoiceDown.MicState && BitConverter.ToInt64(p) == role && p[8] == (on ? 1 : 0);
+
+    [ClientDataFact]
+    public async Task TheRoomsVoiceFollowsItsSpeakingRules()
+    {
+        var (alice, _) = await InWorld("Alice");
+        var (bob, bobId) = await InWorld("Bob");
+        await using var a = alice;
+        await using var b = bob;
+        long room = (await Create(alice, "Voice")).Info.BarRoomSummary.BarRoomGuid;
+        string channel = room.ToString(System.Globalization.CultureInfo.InvariantCulture); // LC_BarRoomTalk: tostring(guid)
+        await using var aliceVoice = await Relay(alice);
+        await using var bobVoice = await Relay(bob);
+
+        Assert.Equal(VoiceJoinCode.NotMember, await JoinRoom(bobVoice, channel));
+        await Enter(bob, room);
+        Assert.Equal(VoiceJoinCode.Ok, await JoinRoom(aliceVoice, channel));
+        Assert.Equal(VoiceJoinCode.Ok, await JoinRoom(bobVoice, channel));
+        await bobVoice.MicAsync(true);
+        await aliceVoice.WaitAsync((t, p) => MicIs(t, p, bobId, true), Wait); // Free mode: anyone
+
+        // Manual mode without a seat: the relay holds Bob's mic off; given a seat it is heard again.
+        var manual = new ModifyControlMicTypeReq { BarRoomGuid = room, ControlMicType = SpeakAuthorityType.Manual, MicOrder = new SetMicOrderReq { BarRoomGuid = room } };
+        Assert.Equal(0, (await Ask(alice, TavernService.MicTypeMsg, manual, ModifyControlMicTypeResp.Parser)).Result);
+        await aliceVoice.WaitAsync((t, p) => MicIs(t, p, bobId, false), Wait);
+        manual.MicOrder.SpeakUsers.Add(new CurSpeakUsers { UserId = bobId, MicOrder = 1 });
+        Assert.Equal(0, (await Ask(alice, TavernService.MicTypeMsg, manual, ModifyControlMicTypeResp.Parser)).Result);
+        await aliceVoice.WaitAsync((t, p) => MicIs(t, p, bobId, true), Wait);
+        await bobVoice.SendAudioAsync(0, [5, 5, 5]);
+        var (_, audio) = await aliceVoice.WaitTypeAsync(VoiceDown.Audio, Wait);
+        Assert.Equal(new byte[] { 5, 5, 5 }, audio[10..]);
+
+        // Closing every mic holds it off again.
+        Assert.Equal(0, (await Ask(alice, TavernService.ShutUpMsg, new ShutUpAllReq { BarRoomGuid = room }, ShutUpAllResp.Parser)).Result);
+        await aliceVoice.WaitAsync((t, p) => MicIs(t, p, bobId, false), Wait);
     }
 }

@@ -355,6 +355,7 @@ public sealed class RoleItemPlanBuilder
             object?[] result;
             try { result = accounts.WriteSync<object?[]>(escrowSubmitted); }
             catch (EconomyOperationConflictException) { throw; }
+            catch (DbQueueFullException) { throw; } // not admitted: a definite failure, nothing to resolve
             catch (Exception original)
             {
                 object?[]? resolved;
@@ -394,6 +395,7 @@ public sealed class RoleItemPlanBuilder
         if (_entities.Count != 0) submitted.ExpectEntities(_entities.Values);
         object?[] receipts;
         try { receipts = accounts.WriteSync<object?[]>(submitted); }
+        catch (DbQueueFullException) { throw; } // not admitted: a definite failure, nothing to resolve
         catch (Exception original)
         {
             object?[]? resolved;
@@ -464,7 +466,7 @@ public sealed class RoleItemPlanBuilder
             if (_expected.Count != 0) submitted.Expect(_expected.Values);
             if (_entities.Count != 0) submitted.ExpectEntities(_entities.Values);
             try { receipts = await accounts.WriteOwnedAsync<object?[]>(submitted); }
-            catch (Exception original) when (original is not EconomyOperationConflictException)
+            catch (Exception original) when (original is not (EconomyOperationConflictException or DbQueueFullException))
             {
                 object?[]? resolved;
                 try
@@ -578,7 +580,7 @@ internal static class RoleColumns
         "life_runtime", "season_talent", "season_page", "season_page_meta", "season_refine", "pets", "mounts",
         "wardrobe", "totems", "totem_refine_epoch", "genre", "skill_plans", "pet_books", "equip_levels",
         "equip_plans", "auto_decompose", "bag_state", "stat_plans", "world_state", "emblems", "guild_info",
-        "mailbox", "auction", "tasks", "task_runtime", "task_followup", "wild_afk", "career_special", "heroic_spirit", "paragon", "title", "area_concur", "growth_class", "first_heart", "personal", "personal_upvote", "popularity", "social_outfit", "emoji_info", "barroom", "present_sent", "present_received"
+        "mailbox", "auction", "tasks", "task_runtime", "task_followup", "wild_afk", "career_special", "heroic_spirit", "paragon", "title", "area_concur", "growth_class", "first_heart", "personal", "personal_upvote", "popularity", "social_outfit", "emoji_info", "gifts", "barroom", "gm_state"
     };
 
     internal static void Validate(string column)

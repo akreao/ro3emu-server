@@ -95,7 +95,7 @@ public sealed class RidingEffects : IGameTicker
     private HashSet<int> Wanted(GameSession s)
     {
         var (bind, subType) = _mounts.Ridden(s);
-        // In the air a flying System mount's ground bind buff gives way to its air buff (CombatService.Companions).
+        // In the air a flying System mount's ground bind buff gives way to its air buff (CombatService.ClassCompanions).
         var wanted = s.WorldState.Flying && subType == 0 ? [] : bind.Select(id => (int)id).ToHashSet();
         if (subType == DragonSubType && _combat.LearnedPassive(s, DragonTraining) is { } dragon
             && BuffConfig.Get(_data, DragonTrainingBuff * 100L + dragon.Level) is { } dragonBuff)

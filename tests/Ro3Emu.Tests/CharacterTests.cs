@@ -65,7 +65,7 @@ public sealed class CharacterTests : IAsyncLifetime
     private async Task Gm(string account, string line)
     {
         using var http = new HttpClient();
-        var resp = await http.PostAsync($"{_http}/ro3emu/gm?account={account}", new StringContent(line));
+        var resp = await http.PostAsync($"{_http}/ro3emu/gm?account={account}", Operator.Command(line));
         resp.EnsureSuccessStatusCode();
     }
 
@@ -150,37 +150,59 @@ public sealed class CharacterTests : IAsyncLifetime
     }
 
     [ClientDataFact]
-    public async Task AssassinsWearADaggerInEachHand()
+    public async Task OnlyACareerWithTheDoubleHandFormWieldsAOneHandedWeaponInEachHand()
     {
         await using var alice = await InWorld("Alice");
         var bag = await Next(alice, CharacterService.ItemsSync, DBItemsInfoIncrement.Parser);
-        long first = bag.PackInfo[2].All.Items.Values.Single(i => i.ItemEntry == Dagger).ItemGuid;
-        var loop = _app.Services.GetRequiredService<GameLoop>();
-        var session = _app.Services.GetRequiredService<SessionRegistry>().All().Single(s => s.Role?.Id == (long)alice.Self!.Uuid);
-        await Gm("alice", $"!item {Dagger} 1");
-        long second = 0;
-        for (int i = 0; i < 50 && second == 0; i++)
-        {
-            second = await loop.InvokeAsync(() => Task.FromResult(session.Items.FirstOrDefault(x => x.Entry == Dagger && x.Guid != first)?.Guid ?? 0));
-            if (second == 0) await Task.Delay(50);
-        }
-        async Task<int> Wear(long guid, int grid)
+        long mainHand = bag.PackInfo[2].All.Items.Values.Single(i => i.ItemEntry == Dagger).ItemGuid;
+        await Gm("alice", $"!item {Dagger}");
+        var added = await Next(alice, CharacterService.ItemsSync, DBItemsInfoIncrement.Parser, m => m.GuidToNew.Count > 0);
+        long offHand = added.PackInfo[2].Inc.Items.Values.Single().All.ItemGuid;
+        async Task Equip(long guid, int grid)
         {
             await alice.SendGameAsync(CharacterService.EquipItemOpr, new EquipItemOprReq { Opr = 0, Pos = (EquipGridType)grid, ItemGUID = guid });
-            return (await Next(alice, CharacterService.EquipItemOpr, EquipItemOprResp.Parser, r => r.ItemGUID == guid)).Result;
+            await Next(alice, CharacterService.EquipSync, DBEquipInfoIncrement.Parser, m => !m.SyncAllMark);
+            Assert.Equal(0, (await Next(alice, CharacterService.EquipItemOpr, EquipItemOprResp.Parser)).Result);
         }
-        int[] Grids() => session.Items.Where(i => i.Entry == Dagger).Select(i => i.Grid).Order().ToArray();
+        Task<(int Main, int Off)> Grids() => _app.Services.GetRequiredService<GameLoop>().InvokeAsync(() =>
+        {
+            var s = _app.Services.GetRequiredService<SessionRegistry>().All().Single(s => s.Account == "alice");
+            return Task.FromResult((s.Items.Single(i => i.Guid == mainHand).Grid, s.Items.Single(i => i.Guid == offHand).Grid));
+        });
 
-        // A Novice's off hand takes no dagger: the request lands in the main hand.
-        Assert.Equal(0, await Wear(first, 2));
-        var novice = await loop.InvokeAsync(() => Task.FromResult(Grids()));
-        Assert.Equal(new[] { 0, 1 }, novice);
+        // A career whose JobConfig _kWeaponForm has SingleHand (1): the second dagger takes grid 1 and swaps the first out.
+        await Equip(mainHand, 1);
+        await Equip(offHand, 2);
+        Assert.Equal((0, 1), await Grids());
 
-        // JobConfig 5200 _kWeaponForm [2, 3]: TwoHandAndDoubleHand, so a main-hand weapon may go to the off hand.
+        // Assassin 5200, _kWeaponForm [2,3] (TwoHand, DoubleHand): the client's TwoHandAndDoubleHand puts it in the off hand.
         await Gm("alice", "!job 5200");
-        Assert.Equal(0, await Wear(second, 2));
-        var assassin = await loop.InvokeAsync(() => Task.FromResult(Grids()));
-        Assert.Equal(new[] { 1, 2 }, assassin);
+        await Next(alice, CharacterService.RoleBaseInfoSync, RoleBaseInfoIncrement.Parser, m => m.Career == 5200);
+        await Equip(mainHand, 1);
+        await alice.SendGameAsync(CharacterService.EquipItemOpr, new EquipItemOprReq { Opr = 0, Pos = (EquipGridType)2, ItemGUID = offHand });
+        var equipped = await Next(alice, CharacterService.EquipSync, DBEquipInfoIncrement.Parser, m => !m.SyncAllMark);
+        Assert.Equal(offHand, equipped.EquipPlans[0].Inc.ItemsEquipGrid[2].All);
+        Assert.Equal(0, (await Next(alice, CharacterService.EquipItemOpr, EquipItemOprResp.Parser)).Result);
+        Assert.Equal((1, 2), await Grids());
+    }
+
+    // AttributeConfig 115/116 _kTips: "Every 1 excess ASPD is converted to 0.1% Physical ATK (Max: 20%)", the excess
+    // over FinalAtkSpdThdAndCastSpdThd [500, 400] (OverflowAtkSpd2PhysDmgR, OverflowCastSpd2MagicDmgR).
+    [ClientDataFact]
+    public void SpeedPastItsCapTurnsIntoAttack()
+    {
+        var character = _app.Services.GetRequiredService<CharacterService>();
+        var data = _app.Services.GetRequiredService<Ro3Emu.Server.Data.GameData>();
+        StatSheet With(double aspd, double cast)
+        {
+            var raw = new Dictionary<int, double> { [103] = 1000, [104] = 1000, [115] = aspd, [116] = cast };
+            return character.ApplySpeedOverflow(raw, StatCalculator.Compute(raw, data));
+        }
+        var under = With(500, 400);
+        Assert.Equal((1000L, 1000L), (under[103], under[104]));
+        var over = With(600, 450); // 100 excess ASPD: +10% PATK; 50 excess cast speed: +5% MATK
+        Assert.Equal((1100L, 1050L, 600L), (over[103], over[104], over[115]));
+        Assert.Equal(1200, With(900, 400)[103]); // 400 excess would be 40%: capped at 20%
     }
 
     [ClientDataFact]
@@ -248,6 +270,14 @@ public sealed class CharacterTests : IAsyncLifetime
             await alice.SendGameAsync(CharacterService.AllocateAttrPoints, req);
             Assert.NotEqual(0, (await Next(alice, CharacterService.AllocateAttrPoints, AllocateAttrPointRsp.Parser)).Result);
         }
+
+        await alice.SendGameAsync(CharacterService.ResetAttrPoints, new ResetAttrPointReq { PlanIndex = 0 });
+        Assert.Equal(0, (await Next(alice, CharacterService.ResetAttrPoints, ResetAttrPointResp.Parser)).Result);
+        var reset = await Next(alice, CharacterService.OnePropertyChange, OnePropertyChange.Parser,
+            m => m.Property.Propertys.Any(p => p.PropertyId == 1 && p.Data == 1)
+                && m.AttrModTypes.Contains((int)EAttrModType.Base));
+        Assert.Single(reset.AttrModTypes);
+        Assert.Equal((int)EAttrModType.Base, reset.AttrModTypes[0]);
     }
 
     [ClientDataFact]

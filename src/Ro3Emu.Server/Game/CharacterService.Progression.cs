@@ -68,6 +68,9 @@ public sealed partial class CharacterService
         return $"Base level {p.Level}, job level {p.JobLevel}.";
     }
 
+    /// <summary>EXP just committed to a character: base and job (CheatMonitor.ExpGained keeps it per hour).</summary>
+    public List<Action<GameSession, long, long>> ExpCredited { get; } = [];
+
     /// <summary>Adds exp, levelling up through BaseLvConfig / JobLvConfig as needed.
     /// A kill reward may pass its role-owner check so a queued StateLock cannot credit a later role.</summary>
     public async Task<string> AddExpAsync(GameSession session, long baseExp, long jobExp, Func<bool>? stillOwner = null)
@@ -89,6 +92,7 @@ public sealed partial class CharacterService
         builder.WithEconomy(RewardMutation(session, expSource, p, staged, [], [],
             Math.Max(0, baseExp), Math.Max(0, jobExp), new ItemAutoDecomposeTipsNtf()));
         await roles.CommitAsync(builder, "character/exp", _ => CopyProgress(p, staged));
+        foreach (var credited in ExpCredited) credited(session, baseExp, Math.Max(0, jobExp));
         if (stillOwner?.Invoke() == false || session.Attachment?.Cancelled == true) return string.Empty;
         var rewards = new Romsg.GetRewardNotify { TargetUid = session.Role!.Id };
         if (baseExp > 0) rewards.Rewards.Add(ItemInfo(new InvItem { Entry = BaseExpItem, Stack = (int)Math.Min(baseExp, int.MaxValue) }));
@@ -120,9 +124,8 @@ public sealed partial class CharacterService
         while (p.JobLevel < maxJob && JobLvRow(p.Career, p.JobLevel) is { } row && GameData.Int(row, "_iJobeExp") == 0) p.JobLevel++;
     }
 
-    /// <param name="levelUp">The base level rose: the client floats the attribute gains, and HP/SP refill to the new
-    /// maximum (inferred: classic RO heals fully on a base level up; the client shows no rule). Without it a level 3
-    /// Novice ends the first quest's five level 5 Porings near 20 of 129 HP, though it levels up after the third.</param>
+    /// <param name="levelUp">The base level rose: HP and SP refill to the new maximum (inferred: classic RO heals fully on
+    /// a base level up and the client shows no rule of its own; from akreao's fork).</param>
     private async Task AfterLevelChangeAsync(GameSession session, Func<bool>? stillOwner = null, bool persist = true, bool levelUp = false)
     {
         var p = session.Progress!;
@@ -217,7 +220,7 @@ public sealed partial class CharacterService
         await CommitStatsAsync(session, "stat-reset", p, plans);
         await session.SendGameAsync(ResetAttrPoints, new ResetAttrPointResp { Result = 0, PlanIndex = index, PlanBaseProperty = plan.Clone() });
         await SendStatPlanAsync(session);
-        if (index == plans.CurPlanIndex) await SendStatsAsync(session);
+        if (index == plans.CurPlanIndex) await SendStatsAsync(session, showChange: true);
         foreach (var handler in ProgressHandlers) await handler(session);
         foreach (var handler in StateChanged) handler(session);
     }

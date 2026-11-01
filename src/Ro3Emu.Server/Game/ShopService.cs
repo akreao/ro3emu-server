@@ -42,7 +42,10 @@ public sealed partial class ShopService(GameData data, CharacterService characte
     private readonly Maps.WorldData _world = world;
     private readonly ILogger<ShopService> _log = log;
     private TimeSpan _lastTick;
+    /// <summary>The game day the online roles were last synced for. Taken when the server starts: taken by the first
+    /// throttled tick instead (a second into the loop), it missed a rollover that came before it.</summary>
     private DateTime _gameDay = DailyActivityService.GameDay(clock.GetLocalNow().DateTime);
+    private long Now => _clock.GetUtcNow().ToUnixTimeSeconds();
 
     /// <summary>
     /// At the 05:00 game-day rollover the online roles get 5024 again: their daily (and on Monday weekly, on the 1st
@@ -90,6 +93,7 @@ public sealed partial class ShopService(GameData data, CharacterService characte
         if (migrated) Save(session);
         await SyncAsync(session);
         await session.SendGameRawAsync(CashShopMsg, Encoding.UTF8.GetBytes(_freeCashShop ? "{\"free\":true}" : "{\"free\":false}"));
+        await LoginGiftsAsync(session);
     }
 
     /// <summary>

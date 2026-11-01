@@ -6,7 +6,7 @@ using Ro3Emu.Server.Maps;
 
 namespace Ro3Emu.Tests;
 
-/// <summary>Class companions: the falcon, the Demonic Wolf and the Madogear (CombatService.Companions).</summary>
+/// <summary>Class companions: the falcon, the Demonic Wolf and the Madogear (CombatService.ClassCompanions).</summary>
 public sealed partial class SkillCombatTests
 {
     private const int FalconLease = 1500100, MadogearLease = 1500300, WolfLease = 1500400;

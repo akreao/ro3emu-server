@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Globalization;
 using System.Text.Json;
 using Google.Protobuf;
 using Romsg;
@@ -26,13 +27,17 @@ public sealed partial class ChatService
     private readonly GameData _data;
     private readonly SessionRegistry _sessions;
     private readonly IOptions<ServerOptions> _options;
+    private readonly ChatFloodGuard _flood;
     private readonly ILogger<ChatService> _log;
+    private readonly CheatMonitor _cheats;
 
     public ChatService(GmCommands gm, FeedbackService feedback, GuildStore guilds, FriendStore friends, CharacterService character,
-        GameData data, SessionRegistry sessions, IOptions<ServerOptions> options, ILogger<ChatService> log)
+        GameData data, SessionRegistry sessions, IOptions<ServerOptions> options, ChatFloodGuard flood, ILogger<ChatService> log,
+        CheatMonitor cheats)
     {
+        this._cheats = cheats;
         this._gm = gm; this._feedback = feedback; this._guilds = guilds; this._friends = friends; this._character = character; this._data = data;
-        this._sessions = sessions; this._options = options; this._log = log;
+        this._sessions = sessions; this._options = options; this._flood = flood; this._log = log;
         character.RegisterItemAction(SoundTransmissionAction, UseHornAsync, takesParam: true);
     }
 
@@ -129,9 +134,8 @@ public sealed partial class ChatService
         lock (_sync)
         {
             if (session.Role != null && _online.TryGetValue(session.Role.Id, out var s) && s == session) _online.Remove(session.Role.Id);
-            foreach (var group in session.ChatGroups) RemoveMember(group, session);
+            foreach (var group in session.ChatGroups) if (_groups.TryGetValue(group, out var members)) members.Remove(session);
             session.ChatGroups.Clear();
-            _sendBudget.Remove(session);
         }
     }
 
@@ -150,18 +154,10 @@ public sealed partial class ChatService
     /// </summary>
     public async Task JoinAsync(GameSession session, JoinChatChannelReq req)
     {
-        bool tooMany;
-        lock (_sync) tooMany = session.ChatGroups.Count >= MaxJoinedGroups && !session.ChatGroups.Contains(req.GroupId);
-        if (req.GroupId.Length > MaxReceiveIdChars || tooMany)
-        {
-            _log.LogWarning("Chat join of {Name} refused: {Length}-character id, {Joined} channels joined",
-                session.Role?.Name, req.GroupId.Length, session.ChatGroups.Count);
-            await session.SendGameAsync(JoinChannel, new JoinChatChannelRsp { Result = ErrorCodes.Parameter, Req = req });
-            return;
-        }
         if (!GuildAllowed(session, req.GroupId))
         {
-            await session.SendGameAsync(JoinChannel, new JoinChatChannelRsp { Result = ErrorCodes.NotInGuild, Req = req });
+            int refusal = req.GroupId.StartsWith(TavernPrefix, StringComparison.Ordinal) ? ErrorCodes.TavernNotInRoom : ErrorCodes.NotInGuild;
+            await session.SendGameAsync(JoinChannel, new JoinChatChannelRsp { Result = refusal, Req = req });
             return;
         }
         bool newlyJoined = Join(session, req.GroupId);
@@ -170,7 +166,7 @@ public sealed partial class ChatService
         // lines already delivered to this session. Leaving/rejoining starts a fresh subscription.
         if (!newlyJoined) return;
         List<TextChatMessage> recent;
-        lock (_sync) recent = _recent.TryGetValue(HistoryKey(req.GroupId, session), out var history) ? history.Lines.ToList() : new();
+        lock (_sync) recent = _recent.TryGetValue(HistoryKey(req.GroupId, session), out var lines) ? lines.ToList() : new();
         long runtime = session.WorldScene, generation = session.SceneGeneration;
         foreach (var line in recent)
         {
@@ -183,75 +179,80 @@ public sealed partial class ChatService
     private const int RecentLines = 20;
     private static bool GuildChannel(string group) => group.StartsWith("2_", StringComparison.Ordinal);
 
-    /// <summary>Tavern membership of chat channel 10 (TavernService.InRoom), set by ServerHost.</summary>
-    public Func<long, long, bool>? TavernMember { get; set; }
-
-    /// <summary>EChannelBarRoom (10): "10_&lt;room&gt;", optionally with Tencent's "@TGS#_" prefix (LC_ChatHelper).</summary>
-    private static bool TavernChannel(string group, out long room)
-    {
-        room = 0;
-        string rest = group.StartsWith("@TGS#_", StringComparison.Ordinal) ? group[6..] : group;
-        return rest.StartsWith("10_", StringComparison.Ordinal) && long.TryParse(rest.AsSpan(3), out room) && room > 0
-            && rest == $"10_{room}";
-    }
-
-    /// <summary>A role left a Tavern room: its chat channel stops reaching it.</summary>
-    public void TavernLeft(GameSession session, long room)
-    {
-        Leave(session, $"10_{room}");
-        Leave(session, $"@TGS#_10_{room}");
-    }
-
     private bool GuildAllowed(GameSession session, string group)
     {
-        if (group.StartsWith("10_", StringComparison.Ordinal) || group.StartsWith("@TGS#_10_", StringComparison.Ordinal))
-            return TavernChannel(group, out long room) && session.Role != null && TavernMember?.Invoke(session.Role.Id, room) == true;
+        if (group.StartsWith(TavernPrefix, StringComparison.Ordinal))
+            return long.TryParse(group.AsSpan(TavernPrefix.Length), out long room) && room > 0 && group == TavernPrefix + room
+                && session.Role != null && TavernMember?.Invoke(session.Role.Id, room) == true;
         if (group.StartsWith("5_", StringComparison.Ordinal))
             return long.TryParse(group.AsSpan(2), out long groupId) && groupId > 0 && group == $"5_{groupId}"
                 && session.Role != null && _friends.Group(groupId.ToString()) is { } chatGroup
                 && chatGroup.Members.Any(m => m.Role == session.Role.Id);
+        if (TeamChannelId(group) is { } teamId) return session.Role != null && TeamChannelAllowed?.Invoke(session, teamId) != false;
         if (!GuildChannel(group)) return true;
         // Canonical spelling is required so leaving 2_<id> always removes the exact joined group.
         return long.TryParse(group.AsSpan(2), out long guildId) && guildId > 0
             && group == $"2_{guildId}" && session.Role != null && _guilds.ForRole(session.Role.Id)?.Id == guildId;
     }
 
-    public void GuildMembershipChanged(GameSession session, long formerGuildId) => Leave(session, $"2_{formerGuildId}");
-    /// <summary>Friend group removal revokes an already joined IM channel before the next message.</summary>
-    public void FriendMembershipChanged(GameSession session, string formerGroupId) => Leave(session, $"5_{formerGroupId}");
+    /// <summary>
+    /// Why a chat line is refused before it is looked at, or null: longer than AntiCheatOptions.ChatMaxLength (its text or
+    /// extra parameter), or over the session's AntiCheatOptions.ChatLines budget (a GM's commands excepted). The client's own
+    /// input field is far shorter and nobody types that fast (inferred). It is the hard per-session cap, checked first and
+    /// counted by CheatMonitor; a line it refuses never reaches the operator's flood policy (FloodRefusedAsync, Ro3Emu:ChatFlood,
+    /// with its mute), which is stricter when on and so decides first for ordinary spam.
+    /// </summary>
+    private string? ChatRefusal(GameSession sender, SendTextChatMessageRequest req)
+    {
+        var limits = _options.Value.AntiCheat;
+        if (req.Content.Length > limits.ChatMaxLength || req.ExtraParam.Length > limits.ChatMaxLength * 8)
+            return $"line of {req.Content.Length} characters (extra {req.ExtraParam.Length}) to {req.ReceiveId}";
+        if (_gm.IsCommand(req.Content) && _gm.Allowed(sender)) return null; // a GM's command lines are not chat
+        sender.ChatLines ??= RateBucket.Parse(limits.ChatLines) ?? new RateBucket(1, 10);
+        return sender.ChatLines.TryTake(Environment.TickCount64) ? null : $"line to {req.ReceiveId} over the chat rate";
+    }
 
     /// <summary>
-    /// Recent lines per channel, replayed on join. Any client can name a new channel id, so the store is bounded as a whole:
-    /// past <see cref="MaxRecentGroups"/> channels or <see cref="MaxRecentChars"/> stored characters (~8 MB of UTF-16), the
-    /// channels written to least recently lose their history first.
+    /// Set by TeamService: whether the session may use team channel <c>3_&lt;teamId&gt;</c> (LC_ChatHelper builds it from the
+    /// prefix, "3_" and the party's or the Survivor team's id). Unset, every team channel is open as before.
     /// </summary>
-    private readonly Dictionary<(string Group, long Runtime), History> _recent = new();
-    private readonly LinkedList<History> _recentOrder = new(); // least recently written first
-    private long _recentChars;
-    internal const int MaxRecentGroups = 2048, MaxRecentChars = 4_000_000;
+    public Func<GameSession, long, bool>? TeamChannelAllowed { get; set; }
 
-    private sealed class History((string Group, long Runtime) key)
+    private static long? TeamChannelId(string group)
     {
-        public (string Group, long Runtime) Key { get; } = key;
-        public Queue<TextChatMessage> Lines { get; } = new();
-        public long Chars;
-        public LinkedListNode<History>? Node;
+        string rest = group.StartsWith("@TGS#_3_", StringComparison.Ordinal) ? group[8..]
+            : group.StartsWith("3_", StringComparison.Ordinal) ? group[2..] : "";
+        return long.TryParse(rest, NumberStyles.None, CultureInfo.InvariantCulture, out long id) && id.ToString(CultureInfo.InvariantCulture) == rest
+            ? id : null;
     }
 
-    private static int Size(TextChatMessage line) =>
-        line.Content.Length + line.ExtraParam.Length + line.ReceiveId.Length + line.SenderId.Length + line.MessageId.Length;
+    public void GuildMembershipChanged(GameSession session, long formerGuildId) => Leave(session, $"2_{formerGuildId}");
 
-    private void DropHistory(History history)
+    /// <summary>A Tavern room's chat is public channel 10, group "10_&lt;guid&gt;" (LC_ChatHelper, ChatChannelType
+    /// EChannelBarRoom); only the room's members may join it or write there (TavernService).</summary>
+    public const string TavernPrefix = "10_";
+
+    /// <summary>Whether role may use Tavern room guid's channel; set by TavernService.</summary>
+    public Func<long, long, bool>? TavernMember { get; set; }
+
+    /// <summary>A member left (or was removed from) a Tavern room: its subscription goes before the next line.</summary>
+    public void TavernLeft(GameSession session, long room) => Leave(session, TavernPrefix + room);
+
+    /// <summary>A Tavern room closed: its channel and the lines kept for late joiners go with it.</summary>
+    public void TavernClosed(long room)
     {
-        _recent.Remove(history.Key);
-        _recentOrder.Remove(history.Node!);
-        _recentChars -= history.Chars;
+        string group = TavernPrefix + room;
+        lock (_sync)
+        {
+            _recent.Remove((group, 0));
+            if (_groups.Remove(group, out var members))
+                foreach (var member in members) member.ChatGroups.Remove(group);
+        }
     }
 
-    /// <summary>Channels with history (tests).</summary>
-    internal int RecentGroupCount { get { lock (_sync) return _recent.Count; } }
-    /// <summary>Channels with at least one joined session (tests).</summary>
-    internal int GroupCount { get { lock (_sync) return _groups.Count; } }
+    /// <summary>Friend group removal revokes an already joined IM channel before the next message.</summary>
+    public void FriendMembershipChanged(GameSession session, string formerGroupId) => Leave(session, $"5_{formerGroupId}");
+    private readonly Dictionary<(string Group, long Runtime), Queue<TextChatMessage>> _recent = new();
 
     // LC_ChatHelper:5194-5225 uses runtime scene id, optionally with Tencent's prefix.
     // Scope legacy/shared channel spellings too; membership is never permission to listen across lines.
@@ -264,7 +265,7 @@ public sealed partial class ChatService
     {
         lock (_sync)
         {
-            foreach (var history in _recent.Values.Where(h => h.Key.Runtime == map.WorldScene).ToArray()) DropHistory(history);
+            foreach (var key in _recent.Keys.Where(k => k.Runtime == map.WorldScene).ToArray()) _recent.Remove(key);
             foreach (string group in new[] { $"4_{map.WorldScene}", $"@TGS#_4_{map.WorldScene}" })
                 if (_groups.Remove(group, out var members))
                     foreach (var member in members) member.ChatGroups.Remove(group);
@@ -277,28 +278,9 @@ public sealed partial class ChatService
         lock (_sync)
         {
             var key = sender == null ? (message.ReceiveId, 0L) : HistoryKey(message.ReceiveId, sender);
-            if (!_recent.TryGetValue(key, out var history))
-            {
-                _recent[key] = history = new History(key);
-                history.Node = _recentOrder.AddLast(history);
-            }
-            else
-            {
-                _recentOrder.Remove(history.Node!);
-                _recentOrder.AddLast(history.Node!);
-            }
-            history.Lines.Enqueue(message);
-            int size = Size(message);
-            history.Chars += size;
-            _recentChars += size;
-            while (history.Lines.Count > RecentLines)
-            {
-                int old = Size(history.Lines.Dequeue());
-                history.Chars -= old;
-                _recentChars -= old;
-            }
-            while ((_recent.Count > MaxRecentGroups || _recentChars > MaxRecentChars) && _recentOrder.First!.Value != history)
-                DropHistory(_recentOrder.First.Value);
+            if (!_recent.TryGetValue(key, out var lines)) _recent[key] = lines = new();
+            lines.Enqueue(message);
+            while (lines.Count > RecentLines) lines.Dequeue();
         }
     }
 
@@ -352,18 +334,15 @@ public sealed partial class ChatService
         }
     }
 
-    /// <summary>
-    /// Upper bounds of one chat line. The client's input box and link cards stay far below them; a modified client could
-    /// otherwise push a megabyte line to every member of a channel and into the 20-line history of each group id.
-    /// </summary>
-    internal const int MaxContentChars = 1024, MaxExtraParamChars = 8192, MaxReceiveIdChars = 128;
+    /// <summary>A line delivered on a group channel, with the ChatChannelType its id starts with ("2_guild"; quest
+    /// target 103020, TaskService.MiscTargets.cs).</summary>
+    public List<Action<GameSession, int>> TextSent { get; } = [];
 
     private async Task SendTextAsync(GameSession sender, SendTextChatMessageRequest req)
     {
-        if (req.Content.Length > MaxContentChars || req.ExtraParam.Length > MaxExtraParamChars || req.ReceiveId.Length > MaxReceiveIdChars)
+        if (ChatRefusal(sender, req) is { } refusal)
         {
-            _log.LogWarning("Chat from {Name} refused: {Content} content, {Extra} extra and {Receive} receiver characters",
-                sender.Role!.Name, req.Content.Length, req.ExtraParam.Length, req.ReceiveId.Length);
+            _cheats.Refused(sender, CheatMonitor.Chat, refusal);
             await DownAsync(sender, Cmd.SendText, new SendTextChatMessageResponse { ChatResult = false });
             return;
         }
@@ -405,12 +384,7 @@ public sealed partial class ChatService
             return;
         }
 
-        if (!TakeSendBudget(sender))
-        {
-            _log.LogWarning("Chat from {Name} refused: over {Rate} lines/s", sender.Role.Name, SendLinesPerSecond);
-            await DownAsync(sender, Cmd.SendText, new SendTextChatMessageResponse { ChatResult = false });
-            return;
-        }
+        if (await FloodRefusedAsync(sender, req)) return;
 
         List<GameSession> recipients;
         bool local = req.ChatType != ChatTypePrivate && MapChannel(req.ReceiveId);
@@ -444,10 +418,15 @@ public sealed partial class ChatService
             }
             recipients = recipients.Where(p => GuildAllowed(p, req.ReceiveId)).ToList();
         }
+        if (req.ChatType != ChatTypePrivate && TeamChannelId(req.ReceiveId) != null)
+            recipients = [.. recipients.Where(p => p == sender || GuildAllowed(p, req.ReceiveId))];
         if (req.ChatType != ChatTypePrivate) Remember(message, sender);
         _log.LogInformation("Chat {Name} -> {Target} ({Count} recipient(s)): {Text}", sender.Role.Name, req.ReceiveId, recipients.Count, req.Content);
 
         await DownAsync(sender, Cmd.SendText, new SendTextChatMessageResponse { ChatResult = true, Msg = message });
+        if (req.ChatType != ChatTypePrivate && int.TryParse(req.ReceiveId.AsSpan(0, Math.Max(0, req.ReceiveId.IndexOf('_'))),
+            NumberStyles.None, CultureInfo.InvariantCulture, out int channel))
+            foreach (var handler in TextSent) handler(sender, channel);
         // Every recipient gets the push, the sender included: the send response alone does not add the line.
         var push = new NotifyNewTextChatMessage { Msg = message };
         foreach (var to in recipients)
@@ -530,40 +509,6 @@ public sealed partial class ChatService
             catch (Exception e) when (e is IOException or System.Net.Sockets.SocketException or ObjectDisposedException) { }
     }
 
-    /// <summary>
-    /// Lines a session may show to others: a burst of <see cref="SendBurst"/>, refilled at <see cref="SendLinesPerSecond"/>.
-    /// Far above anyone typing; it stops a modified client flooding channels. GM, player and /bug commands are not counted.
-    /// </summary>
-    internal const int SendBurst = 20, SendLinesPerSecond = 5;
-    private readonly Dictionary<GameSession, (double Tokens, long Stamp)> _sendBudget = new();
-    internal Func<long> Clock { get; set; } = () => Environment.TickCount64;
-
-    private bool TakeSendBudget(GameSession session)
-    {
-        lock (_sync)
-        {
-            long now = Clock();
-            double tokens = _sendBudget.TryGetValue(session, out var budget)
-                ? Math.Min(SendBurst, budget.Tokens + (now - budget.Stamp) * SendLinesPerSecond / 1000.0)
-                : SendBurst;
-            if (tokens < 1)
-            {
-                _sendBudget[session] = (tokens, now);
-                return false;
-            }
-            _sendBudget[session] = (tokens - 1, now);
-            return true;
-        }
-    }
-
-    /// <summary>Channels one session may be in at once; the client joins about a dozen.</summary>
-    internal const int MaxJoinedGroups = 128;
-
-    private void RemoveMember(string group, GameSession session)
-    {
-        if (_groups.TryGetValue(group, out var members) && members.Remove(session) && members.Count == 0) _groups.Remove(group);
-    }
-
     private bool Join(GameSession session, string group)
     {
         lock (_sync)
@@ -579,7 +524,7 @@ public sealed partial class ChatService
     {
         lock (_sync)
         {
-            RemoveMember(group, session);
+            if (_groups.TryGetValue(group, out var members)) members.Remove(session);
             session.ChatGroups.Remove(group);
         }
     }

@@ -21,7 +21,7 @@ public sealed partial class WorldCoreService
     /// <summary>After flight starts or ends: the mount's ground/air buffs (CombatService) and its wheel slot (SkillService).</summary>
     public List<Func<GameSession, Task>> FlightChanged { get; } = new();
 
-    /// <summary>CombatService.BeforeCast: the ridden flying mount's take-off on the ground, its landing in the air.</summary>
+    /// <summary>CombatService.BeforeCastSkill: the ridden flying mount's take-off on the ground, its landing in the air.</summary>
     internal async Task MountFlightCastAsync(GameSession s, int skillId)
     {
         if (MountService.FlySkills(s, _data) is not { } fly) return;

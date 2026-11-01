@@ -61,7 +61,7 @@ public sealed class WorldRoleOperationsTests : IAsyncLifetime
     private async Task Gm(string account, string command)
     {
         using var http = new HttpClient();
-        var response = await http.PostAsync($"{_http}/ro3emu/gm?account={account}", new StringContent(command));
+        var response = await http.PostAsync($"{_http}/ro3emu/gm?account={account}", Operator.Command(command));
         response.EnsureSuccessStatusCode();
     }
 
@@ -167,6 +167,10 @@ public sealed class WorldRoleOperationsTests : IAsyncLifetime
             Assert.Equal(0, (await Next(alice, CharacterService.ChangeStatPlan, PlanAttrPointChangeResq.Parser)).Result);
             var swapped = await Next(alice, CharacterService.BaseAttrSync, BaseAttrInfoIncrement.Parser, m => !m.SyncAllMark && m.CurPlanIndex == 1);
             Assert.Equal(1, swapped.CurPlanIndex);
+            var tankStats = await Next(alice, CharacterService.OnePropertyChange, OnePropertyChange.Parser,
+                m => m.Property.Propertys.Any(p => p.PropertyId == 1 && p.Data == 1));
+            Assert.Single(tankStats.AttrModTypes);
+            Assert.Equal((int)EAttrModType.Base, tankStats.AttrModTypes[0]);
 
             await alice.SendGameAsync(CharacterService.ChangeStatPlan, new PlanAttrPointChangeReq { DestPlanIndex = 77 });
             var rejected = await Next(alice, CharacterService.ChangeStatPlan, PlanAttrPointChangeResq.Parser);
@@ -175,6 +179,10 @@ public sealed class WorldRoleOperationsTests : IAsyncLifetime
 
             await alice.SendGameAsync(CharacterService.ChangeStatPlan, new PlanAttrPointChangeReq { DestPlanIndex = 0 });
             Assert.Equal(0, (await Next(alice, CharacterService.ChangeStatPlan, PlanAttrPointChangeResq.Parser)).Result);
+            var attackStats = await Next(alice, CharacterService.OnePropertyChange, OnePropertyChange.Parser,
+                m => m.Property.Propertys.Any(p => p.PropertyId == 1 && p.Data == 5));
+            Assert.Single(attackStats.AttrModTypes);
+            Assert.Equal((int)EAttrModType.Base, attackStats.AttrModTypes[0]);
         }
         await using var again = await InWorld("Alice", create: false);
         var plans = await Next(again, CharacterService.BaseAttrSync, BaseAttrInfoIncrement.Parser);
@@ -264,6 +272,9 @@ public sealed class WorldRoleOperationsTests : IAsyncLifetime
             Assert.Equal(50, saved.SetData.Condition);
             Assert.Equal([1000000, 0, 0], saved.SetData.ItemEntrys);
 
+            // Not an archer (PublicParamConfig ArrowsCanUseJob): even the endless Fire Arrow must be owned.
+            await alice.SendGameAsync(CharacterService.ArrowSwitch, new ItemArrowSwitchReq { ItemId = 1002012 });
+            Assert.Equal(ErrorCodes.ItemMissing, (await Next(alice, CharacterService.ArrowSwitch, ItemArrowSwitchResp.Parser)).Result);
             await alice.SendGameAsync(CharacterService.ArrowSwitch, new ItemArrowSwitchReq { ItemId = 1002011 });
             Assert.Equal(ErrorCodes.ItemMissing, (await Next(alice, CharacterService.ArrowSwitch, ItemArrowSwitchResp.Parser)).Result);
             await Gm("alice", "!item 1002011 10");

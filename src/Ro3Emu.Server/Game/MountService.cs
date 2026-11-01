@@ -30,6 +30,13 @@ public sealed class MountService : IGameTicker
     private readonly WardrobeService _wardrobe;
     private TimeSpan _lastTick;
     private const string ExpiryKey = "mount-expiry";
+    private const int SystemSlot = 1;
+
+    /// <summary>
+    /// How long a cast waits after its rider got off (inferred): the client has no duration for the dismount, which is a
+    /// Unity animation and the RideMountFxPath effect (LC_MountComponent.GetDown), not a config row.
+    /// </summary>
+    public const int DismountMs = 500;
 
     /// <summary>5012 plus durable claim/preview/quest state not carried by that dataset (inferred storage layout).</summary>
     public sealed class SavedState
@@ -42,9 +49,10 @@ public sealed class MountService : IGameTicker
 
     public MountService(GameData data, CharacterService character, RoleStore roles, FunctionService functions,
         World world, GameLoop loop, SessionRegistry sessions, SceneService scenes, Deadlines deadlines, TimeProvider clock,
-        WardrobeService wardrobe)
+        WardrobeService wardrobe, CombatService combat)
     {
         this._wardrobe = wardrobe;
+        combat.BeforeCast = DismountForCastAsync;
         this._data = data; this._character = character; this._roles = roles; this._functions = functions;
         this._world = world; this._loop = loop; this._sessions = sessions; this._deadlines = deadlines; this._clock = clock;
         character.ExtraAttributes.Add(Attributes);
@@ -259,28 +267,36 @@ public sealed class MountService : IGameTicker
         if (error == 0)
         {
             var next = s.Mounts.Clone(); var state = CopyState(s); state.QuestMount = 0;
-            foreach (var (key, value) in next.MountIds) if (key == slot || on) value.IsRiding = key == slot && on;
+            // Both rides can be on at once: the client shows the system mount over the battle mount
+            // (LC_MountHelper.GetRidingMountId), and its battle mount button takes a rider on both off the system mount,
+            // back onto the battle mount (UI_Sys_Main_MountJobWidgetCtrl._onClickMount). So getting on the system mount
+            // (auto-pathing does it by itself, LC_Actor_ControlMove._tryRideSystemMount) keeps the battle ride, and the
+            // dismount before a cast lands the rider on it again; getting on the battle mount ends a system ride (inferred).
+            foreach (var (key, value) in next.MountIds)
+                if (key == slot) value.IsRiding = on;
+                else if (on && slot == 2) value.IsRiding = false;
             await CommitAsync(s, next, state);
         }
         await s.SendGameAsync(Ride, new PlayerRiderMountResp { Result = error, Tp = tp });
     }
 
     /// <summary>
-    /// CombatService.BeforeCast: an accepted skill gets the rider off a system mount (slot 1) first. The client never asks
-    /// to dismount for a skill: LC_State_Unit_Skill waits while m_kMountComp.m_bRideSystemMount is set and drops the skill
-    /// once its chant and action time have passed, so the server's change must reach it before the cast does.
-    /// The riding mount's _kFlySwitchSkills (the fly mounts' take-off and landing) are cast mounted. Quest mounts and
-    /// battle mounts (slot 2) stay ridden. Caller holds CharacterService.Lock.
+    /// CombatService.BeforeCast: a rider casts or attacks, so it gets off a system mount first, without refusing the cast.
+    /// The client never sends the dismount itself (only an interaction skill does, UI_Sys_MainRoleSkillWidgetCtrl.lua:481-488)
+    /// and holds a skill while its unit rides a system mount until the ride ends (LC_State_Unit_Skill.lua:51-71), so the
+    /// ride ends here, before the cast's timeline and hit. A battle mount is ridden into the fight, and a flying rider
+    /// keeps its mount (inferred). The caller holds the character lock.
     /// </summary>
-    internal async Task DismountForCastAsync(GameSession s, int skillId)
+    /// <returns>The milliseconds the cast waits for the dismount to play, zero when nobody got off.</returns>
+    private async Task<int> DismountForCastAsync(GameSession s)
     {
-        if (s.Mounts == null || s.MountState.QuestMount != 0) return;
-        if (!s.Mounts.MountIds.TryGetValue(1, out var system) || !system.IsRiding) return;
-        if (Config(system.MountId) is { } row && row.TryGetProperty("_kFlySwitchSkills", out var fly)
-            && fly.ValueKind == JsonValueKind.Array && fly.EnumerateArray().Any(v => GameData.Number(v) == skillId)) return;
-        var next = s.Mounts.Clone();
-        next.MountIds[1].IsRiding = false;
-        await CommitAsync(s, next, CopyState(s));
+        long id = s.Mounts == null ? 0 : Rider(s);
+        if (id == 0 || Slot(id) != SystemSlot || s.WorldState.Flying) return 0;
+        var next = s.Mounts!.Clone();
+        if (next.MountIds.TryGetValue(SystemSlot, out var choice)) choice.IsRiding = false;
+        var state = CopyState(s); state.QuestMount = 0;
+        await CommitAsync(s, next, state);
+        return DismountMs;
     }
 
     private SavedState CopyState(GameSession s) => JsonSerializer.Deserialize<SavedState>(Encode(s))!;

@@ -32,6 +32,7 @@ public sealed partial class BuffService
         9023 => 20,
         12003 => 11,
         9034 => 25,
+        49090 => 66, // Blessing of Light (4909001): SpecialStatusConfig 66 光明庇护, _kForbidden [10] (inferred pairing)
         _ => 0,
     };
 

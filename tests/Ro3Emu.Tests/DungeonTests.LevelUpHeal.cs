@@ -3,7 +3,7 @@ using Ro3Emu.Server.Game;
 
 namespace Ro3Emu.Tests;
 
-/// <summary>A base level up refills HP and SP (classic RO): the first quest's Porings level a Novice mid-fight.</summary>
+/// <summary>A base level up refills HP and SP (classic RO, from akreao's fork): the first quest's Porings level a Novice mid-fight.</summary>
 public sealed partial class DungeonTests
 {
     [ClientDataFact]
