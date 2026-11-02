@@ -12,7 +12,7 @@ namespace Ro3Emu.Server.Game;
 public sealed partial class CombatService
 {
     private sealed record EventAttack(GameSession Target, int SkillId, long NextSwing, float StartX, float StartZ);
-    private readonly Dictionary<GameSession, EventAttack> _eventAttacks = new();
+    private readonly Dictionary<GameSession, EventAttack> _eventAttacks = [];
     private Func<GameSession, GameSession, bool>? _eventCanFight;
     private Func<GameSession, GameSession, Task>? _eventPlayerKilled;
 
@@ -38,7 +38,7 @@ public sealed partial class CombatService
     {
         float radius = (row.TryGetProperty("_kRange", out var range) && range.ValueKind == JsonValueKind.Array
             && range.GetArrayLength() > 0 ? (float)(Data.GameData.Number(range[0]) ?? 300) : 300) / 100f;
-        return _sessions.All().Where(p => CanPlayerHit(source, p) && PlayerDistance(source, p) <= radius + .5f).ToArray();
+        return [.. _sessions.All().Where(p => CanPlayerHit(source, p) && PlayerDistance(source, p) <= radius + .5f)];
     }
 
     private async Task SwingEventAsync(GameSession source, GameSession target, int skillId, long session)
@@ -57,7 +57,7 @@ public sealed partial class CombatService
         await StartCastAsync(source, row, request, session);
     }
     private async Task HitEventPlayersAsync(GameSession source, GameSession[] targets, JsonElement row,
-        int skillId, int show, long session, Func<bool> currentSource, Action<long, long>? onHit = null)
+        int skillId, int show, long session, Func<bool> currentSource, Action<long, long>? onHit = null, Vec3? center = null)
     {
         if (FirstNumber(row, "_kDamageParam1") is not > 0 && FirstNumber(row, "_kDamageParam2") is not > 0) return;
         foreach (var target in targets)
@@ -86,19 +86,23 @@ public sealed partial class CombatService
                 var hit = new SkillHitInfo
                 {
                     SrcID = attackerRole.Id, SkillId = skillId, ShowPoint = show, Split = HitSplit(row),
-                    SessionId = session, SrcElement = 1,
+                    SessionId = session, SrcElement = AttackElement(source, row),
                     Dsts = { new DamageInfo { DstID = targetRole.Id, Damage = damage, SheildDamage = shieldDamage, HitResult = result,
                     DstElement = 1, IsDead = hp == 0 } }
                 };
                 var sourceViewers = CurrentPlayerHit(source, target, attackerRole, targetRole, sceneId)
-                    ? _world.Viewers(source).Append(source) : Enumerable.Empty<GameSession>();
-                foreach (var viewer in sourceViewers.Concat(_world.Viewers(target)).Append(target).Distinct())
-                    await viewer.SendGameAsync(SkillHit, hit);
+                    ? _world.Viewers(source).Append(source) : [];
+                var hitViewers = sourceViewers.Concat(_world.Viewers(target)).Append(target).Distinct().ToArray();
+                await SendHitBulletsAsync(hitViewers, row, hit, attackerRole.Id);
+                foreach (var viewer in hitViewers) await viewer.SendGameAsync(SkillHit, hit);
                 if (!ReferenceEquals(target.Role, targetRole)) continue;
                 await _character.SetHpSpAsync(target, null, null); // publish current HP after the serialized reservation
                 if (!ReferenceEquals(target.Role, targetRole)) continue;
                 if (CurrentPlayerHit(source, target, attackerRole, targetRole, sceneId)) await FightingAsync(source);
                 await FightingAsync(target);
+                // The knockback or pull of a hit that left the target alive, as the same skill moves a monster.
+                if (hp > 0 && currentSource() && CurrentPlayerHit(source, target, attackerRole, targetRole, sceneId))
+                    await DisplacePlayerAsync(source, target, row, skillId, center);
                 if (hp == 0)
                 {
                     if (!ReferenceEquals(target.Role, targetRole)) continue;
@@ -150,7 +154,7 @@ public sealed partial class CombatService
     private (long Damage, DamageHitResult Result) PlayerHitDamage(GameSession source, GameSession target, JsonElement row)
     {
         var attack = _character.Stats(source); var defend = _character.Stats(target);
-        var a = PlayerAttacker(source, attack);
+        var a = PlayerAttacker(source, attack, AttackElement(source, row));
         var b = PlayerDefender(target, defend);
         var (damage, result) = Damage(a, b, row, bonusCrit: GuardianPetRules.CriticalChance(row),
             forceCrit: GuardianPetRules.CriticalAtHp(row, defend[AttributeId.Hp], defend[AttributeId.MaxHp]));

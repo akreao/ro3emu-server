@@ -14,7 +14,8 @@ namespace Ro3Emu.Server.Game;
 /// changes, 42051 when HP, SP, position or life state does. Parties live in memory (a server restart dissolves them).
 /// </summary>
 public sealed partial class TeamService(SessionRegistry sessions, CharacterService character, ChatService chat, RoleStore roles, FriendStore friends,
-    GameData data, SeasonService seasons, IOptions<ServerOptions> options, GameLoop loop, ILogger<TeamService> log) : IGameTicker
+    GameData data, SeasonService seasons, IOptions<ServerOptions> options, GameLoop loop, Maps.World world, ILogger<TeamService> log)
+    : IGameTicker
 {
     /// <summary>DungeonService supplies the authoritative role preference, allowances and Light of Bonds projection.</summary>
     public Func<GameSession, IReadOnlyList<long>, TeamMultiDungeonInfo>? MultiDungeonInfo { get; set; }
@@ -29,7 +30,7 @@ public sealed partial class TeamService(SessionRegistry sessions, CharacterServi
     private static readonly TimeSpan InviteLife = TimeSpan.FromSeconds(30);
 
     /// <summary>PublicParamConfig.TeamExpBuffNum (‱) by the number of members on the same map.</summary>
-    private static readonly int[] ExpBuff = [10000, 12500, 15000, 17500, 20000];
+    internal static readonly int[] ExpBuff = [10000, 12500, 15000, 17500, 20000];
 
     private const int MaxHp = 101, MaxSp = 102;
 
@@ -44,22 +45,22 @@ public sealed partial class TeamService(SessionRegistry sessions, CharacterServi
         public string Description = "", Name = "", Area = "";
         public bool AutoAgree;
         public long PlayBook;
-        public readonly Dictionary<int, TeamFlagInfo> Flags = new();
-        public readonly Dictionary<long, long> Applicants = new();
+        public readonly Dictionary<int, TeamFlagInfo> Flags = [];
+        public readonly Dictionary<long, long> Applicants = [];
         /// <summary>Guild League elites a quick elite team admits without the leader's approval (TeamService.Elite).</summary>
-        public readonly HashSet<long> Elites = new();
-        public readonly HashSet<long> ViceLeaders = new();
-        public readonly Dictionary<long, TeamMemberOnlineState> OnlineStates = new();
-        public readonly Dictionary<long, TeamMemberChatState> ChatStates = new();
-        public readonly HashSet<long> Muted = new(), Following = new();
-        public readonly Dictionary<long, (RallyTeamType Type, DateTimeOffset Expires)> Rallies = new();
-        public readonly List<long> Members = new(); // slot order = teamIndex
-        public readonly Dictionary<long, long> Joined = new();
+        public readonly HashSet<long> Elites = [];
+        public readonly HashSet<long> ViceLeaders = [];
+        public readonly Dictionary<long, TeamMemberOnlineState> OnlineStates = [];
+        public readonly Dictionary<long, TeamMemberChatState> ChatStates = [];
+        public readonly HashSet<long> Muted = new(), Following = [];
+        public readonly Dictionary<long, (RallyTeamType Type, DateTimeOffset Expires)> Rallies = [];
+        public readonly List<long> Members = []; // slot order = teamIndex
+        public readonly Dictionary<long, long> Joined = [];
         // The last card and battle info sent for each member; protobuf value equality detects changes.
-        public readonly Dictionary<long, TeamMemberDetailInfo> LastCard = new();
-        public readonly Dictionary<long, TeamMemberBattleInfo> LastBattle = new();
+        public readonly Dictionary<long, TeamMemberDetailInfo> LastCard = [];
+        public readonly Dictionary<long, TeamMemberBattleInfo> LastBattle = [];
         // Offline members' role row, read once instead of on every 2 s refresh; dropped when they come back online.
-        public readonly Dictionary<long, Role?> Offline = new();
+        public readonly Dictionary<long, Role?> Offline = [];
     }
 
     private readonly SessionRegistry _sessions = sessions;
@@ -72,9 +73,9 @@ public sealed partial class TeamService(SessionRegistry sessions, CharacterServi
     private readonly IOptions<ServerOptions> _options = options;
     private readonly ILogger<TeamService> _log = log;
     private readonly GameLoop _loop = loop;
-    private readonly Dictionary<long, Team> _teams = new();
-    private readonly Dictionary<long, Team> _byMember = new();
-    private readonly Dictionary<(long Target, long Team), DateTime> _invites = new();
+    private readonly Dictionary<long, Team> _teams = [];
+    private readonly Dictionary<long, Team> _byMember = [];
+    private readonly Dictionary<(long Target, long Team), DateTime> _invites = [];
     private long _nextId = 1L << 24;
     private TimeSpan _sinceUpdate;
 
@@ -105,12 +106,46 @@ public sealed partial class TeamService(SessionRegistry sessions, CharacterServi
 
     private async Task NotifyRosterAsync(IReadOnlyList<long> roles)
     {
+        foreach (long role in roles)
+            if (Session(role) is { } member) await SyncUnitTeamAsync(member);
         foreach (var handler in RosterChanged) await handler(roles);
     }
+
+    /// <summary>
+    /// 31049 SYNC_ENTITY_BASE_CHANGE with NotifyType TeamInfo puts the party id on the member's unit (EntityBase.teamId,
+    /// LC_Scene_Sync._syncEntityBaseViewChange) for itself and everyone who sees it. LC_CampRelationStrategy_Default
+    /// .IsSameTeamAndGroupByUnit compares these ids: only then are party members the same group, whose 31049 life status
+    /// reaches the party frame at once (UpdateAOIPlayerLifeStatus) instead of with the next 42051.
+    /// </summary>
+    private async Task SyncUnitTeamAsync(GameSession s)
+    {
+        if (s.Role is not { } role) return;
+        long teamId = TeamOf(role.Id).TeamId;
+        if (s.UnitTeamId == teamId) return;
+        s.UnitTeamId = teamId;
+        var change = new EntityBase { Uuid = (ulong)role.Id, TeamId = teamId, NotifyType = EntityBase.Types.NotifyType.TeamInfo };
+        await s.SendGameAsync(CombatService.EntityBaseChange, change);
+        foreach (var viewer in world.Viewers(s)) await viewer.SendGameAsync(CombatService.EntityBaseChange, change);
+    }
+
+    /// <summary>
+    /// ChatService.TeamChannelAllowed: a party's channel is its members'; an id that is no party (a Survivor team, whose ids are
+    /// small, while party ids start at 2^24) stays open.
+    /// </summary>
+    public bool ChannelAllowed(GameSession s, long teamId) =>
+        !_teams.ContainsKey(teamId) || s.Role is { } role && TeamOf(role.Id).TeamId == teamId;
 
     /// <summary>The party a role is in: (team id, leader), or (0, the role itself) when solo.</summary>
     public (long TeamId, long Leader) TeamOf(long role) =>
         _byMember.TryGetValue(role, out var team) ? (team.Id, team.Leader) : (0, role);
+
+    /// <summary>
+    /// The role cache's "Team" (romsg.GlobalCacheTeam): UI_Com_AvatarInformationPanelCtrl shows another player's party,
+    /// its kind and head count from it, and offers "Invite to Party" when teamId is 0.
+    /// </summary>
+    public GlobalCacheTeam CacheTeam(long role) => _byMember.TryGetValue(role, out var team)
+        ? new GlobalCacheTeam { TeamId = team.Id, Teamstatus = (int)team.Type, Teamnum = team.Members.Count, TeamName = team.Name }
+        : new GlobalCacheTeam();
 
     /// <summary>Authoritative roster, including offline members; dungeon admission must not silently omit them.</summary>
     public IReadOnlyList<long> MembersOf(long role) =>
@@ -266,6 +301,7 @@ public sealed partial class TeamService(SessionRegistry sessions, CharacterServi
     public async Task OnEnteredAsync(GameSession s)
     {
         if (s.Role is { } role && _byMember.TryGetValue(role.Id, out var team)) await s.SendGameAsync(TeamAll, All(team));
+        await SyncUnitTeamAsync(s);
     }
 
     // ---- membership ----
@@ -326,7 +362,7 @@ public sealed partial class TeamService(SessionRegistry sessions, CharacterServi
         if (_sinceUpdate < TimeSpan.FromSeconds(2)) return;
         _sinceUpdate = TimeSpan.Zero;
         foreach (var team in _teams.Values.ToList())
-            _loop.TrackRuntimeDetached("team refresh", () => RunTeamAsync("team/refresh", team.Members.ToArray(),
+            _loop.TrackRuntimeDetached("team refresh", () => RunTeamAsync("team/refresh", [.. team.Members],
                 team.Id, () => RefreshAsync(team)));
     }
 

@@ -106,7 +106,7 @@ public sealed partial class SkillCombatTests
     {
         await using var alice = await InWorld("Alice");
         await Gm("alice", "!lvl 99"); await Gm("alice", "!job 1200"); await Teach("alice", 11120);
-        await Wield("alice", 2050120); // Pierce needs a spear (_iSkillCondition, CombatService.Companions)
+        await Wield("alice", 2050120); // Pierce needs a spear (_iSkillCondition, CombatService.ClassCompanions)
         await ChooseProfessionTalent(alice, "alice", 10102102);
         _app.Services.GetRequiredService<TalentProcs>().Roll = _ => 0;
         var monster = await Target("alice", stationary: true);

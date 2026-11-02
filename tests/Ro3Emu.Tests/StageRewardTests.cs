@@ -23,6 +23,16 @@ public sealed class StageRewardTests : IAsyncLifetime
     private WebApplication _app = null!;
     private string _httpUrl = "";
 
+    /// <summary>
+    /// A fixed afternoon, far from the 05:00 game-day rollover. On the system clock a run that crossed it (22:00 in
+    /// Central Europe, for the suite's +08 host zone) moved the daily epoch the stage claims and their sources are keyed by.
+    /// </summary>
+    private sealed class FixedClock : TimeProvider
+    {
+        private readonly DateTimeOffset _now = new(2026, 10, 15, 6, 0, 0, TimeSpan.Zero);
+        public override DateTimeOffset GetUtcNow() => _now;
+    }
+
     public async Task InitializeAsync()
     {
         var (http, micro, game) = TestPorts.FreePorts();
@@ -30,7 +40,7 @@ public sealed class StageRewardTests : IAsyncLifetime
         {
             o.DataDir = _dataDir; o.GameDataDir = Path.Combine(ClientData.RepoRoot, "data");
             o.HttpPort = http; o.MicroGatePort = micro; o.GameGatePort = game;
-        });
+        }, new FixedClock());
         await _app.StartAsync();
         _httpUrl = $"http://127.0.0.1:{http}";
     }
@@ -63,7 +73,7 @@ public sealed class StageRewardTests : IAsyncLifetime
     private async Task Gm(string account, string line)
     {
         using var http = new HttpClient();
-        (await http.PostAsync($"{_httpUrl}/ro3emu/gm?account={account}", new StringContent(line))).EnsureSuccessStatusCode();
+        (await http.PostAsync($"{_httpUrl}/ro3emu/gm?account={account}", Operator.Command(line))).EnsureSuccessStatusCode();
     }
 
     private async Task<T> State<T>(Func<GameSession, T> read) =>
@@ -164,11 +174,11 @@ public sealed class StageRewardTests : IAsyncLifetime
         coins = await Count(Coins);
         Assert.Equal(ErrorCodes.CurrencyShort, await Batch(bot, 3003, 3004, 3005));
         Assert.Equal(ErrorCodes.RewardClaimed, await Batch(bot, 3002, 3003));
-        Assert.Equal(new[] { 3002 }, await Claims());
+        Assert.Equal((int[])[3002], await Claims());
         Assert.Equal(coins, await Count(Coins));
         Assert.Equal(0, await Batch(bot, 3003, 3004));
         Assert.Equal(coins + StageCoins(3003) + StageCoins(3004), await Count(Coins));
-        Assert.Equal(new[] { 3002, 3003, 3004 }, await Claims());
+        Assert.Equal((int[])[3002, 3003, 3004], await Claims());
         string source = await State(s => $"daily-stage/{s.Role!.Id}/{s.Daily!.DailyEpoch}/3003,3004");
         Assert.Equal(1, OwnedSourceCount(source, "cd13e/daily-stage"));
 
@@ -191,7 +201,7 @@ public sealed class StageRewardTests : IAsyncLifetime
         // LC_Library_Helper.SendRewardByType lists 4001 (score 0, no award) until it is marked: it pays nothing.
         long coins = await Count(Coins);
         Assert.Equal(0, await Batch(bot, 4001));
-        Assert.Equal(new[] { 4001 }, await Claims());
+        Assert.Equal((int[])[4001], await Claims());
         Assert.Equal(coins, await Count(Coins));
         Assert.Equal(1, OwnedSourceCount(await State(s => $"daily-stage/{s.Role!.Id}/{s.Daily!.DailyEpoch}/4001"),
             "cd13e/daily-stage"));
@@ -207,7 +217,7 @@ public sealed class StageRewardTests : IAsyncLifetime
         coins = await Count(Coins);
         Assert.Equal(ErrorCodes.CurrencyShort, await Batch(bot, 4003, 4004));
         Assert.Equal(ErrorCodes.RewardClaimed, await Batch(bot, 4001, 4003));
-        Assert.Equal(new[] { 4001, 4002 }, await Claims());
+        Assert.Equal((int[])[4001, 4002], await Claims());
         await Gm("alice", $"!item {Points} 100");
         Assert.Equal(0, await Batch(bot, 4003, 4004));
         Assert.Equal(coins + StageCoins(4003) + StageCoins(4004), await Count(Coins));
@@ -215,7 +225,7 @@ public sealed class StageRewardTests : IAsyncLifetime
 
         await LoggedOut(bot);
         await using var again = await InWorld("Alice", create: false);
-        Assert.Equal(new[] { 4001, 4002, 4003, 4004 }, await Claims());
+        Assert.Equal((int[])[4001, 4002, 4003, 4004], await Claims());
         coins = await Count(Coins);
         Assert.Equal(ErrorCodes.RewardClaimed, await Batch(again, 4003, 4004));
         Assert.Equal(ErrorCodes.RewardClaimed, await Claim(again, 4002));
@@ -248,7 +258,7 @@ public sealed class StageRewardTests : IAsyncLifetime
         await LoggedOut(bot);
         await using var again = await InWorld("Alice", create: false);
         Assert.Equal(3, await State(s => s.TimedBattle!.ChickenRank));
-        Assert.Equal(new[] { 6001, 6002, 6003 }, await Claims());
+        Assert.Equal((int[])[6001, 6002, 6003], await Claims());
         Assert.Equal(ErrorCodes.RewardClaimed, await Claim(again, 6003));
         Assert.Equal(ErrorCodes.CurrencyShort, await Claim(again, 6004));
     }

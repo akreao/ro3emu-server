@@ -27,6 +27,8 @@ public sealed partial class CharacterService
         session.DungeonSyncMinute = 0;
         var progress = roles.LoadProgress(role.Id);
         session.Progress = progress;
+        session.GmAllFunctionsOpen = roles.LoadGmState(role.Id) is { Length: > 0 } gm
+            && JsonSerializer.Deserialize<GmCommands.RoleGmState>(gm)?.AllFunctionsOpen == true; // GM panel openallfunc
         session.Pets = null; // The next role's pets load before 5056; never reuse a previous role's stat contributions.
         session.Items = itemStore.Load(role.Id);
         session.BagState = new RoleBagState(roles.LoadBagState(role.Id));
@@ -52,6 +54,13 @@ public sealed partial class CharacterService
         Refresh(session);
     }
 
+    /// <summary>GM panel openallfunc: every function counts as open for the role, now and at its later logins.</summary>
+    internal void OpenAllFunctions(GameSession session)
+    {
+        roles.SaveGmState(session.Role!.Id, JsonSerializer.SerializeToUtf8Bytes(new GmCommands.RoleGmState { AllFunctionsOpen = true }));
+        session.GmAllFunctionsOpen = true;
+    }
+
     /// <summary>The rest of <see cref="Load"/>: a new role's starter kit.</summary>
     public async Task FinishLoadAsync(GameSession session)
     {
@@ -65,7 +74,8 @@ public sealed partial class CharacterService
             // holds the role's other paths meanwhile. Item-gained hooks follow the commit, as before.
             var before = session.Items.Select(i => i.Clone()).ToList();
             var gained = new List<(int Entry, int Count)>();
-            foreach (var (entry, count) in StarterKit())
+            var kit = StarterKit().ToArray();
+            foreach (var (entry, count) in kit)
             {
                 AddItemCore(session, entry, count, out bool currency, persist: false, notifyItemGained: false);
                 if (!currency) gained.Add((entry, count));
@@ -74,6 +84,10 @@ public sealed partial class CharacterService
             var tx = roles.NewTransaction();
             int receipt = tx.ItemDelta(role.Id, before, session.Items);
             tx.Progress(role.Id, progress);
+            // The kit and its Zeny enter the economy ledger as starter grants (EconomyReason.StarterGrant), so the
+            // panel's duplication check sees where a new character's first items came from.
+            tx.WithEconomy(FamilyEconomy(session, StarterKitEconomyKind, [], kit,
+                new { Operation = "starter-kit", Items = session.Items, Progress = progress }));
             var items = session.Items;
             await roles.CommitAsync(tx, "character/starter-kit", receipts =>
             {
@@ -103,7 +117,7 @@ public sealed partial class CharacterService
             var item = old.Clone();
             if (item.Attrs == null || !item.Attrs.ContainsKey(AttrAppraise))
             {
-                item.Attrs ??= RollAttrs(item.Entry) ?? new();
+                item.Attrs ??= RollAttrs(item.Entry) ?? [];
                 item.Attrs[AttrAppraise] = 1;
             }
             if (EquipmentAffixes.NeedsLegacyEntries(item, data)) EquipmentAffixes.Appraise(item, data);
@@ -124,7 +138,7 @@ public sealed partial class CharacterService
             role: session.Role!.Id, items: [item]))).ToArray();
         var receipts = roles.Commit(builder, "character/equipment-migration");
         for (int i = 0; i < additions.Count; i++) additions[i].Guid = ((long[])receipts[inserted[i]]!)[0];
-        session.Items = session.Items.Select(i => replacements.GetValueOrDefault(i.Guid, i)).Concat(additions).ToList();
+        session.Items = [.. session.Items.Select(i => replacements.GetValueOrDefault(i.Guid, i)), .. additions];
     }
 
     /// <summary>Full syncs of the role datasets, after role select (5066 must precede 5009: currency merges into it).</summary>

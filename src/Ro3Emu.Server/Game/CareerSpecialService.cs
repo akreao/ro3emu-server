@@ -18,7 +18,7 @@ namespace Ro3Emu.Server.Game;
 /// mount through EntityBase.curRider (a CartRemouldTable id is a Battle mount, LC_MountHelper.GetMountType).
 /// Server behaviour the client does not show (refusal codes, repair, the battle slot) is marked inferred where it is.
 /// </summary>
-public sealed class CareerSpecialService
+public sealed partial class CareerSpecialService
 {
     public const uint Sync = 5002, Lease = 32721, CancelLease = 32722;
     // ErrorCodeConfig 1101-1111, the special Job item family.
@@ -83,9 +83,9 @@ public sealed class CareerSpecialService
 
     private JsonElement? Row(long id) => id == 0 ? null : _data.Row("CartRemouldTable", id);
 
-    private int[] Pendants(DBCareerSpecial info) => new[] { info.PendantSlot.CartRemouldCfg, info.MountsSlot.CartRemouldCfg }
+    private int[] Pendants(DBCareerSpecial info) => [.. new[] { info.PendantSlot.CartRemouldCfg, info.MountsSlot.CartRemouldCfg }
         .Select(id => Row(id) is { } row ? (int)GameData.Int(row, "_iPendantId") : 0)
-        .Where(p => p != 0 && _data.Row("PendantConfig", p) != null).Distinct().ToArray();
+        .Where(p => p != 0 && _data.Row("PendantConfig", p) != null).Distinct()];
 
     /// <summary>Who may lease: LC_EquipmentHelper.CanWearProfessionItem, plus the unused _iTaskId (error 1104).</summary>
     private int Entitlement(GameSession s, JsonElement? found)

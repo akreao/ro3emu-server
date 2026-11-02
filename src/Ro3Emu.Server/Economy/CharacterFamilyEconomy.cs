@@ -9,7 +9,9 @@ internal static class CharacterFamilyEconomy
 
     /// <summary>A Fashion-tab purchase (ShopCommodityConfig._iAppearanceId): one payment, the counter, the 5034
     /// unlock and the _iAppearanceAwardId bonus goods commit together; only this shop command may write "wardrobe".
-    /// A mount look also writes "mounts": its 5012 system-mount ownership (MountService.PlanShopGrant).</summary>
+    /// A mount look also writes "mounts": its 5012 system-mount ownership (MountService.PlanShopGrant). A gift pick
+    /// (82336) also writes "gifts": the picker's own received-order removed (ShopService.PickLockedAsync); the
+    /// sender's copy is a separate, unowned blob write, not part of this transaction.</summary>
     internal const string ShopAppearanceKind = "cd13a/shop-appearance";
 
     /// <summary>A Fashion gift's payment (ShopService.Gifts): the price and the sender's present_sent order commit together.
@@ -24,8 +26,7 @@ internal static class CharacterFamilyEconomy
 
     internal static IReadOnlySet<string> AllowedBlobs(string kind)
     {
-        string[] parts = kind == ShopAppearanceKind ? ["shop", "wardrobe", "mounts", "equip_plans", "present_received"]
-            : kind == ShopGiftKind ? ["present_sent"]
+        string[] parts = kind == ShopAppearanceKind ? ["shop", "wardrobe", "mounts", "equip_plans", "gifts"]
             : kind == ItemActionKind ? ["bag_state", "emoji_info", "personal", "social_outfit"]
             : kind[6..].Split('-')[0] switch
             {
@@ -48,6 +49,8 @@ internal static class CharacterFamilyEconomy
         "cd13a/character-box" => (EconomyReason.ItemUse, EconomyReason.ItemBoxGoods),
         "cd13a/character-gm-grant" or "cd13a/character-gm-remove" or "cd13a/character-gm-clear" =>
             (EconomyReason.GmRemove, EconomyReason.GmGrant),
+        // A new character's kit at its first login (CharacterService.FinishLoadAsync): goods only.
+        "cd13a/character-starter-kit" => (EconomyReason.ItemUse, EconomyReason.StarterGrant),
         _ => kind[6..].Split('-')[0] switch
         {
             "equipment" => (EconomyReason.EquipmentCost, EconomyReason.CraftOutput),

@@ -65,7 +65,7 @@ public sealed class PassPlayTests : IAsyncLifetime
     private async Task Gm(BotClient bot, string command)
     {
         using var client = new HttpClient();
-        (await client.PostAsync($"{_http}/ro3emu/gm?account={bot.Account}", new StringContent(command))).EnsureSuccessStatusCode();
+        (await client.PostAsync($"{_http}/ro3emu/gm?account={bot.Account}", Operator.Command(command))).EnsureSuccessStatusCode();
     }
 
     private GameSession Session(BotClient bot) => Service<SessionRegistry>().All().Single(s => s.Account == bot.Account && s.Role != null);
@@ -116,10 +116,18 @@ public sealed class PassPlayTests : IAsyncLifetime
         Assert.Fail("timed out: " + what);
     }
 
+    /// <summary>
+    /// The login's own pass event (NewActivityService.LoginAsync, detached) draws the day's challenges. Entering the
+    /// world does not wait for it: under load a test read no pass state yet, or no draw.
+    /// </summary>
+    private Task Drawn(BotClient bot) =>
+        Until(() => OnLoop(() => (Session(bot).ActivityRuntime?.PassPlay?.Day ?? 0) != 0), "the day's challenges drawn");
+
     [ClientDataFact]
     public async Task PremiumTrackIsFreeAndDailyActivityPaysPassExpAndProgress()
     {
         await using var alice = await InWorld("Alice");
+        await Drawn(alice);
         await Service<NewActivityService>().ReconcileAsync(Session(alice));
         var pass = await Pass(alice);
         Assert.True(pass.Premium); // no item 703 spent
@@ -130,7 +138,9 @@ public sealed class PassPlayTests : IAsyncLifetime
         bool challenge = (await Play(alice)).Daily.Contains("d.activity");
         long expected = (60 * 6 + (challenge ? 300 : 0)) * 2;
         await Gm(alice, "!item 5 60"); // 60 daily activity points
-        await Until(async () => await Currency(alice, NewActivityService.PassExpCurrency) >= expected, "pass EXP from daily activity");
+        // The grant's commit credits the currency; the pass levels from it in ReconcilePassAsync, a step later.
+        await Until(async () => await Currency(alice, NewActivityService.PassExpCurrency) >= expected
+            && await Pass(alice) is var levelled && levelled.Level * 2000L + levelled.Exp >= expected, "pass EXP from daily activity");
         var play = await Play(alice);
         Assert.Equal(60, play.WeeklyProgress["w.activity"]);
         Assert.Equal(expected, await Currency(alice, NewActivityService.PassExpCurrency));

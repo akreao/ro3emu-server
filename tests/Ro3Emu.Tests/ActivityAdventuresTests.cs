@@ -26,7 +26,7 @@ public sealed class ActivityAdventuresTests : IAsyncLifetime
     private static readonly TimeSpan MailWait = TimeSpan.FromSeconds(20);
     private WebApplication _app = null!;
     private string _http = "";
-    private readonly Dictionary<string, BotClient> _clients = new();
+    private readonly Dictionary<string, BotClient> _clients = [];
     private readonly FixedClock _clock = new();
 
     private sealed class FixedClock : TimeProvider
@@ -82,7 +82,7 @@ public sealed class ActivityAdventuresTests : IAsyncLifetime
     private async Task Gm(string account, string line)
     {
         using var client = new HttpClient();
-        var response = await client.PostAsync($"{_http}/ro3emu/gm?account={account}", new StringContent(line));
+        var response = await client.PostAsync($"{_http}/ro3emu/gm?account={account}", Operator.Command(line));
         response.EnsureSuccessStatusCode();
         if (line.StartsWith("!warp ", StringComparison.Ordinal))
         {
@@ -651,7 +651,7 @@ public sealed class ActivityAdventuresTests : IAsyncLifetime
         await Gm("alice", $"!jump {x} {z}");
         await alice.SendGameAsync(SceneService.NpcInteraction, new NpcInteractionReq
         {
-            NpcUid = SceneService.TreasureUidPrefix | session.Role!.Id, InteractionId = 4,
+            NpcUid = SceneService.TreasureUidPrefix | session.Role!.Id, InteractionId = 21070002,
         });
         var interaction = await Next(alice, SceneService.NpcInteraction, NpcInteractionRsp.Parser);
         Assert.Equal(0, interaction.Result);
@@ -660,7 +660,7 @@ public sealed class ActivityAdventuresTests : IAsyncLifetime
 
         await alice.SendGameAsync(SceneService.NpcInteraction, new NpcInteractionReq
         {
-            NpcUid = SceneService.TreasureUidPrefix | session.Role.Id, InteractionId = 4,
+            NpcUid = SceneService.TreasureUidPrefix | session.Role.Id, InteractionId = 21070002,
         });
         Assert.NotEqual(0, (await Next(alice, SceneService.NpcInteraction, NpcInteractionRsp.Parser,
             i => i.Result != 0)).Result);
@@ -1148,7 +1148,7 @@ public sealed class ActivityAdventuresTests : IAsyncLifetime
         await Gm("bob", $"!jump {x} {z}");
         await alice.SendGameAsync(SceneService.NpcInteraction, new NpcInteractionReq
         {
-            NpcUid = SceneService.TreasureUidPrefix | finder.Role!.Id, InteractionId = 4,
+            NpcUid = SceneService.TreasureUidPrefix | finder.Role!.Id, InteractionId = 21070002,
         });
         Assert.Equal(0, (await Next(alice, SceneService.NpcInteraction, NpcInteractionRsp.Parser)).Result);
         Assert.Equal(5, (int)(await Next(alice, 83251, TreasureEventNotify.Parser)).Type);
@@ -1277,7 +1277,7 @@ public sealed class ActivityAdventuresTests : IAsyncLifetime
         await Gm("alice", $"!jump {x} {z}");
         await alice.SendGameAsync(SceneService.NpcInteraction, new NpcInteractionReq
         {
-            NpcUid = SceneService.TreasureUidPrefix | session.Role!.Id, InteractionId = 4,
+            NpcUid = SceneService.TreasureUidPrefix | session.Role!.Id, InteractionId = 21070002,
         });
         Assert.Equal(0, (await Next(alice, SceneService.NpcInteraction, NpcInteractionRsp.Parser)).Result);
         await Next(alice, 83251, TreasureEventNotify.Parser);

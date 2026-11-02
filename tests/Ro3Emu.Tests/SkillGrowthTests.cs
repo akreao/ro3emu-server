@@ -60,7 +60,7 @@ public sealed class SkillGrowthTests : IAsyncLifetime
     private async Task Gm(string account, string command)
     {
         using var client = new HttpClient();
-        (await client.PostAsync($"{_http}/ro3emu/gm?account={account}", new StringContent(command))).EnsureSuccessStatusCode();
+        (await client.PostAsync($"{_http}/ro3emu/gm?account={account}", Operator.Command(command))).EnsureSuccessStatusCode();
     }
 
     private static string RepoRoot()
@@ -136,6 +136,68 @@ public sealed class SkillGrowthTests : IAsyncLifetime
         Assert.Equal(1000001, saved.SkillWheel.All.WhellSkills[3].SkillConfigId);
         Assert.Equal(1000001, saved.OriginSkillWheel.All.WhellSkills[3].SkillConfigId);
         Assert.Equal(10000, saved.SkillAssignPlans.All.Value[0].ManualLoadSkill[2].SkillId);
+    }
+
+    // The PC skill tree shows a Swordman's attack in the Novice page's first cell as JobAttackConfig's 1001001 (group 10010),
+    // the one place to drag it back from after taking it off the bar, and the cell drags only at a level above 0 in the
+    // plan. A role saved before that group was sent gets it on login.
+    [ClientDataFact]
+    public async Task ARemovedNormalAttackComesBackFromTheSkillTreeCell()
+    {
+        const int Attack = 11000, Cell = 10010, SwordSmash = 11099;
+        long roleId;
+        async Task<int> Load(BotClient bot, SkillLoadOperation op, int socket, int group)
+        {
+            await bot.SendGameAsync(SkillService.SkillLoad, new SkillLoadReq
+            {
+                OpType = op, IsManual = true, SocketNum = socket, Info = new SkillData { SkillId = group, SkillLevel = 1 }
+            });
+            return (await Next(bot, SkillService.SkillLoad, SkillLoadResp.Parser)).Result;
+        }
+        await using (var sword = await InWorld("Sword"))
+        {
+            roleId = (long)sword.Self!.Uuid;
+            await Next(sword, SkillService.SkillDataSync, DBSkillDataIncrement.Parser);
+            await Gm("sword", "!job 1100");
+            await sword.SendGameAsync(1023, new PlayerAssetReq { AssetType = { 5 } });
+            var swordman = await Next(sword, SkillService.SkillDataSync, DBSkillDataIncrement.Parser,
+                m => m.SyncAllMark && m.CurrentAtkSkillId == 1001001);
+            Assert.Contains(Cell, swordman.SkillList.All.Value);
+            Assert.Equal(1, swordman.SkillAssignPlans.All.Value[0].SkillAssigns[Cell].SkillLevel);
+            Assert.Equal(1001001, swordman.SkillWheel.All.WhellSkills[1].SkillConfigId);
+
+            Assert.Equal(0, await Load(sword, SkillLoadOperation.SkillLoadOpLoad, 1, SwordSmash));
+            Assert.Equal(0, await Load(sword, SkillLoadOperation.SkillLoadOpUnload, 0, Attack));
+        }
+
+        // A role saved without the cell's group (before this fix) is repaired on login.
+        var roles = _app.Services.GetRequiredService<RoleStore>();
+        var old = DBSkillData.Parser.ParseFrom(roles.LoadSkillPlans(roleId)!);
+        Assert.DoesNotContain(old.SkillAssignPlans[0].ManualLoadSkill, load => load.SkillId == Attack);
+        old.SkillList.Remove(Cell);
+        foreach (var plan in old.SkillAssignPlans) plan.SkillAssigns.Remove(Cell);
+        Assert.Equal(1, FixtureSql.Execute(_app.Services.GetRequiredService<AccountStore>(),
+            "UPDATE role SET skill_plans = $plans WHERE id = $id", ("$plans", old.ToByteArray()), ("$id", roleId)));
+
+        await using (var again = await InWorld("Sword", create: false))
+        {
+            var removed = await Next(again, SkillService.SkillDataSync, DBSkillDataIncrement.Parser);
+            Assert.DoesNotContain(removed.SkillWheel.All.WhellSkills.Values, slot => slot.SkillConfigId == 1001001);
+            Assert.Contains(Cell, removed.SkillList.All.Value);
+            Assert.All(removed.SkillAssignPlans.All.Value, plan => Assert.Equal(1, plan.SkillAssigns[Cell].SkillLevel));
+            // Dragged from the cell, it shows as the career's own attack; moving it keeps one copy on the bar.
+            Assert.Equal(0, await Load(again, SkillLoadOperation.SkillLoadOpLoad, 0, Cell));
+            Assert.Equal(0, await Load(again, SkillLoadOperation.SkillLoadOpLoad, 2, Attack));
+        }
+        await using var last = await InWorld("Sword", create: false);
+        var restored = await Next(last, SkillService.SkillDataSync, DBSkillDataIncrement.Parser);
+        Assert.Equal(1001001, restored.SkillWheel.All.WhellSkills[3].SkillConfigId);
+        Assert.Single(restored.SkillWheel.All.WhellSkills.Values, slot => slot.SkillConfigId == 1001001);
+        // The client names the slot by the row it shows (11000), not the cell's stored 10010.
+        Assert.Equal(0, await Load(last, SkillLoadOperation.SkillLoadOpLoad, 0, Cell));
+        Assert.Equal(0, await Load(last, SkillLoadOperation.SkillLoadOpUnload, 0, Attack));
+        Assert.DoesNotContain(DBSkillData.Parser.ParseFrom(roles.LoadSkillPlans(roleId)!).SkillAssignPlans[0].ManualLoadSkill,
+            load => load.SkillId is Attack or Cell);
     }
 
     [ClientDataFact]
@@ -401,13 +463,13 @@ public sealed class SkillGrowthTests : IAsyncLifetime
             {
                 Unlocked = true, Name = index == 1 ? "Migrated" : "",
                 Genre = index == 1 ? 2 : 0,
-                Levels = index == 1 ? new Dictionary<int, int> { [13006] = 2 } : new(),
-                Manual = index == 1 ? new Dictionary<int, int> { [3] = 13006 } : new(),
-                ManualLevels = index == 1 ? new Dictionary<int, int> { [3] = 1 } : new(),
-                Auto = index == 1 ? new Dictionary<int, int> { [1] = 13006 } : new(),
-                AutoLevels = index == 1 ? new Dictionary<int, int> { [1] = 2 } : new(),
-                Queue = index == 1 ? new Dictionary<int, int> { [0] = 13006 } : new(),
-                QueueLevels = index == 1 ? new Dictionary<int, int> { [0] = 1 } : new(),
+                Levels = index == 1 ? new Dictionary<int, int> { [13006] = 2 } : [],
+                Manual = index == 1 ? new Dictionary<int, int> { [3] = 13006 } : [],
+                ManualLevels = index == 1 ? new Dictionary<int, int> { [3] = 1 } : [],
+                Auto = index == 1 ? new Dictionary<int, int> { [1] = 13006 } : [],
+                AutoLevels = index == 1 ? new Dictionary<int, int> { [1] = 2 } : [],
+                Queue = index == 1 ? new Dictionary<int, int> { [0] = 13006 } : [],
+                QueueLevels = index == 1 ? new Dictionary<int, int> { [0] = 1 } : [],
             }).ToArray(),
         };
         Assert.Equal(1, FixtureSql.Execute(_app.Services.GetRequiredService<AccountStore>(),
@@ -445,5 +507,31 @@ public sealed class SkillGrowthTests : IAsyncLifetime
         Assert.Equal(1, durable.CurrentPlanIndex);
         Assert.Equal("Migrated", durable.SkillAssignPlans[1].Name);
         Assert.Equal(13006, durable.SkillAssignPlans[1].SkillQueue[0].SkillId);
+    }
+
+    [ClientDataFact]
+    public async Task AJobChangeDropsAnUnlearnedSkillFromTheAutoBattleList()
+    {
+        await using var bot = await InWorld("Auto");
+        await Gm("auto", "!job 1100");
+        var learn = new SkillGrowthSkillPlanUpdateReq { Plan = 0 };
+        learn.LevelUpList[11001] = new SkillData { SkillId = 11001, SkillLevel = 1 };
+        await bot.SendGameAsync(SkillService.PlanUpdate, learn);
+        Assert.Equal(0, (await Next(bot, SkillService.PlanUpdate, SkillGrowthSkillPlanUpdateResp.Parser)).Result);
+        await bot.SendGameAsync(SkillService.SkillLoad, new SkillLoadReq
+        {
+            OpType = (SkillLoadOperation)1, IsManual = false, SocketNum = 0, Info = new SkillData { SkillId = 11001, SkillLevel = 1 },
+        });
+        Assert.Equal(0, (await Next(bot, SkillService.SkillLoad, SkillLoadResp.Parser)).Result);
+        var session = _app.Services.GetRequiredService<SessionRegistry>().All().Single(x => x.Account == "auto");
+        Assert.Contains(session.SkillPlans!.SkillAssignPlans[0].AutoLoadSkill, load => load.SkillId == 11001);
+
+        // Job 2100 has no Bash: the rebuilt plan must not leave it in the Auto-Battle list, where every cast would be
+        // refused 3002 (Skill has not been learned).
+        await Gm("auto", "!job 2100");
+        await Task.Delay(500);
+        var sent = await _app.Services.GetRequiredService<GameLoop>().InvokeAsync(() =>
+            Task.FromResult(_app.Services.GetRequiredService<SkillService>().Build(session)));
+        Assert.DoesNotContain(sent.SkillAssignPlans[0].AutoLoadSkill, load => load.SkillId == 11001);
     }
 }

@@ -4,20 +4,23 @@
 # with RO3Emu.exe join <address>. Without building anything: the release's RO3Emu-server-linux-x64.tar.gz has its own
 # server.sh (tools/release/server.sh).
 #
-# usage: scripts/server.sh [--client DIR] [--host ADDRESS] [--gm ACCOUNT] [--voice-port PORT] [--dev] [--service] [--reexport]
+# usage: scripts/server.sh [--client DIR] [--host ADDRESS] [--gm ACCOUNT] [--voice-port PORT] [--dev] [--panel-port PORT | --no-panel] [--no-icons] [--service] [--reexport] [--allow-root]
 #   --client DIR    the client folder copied from Windows (at least its ro3_Data/StreamingAssets); first run only
 #   --host ADDRESS  the address players connect to (default: this machine's first address)
 #   --gm ACCOUNT    an account that gets GM commands in game (repeatable)
 #   --voice-port PORT  turn on party voice chat on this TCP port, for example 33101 (off by default)
 #   --dev           run as Development, not Production, for testing (docs/guide/development-mode.md)
+#   --panel-port PORT  the web panel for players and admins on this TCP port (default 5381); --no-panel: none
+#   --no-icons      no pictures for the web panel (decoded from the client; 120 MB)
 #   --service       install and start a systemd service (needs sudo) instead of running in this terminal
 #   --reexport      export the game data again (after a client update)
+#   --allow-root    run as root anyway (a hole in the server would then own the whole machine)
 set -euo pipefail
 self=$(readlink -f "$0")  # before the cd: a relative $0 no longer resolves after it
 cd "$(dirname "$self")/.." # the repository (this script lives in scripts/)
 root=$(pwd)
 
-client=""; host=""; voice=""; dev=0; service=0; reexport=0; gms=()
+client=""; host=""; voice=""; dev=0; panel=5381; service=0; reexport=0; allow_root=0; gms=(); icons=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --client) client="$2"; shift 2 ;;
@@ -27,8 +30,14 @@ while [ $# -gt 0 ]; do
       [[ "$2" =~ ^[0-9]+$ ]] && [ "$2" -gt 0 ] && [ "$2" -lt 65536 ] || { echo "--voice-port needs a port number"; exit 1; }
       voice="$2"; shift 2 ;;
     --dev) dev=1; shift ;;
+    --panel-port)
+      [[ "$2" =~ ^[0-9]+$ ]] && [ "$2" -gt 0 ] && [ "$2" -lt 65536 ] || { echo "--panel-port needs a port number"; exit 1; }
+      panel="$2"; shift 2 ;;
+    --no-panel) panel=0; shift ;;
+    --no-icons) icons=(--no-icons); shift ;;
     --service) service=1; shift ;;
     --reexport) reexport=1; shift ;;
+    --allow-root) allow_root=1; shift ;;
     -h|--help) sed -n '2,/^[^#]/{/^#/p}' "$self"; exit 0 ;;  # the header comment, however long
     *) echo "unknown option $1 (see scripts/server.sh --help)"; exit 1 ;;
   esac
@@ -37,6 +46,10 @@ done
 step() { printf '\n== %s\n' "$1"; }
 fail() { printf '\n%s\n' "$1" >&2; exit 1; }
 ask() { local answer; read -r -p "$1 [Y/n] " answer; [[ ! "$answer" =~ ^[nN] ]]; }
+
+if [ "$(id -u)" = 0 ] && [ "$allow_root" != 1 ]; then
+  fail "Do not run the server as root: a hole in it would then own the whole machine. Run scripts/server.sh as an ordinary user (with --service it asks sudo only to install the unit), or pass --allow-root."
+fi
 
 # 1. Tools: the .NET 10 SDK, into ~/.dotnet with Microsoft's install script. The data export is C# too.
 step 'Checking the tools'
@@ -59,7 +72,7 @@ if [ "$reexport" = 1 ] || [ ! -f data/config/MapResource.json ] || [ ! -f data/m
   fi
   [ -d "$client/ro3_Data/StreamingAssets/Recovery/LuaPayload" ] || fail "No ro3_Data/StreamingAssets/Recovery/LuaPayload in '$client'. Copy the whole game folder and pass it with --client."
   client=$(readlink -f "$client")
-  dotnet run --project src/Ro3Emu.Setup -c Release -- export "$client" "$root/data" --home "$root"
+  dotnet run --project src/Ro3Emu.Setup -c Release -- export "$client" "$root/data" --home "$root" "${icons[@]}"
   [ -f data/config/MapResource.json ] || fail 'The export did not produce data/config. Check that the folder is a complete Ragnarok 3 PC client.'
 fi
 
@@ -95,6 +108,7 @@ for i in "${!gms[@]}"; do settings+=("Ro3Emu__GmAccounts__$i=${gms[$i]}"); done
 # Without --gm nobody has GM, also with --dev (Development alone would open GM to every account).
 settings+=("Ro3Emu__GmOpenWhenEmpty=false")
 [ "$dev" = 0 ] || echo '  Development mode: appsettings.Development.json applies (the Exchange seller and buy-back too).'
+if [ "$panel" = 0 ]; then settings+=("Ro3Emu__Panel__Enabled=false"); else settings+=("Ro3Emu__Panel__Port=$panel"); fi
 [ ${#gms[@]} -gt 0 ] || echo '  No --gm account: nobody has GM commands in game.'
 
 ports_note() {
@@ -107,6 +121,7 @@ ports_note() {
     echo "  ufw: sudo ufw allow 5380/tcp && sudo ufw allow 20000/tcp && sudo ufw allow 33100/tcp${voice:+ && sudo ufw allow $voice/tcp}"
   fi
   echo "Players: RO3Emu.exe join $host"
+  [ "$panel" = 0 ] || echo "Web panel: http://$host:$panel (open TCP $panel too, or put it behind https: docs/guide/panel.md)"
 }
 
 # 5. Run: as a service, or in this terminal (Ctrl+C stops it).
@@ -125,6 +140,16 @@ if [ "$service" = 1 ]; then
     for s in "${settings[@]}"; do echo "Environment=$s"; done
     echo "Environment=DOTNET_ROOT=$DOTNET_ROOT"
     echo 'Restart=always'
+    # A shutdown planned on the web panel exits 0 and stays down; its restart exits 75 and comes back.
+    echo 'RestartPreventExitStatus=0'
+    # The server writes only below the repository (data, logs, its build); the rest of the system is read-only to it.
+    # The single-file build unpacks below it too, not into ~/.net, which ProtectHome makes read-only.
+    echo "Environment=DOTNET_BUNDLE_EXTRACT_BASE_DIR=$root/.net"
+    echo 'NoNewPrivileges=yes'
+    echo 'ProtectSystem=strict'
+    echo 'ProtectHome=read-only'
+    echo 'PrivateTmp=yes'
+    echo "ReadWritePaths=$root"
     echo
     echo '[Install]'
     echo 'WantedBy=multi-user.target'

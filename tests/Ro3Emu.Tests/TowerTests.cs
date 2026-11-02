@@ -69,7 +69,7 @@ public sealed class TowerTests : IAsyncLifetime
     private async Task Gm(string account, string command)
     {
         using var client = new HttpClient();
-        (await client.PostAsync($"{_http}/ro3emu/gm?account={account}", new StringContent(command))).EnsureSuccessStatusCode();
+        (await client.PostAsync($"{_http}/ro3emu/gm?account={account}", Operator.Command(command))).EnsureSuccessStatusCode();
     }
 
     private async Task Eligible(BotClient bot, int level = 99)
@@ -198,7 +198,20 @@ public sealed class TowerTests : IAsyncLifetime
     {
         // PowerSuppressConfig: a power under 80% of floor 1's 6000 puts 5000001 (215/216 -10%) on its monsters.
         await using var alice = await InWorld("Alice");
-        await Eligible(alice);
+        await Eligible(alice, level: 33); // floor 1's _iLevelLimit; at 99 the base power alone (12000) is past 110%
+        // The floor reads the published power (PowerService.Current), which follows the level-up within the service's
+        // 1 s throttle: wait for it, or a quiet run enters with level 1's power and a loaded one with level 33's.
+        var power = Service<PowerService>();
+        long published = 0;
+        for (var until = DateTime.UtcNow + Wait; ; await Task.Delay(50))
+        {
+            var (level, now, computed) = await Service<GameLoop>().InvokeAsync(() => Task.FromResult((Session(alice).Progress!.Level,
+                PowerService.Total(PowerService.Current(Session(alice))), PowerService.Total(power.Compute(Session(alice)).Total))));
+            published = now;
+            if (level == 33 && now == computed) break;
+            Assert.True(DateTime.UtcNow < until, $"power {computed} never published (still {now})");
+        }
+        Assert.InRange(published, 1, 6000 * 80 / 100 - 1);
         var entered = await EnterFloor(alice, 1);
         Assert.Equal(2, entered.Monsters.Length);
         Assert.All(entered.Monsters, m => Assert.Equal(1200, m.Property.Single(p => p.Idx == 101).Data));
@@ -210,7 +223,7 @@ public sealed class TowerTests : IAsyncLifetime
             bool ready = false;
             await OnLoop(() =>
             {
-                floor = Service<World>().AllUnits().OfType<MonsterUnit>().Where(m => m.InstanceId == entered.Scene.SceneID).ToArray();
+                floor = [.. Service<World>().AllUnits().OfType<MonsterUnit>().Where(m => m.InstanceId == entered.Scene.SceneID)];
                 ready = floor.Length == 2 && floor.All(m => buffs.UnitAttributes(m).Any(a => a.Id == 215));
                 return Task.CompletedTask;
             });
@@ -294,14 +307,14 @@ public sealed class TowerTests : IAsyncLifetime
                 Assert.Equal(24000001UL, m.EntityTemplateID);
                 Assert.Equal(1200, m.Property.Single(p => p.Idx == 101).Data);
             });
-            Assert.Equal(new[] { 122.91f, 133.3f }, entered.Monsters.Select(m => m.MovementInfo.Pos.X).Order().ToArray());
+            Assert.Equal([122.91f, 133.3f], [.. entered.Monsters.Select(m => m.MovementInfo.Pos.X).Order()]);
             Assert.Equal(ErrorCodes.Parameter, await StartRequest(alice, 1, inside: true));
             foreach (var monster in entered.Monsters) await Kill(alice, monster.Uuid);
             var end = await Next(alice, TowerService.End, ClimTowerEndNotify.Parser);
             Assert.True(end.ClimTowerResult);
             Assert.True(end.IsNewRecord);
             Assert.Equal((1, 1L), (end.Layer, end.PassedMaxLayerConfID));
-            Assert.Equal(new[] { (1250701, 9), (1250709, 5) }, end.RewardNotify.Rewards.OrderBy(r => r.ItemEntry).Select(r => (r.ItemEntry, r.Stack)));
+            Assert.Equal([(1250701, 9), (1250709, 5)], end.RewardNotify.Rewards.OrderBy(r => r.ItemEntry).Select(r => (r.ItemEntry, r.Stack)));
             Assert.All(end.RewardNotify.Rewards, r => { Assert.True(r.ItemGuid > 0); Assert.True(r.ItemInfos.ContainsKey(10001)); });
             var update = await Next(alice, TowerService.TowerSync, DBClimTowerIncrement.Parser, t => !t.SyncAllMark && t.LayerConfID == 1);
             Assert.Equal(60 - end.Duration, update.RemainDuration);
@@ -509,8 +522,19 @@ public sealed class TowerTests : IAsyncLifetime
         await staged.Task.WaitAsync(Wait);
         // Take this cast's own answer now, so the retry below reads the answer to its own cast.
         Assert.Equal(0, (await Next(alice, CombatService.UseSkill, CastSkillRsp.Parser)).Result);
-        await Task.Delay(200); // Let the refused write return before stopping automatic repeat casts.
-        await OnLoop(() => { Session(alice).Attack = null; return Task.CompletedTask; });
+        // Stop the automatic repeat casts (and the swing in flight), then wait until the refused write has given the
+        // staged lethal hit's 1 HP back (CombatService.RestoreUnpublishedLethalHit); a fixed 200 ms ran out under load.
+        await OnLoop(() =>
+        {
+            Session(alice).Attack = null;
+            if (Session(alice).SkillCast is { } swing) swing.Cancelled = true;
+            return Task.CompletedTask;
+        });
+        for (var until = DateTime.UtcNow + Wait; ; await Task.Delay(20))
+        {
+            if (await Service<GameLoop>().InvokeAsync(() => Task.FromResult(final.Hp == 1 || final.Dead))) break;
+            Assert.True(DateTime.UtcNow < until, "the refused kill never restored the monster's HP");
+        }
         hooks.Remove(stageNotice);
         Assert.False(final.Dead);
         Assert.Equal(1, final.Hp);
@@ -631,8 +655,7 @@ public sealed class TowerTests : IAsyncLifetime
         MonsterUnit[] actors = [];
         await OnLoop(async () =>
         {
-            actors = Service<World>().AllUnits().OfType<MonsterUnit>()
-                .Where(m => m.InstanceId == entered.Scene.SceneID).ToArray();
+            actors = [.. Service<World>().AllUnits().OfType<MonsterUnit>().Where(m => m.InstanceId == entered.Scene.SceneID)];
             Assert.Equal(2, actors.Length);
             actors[0].Moving = actors[1].Moving = false;
             actors[1].X = actors[0].X;
@@ -693,7 +716,7 @@ public sealed class TowerTests : IAsyncLifetime
         var data = Service<GameData>();
         var map = Service<WorldData>().Map(2100001)!;
         var spawns = Service<TowerService>().Expand(data.Row("PetFloorConfig", 101)!.Value, map)!;
-        Assert.Equal(new[] { 0, 8000, 15000 }, spawns.Select(s => s.DelayMs).Distinct().Order());
+        Assert.Equal([0, 8000, 15000], spawns.Select(s => s.DelayMs).Distinct().Order());
         Assert.Equal(2, spawns.Count(s => s.Point.X == 128 && s.Point.Z == 163.43f)); // group53 at two times
         await using var alice = await InWorld("Alice", cleared: 5);
         await Eligible(alice);

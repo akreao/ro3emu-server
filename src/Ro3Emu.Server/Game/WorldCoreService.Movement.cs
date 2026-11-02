@@ -66,20 +66,25 @@ public sealed partial class WorldCoreService
     /// a flyer need not be walkable (water, cliffs): the band counts from its nearest layer of any kind, and a cell with no
     /// layer (off the map's grid) is refused. Flying off a cliff over the sea may hold or lose height above the new band
     /// (no invisible wall at the edge), only not climb further. A move outside these bounds is put back without an error tip: the
-    /// client sends 31084 many times a second and showed a "parameter error" for each refusal.
+    /// client sends 31084 many times a second and showed a "parameter error" for each refusal. The horizontal distance is
+    /// held to the flight speed's budget (WalkAllowance, as walks are); a move beyond it is put back and counted.
     /// </summary>
     public async Task FlyMoveAsync(GameSession s, FlyMoveReq req)
     {
         if (!Finite(req.Pos) || !Finite(req.Dir) || !float.IsFinite(req.Face) || Distance(new Vec3(), req.Dir) > 2)
         { await ErrorAsync(s, FlyMove, ErrorCodes.Parameter); return; }
-        double seconds = Math.Clamp((Now - s.WorldState.LastFlyMs) / 1000.0, 0.05, 2);
         float speed = FlightSpeed(s);
         var map = _worldData.Map(s.SceneEntry);
         var floor = map?.FloorHeight(new MapPoint(req.Pos.X, req.Pos.Y, req.Pos.Z, req.Face));
         if (!s.WorldState.Flying || !CanFly(s) || floor is not { } ground
-            || req.Pos.Y < ground - 1 || req.Pos.Y > Math.Max(ground + 50, s.Position.Y)
-            || MonsterService.Distance(s.Position.X, s.Position.Z, req.Pos.X, req.Pos.Z) > speed * seconds * 1.5 + 1.5)
+            || req.Pos.Y < ground - 1 || req.Pos.Y > Math.Max(ground + 50, s.Position.Y))
         { await CorrectFlightAsync(s); return; }
+        float distance = (float)MonsterService.Distance(s.Position.X, s.Position.Z, req.Pos.X, req.Pos.Z);
+        if (!s.FlightAllowance.TrySpend(DateTime.UtcNow, speed, distance))
+        {
+            _scene.Cheats.Refused(s, CheatMonitor.Flight, $"scene {s.SceneEntry} {distance:F1} m beyond the flight budget at {speed:F1} m/s");
+            await CorrectFlightAsync(s); return;
+        }
         s.WorldState.LastFlyMs = Now;
         await MoveFlightAsync(s, req.Pos, req.Face, req.Dir, req.BStop, MovementTransitionType.MoveTransNormal, self: false);
     }

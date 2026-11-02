@@ -13,7 +13,7 @@ public sealed class MsgCatalog
 {
     public sealed record Entry(uint Id, string Name, MessageDescriptor? Request, MessageDescriptor? Response);
 
-    private readonly Dictionary<uint, Entry> _entries = new();
+    private readonly Dictionary<uint, Entry> _entries = [];
 
     // The generated message types by protobuf full name: the same for every server in the process.
     private static readonly Lazy<Dictionary<string, MessageDescriptor>> Descriptors = new(() => typeof(MsgCatalog).Assembly.GetTypes()

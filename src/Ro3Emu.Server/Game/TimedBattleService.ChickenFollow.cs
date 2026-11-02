@@ -4,118 +4,107 @@ using static Ro3Emu.Server.Game.ChickenRules;
 namespace Ro3Emu.Server.Game;
 
 /// <summary>
-/// Survivor Battle team follow and head signs. Follow (UI_Sys_Chicken_MapPanelModel.lua:86-192 and the team tips):
-/// 82628 SelectFollowReq {type, roleId, followedRoleId} where Invite (1) asks roleId (0 = every teammate) to follow the
-/// sender, Followed (2) makes roleId follow followedRoleId (accepting an invite, or "follow" on a teammate) and Cancle
-/// (0) ends it. The team learns the relations from 82673 (LC_DAL_Chicken.lua:254-273: followedMap follower -> followed,
-/// inviteCd invitee -> invite cooldown end in seconds) and an invitee from 82674 (followedRoleId = the inviter; the
-/// client gives it InviteAwaitChicken 15 s). A follower lands with the one it follows. Head signs: 82672 with
-/// EChickenOpenPanel (the custom data ids 5000008-10 ChickenOpenShop / Adventure / Ambulance) shows the sign over the
-/// player to the others while the panel is open (LC_CustomDataHandler_Chicken.lua:52-89, value 1 shows, 0 hides).
+/// Survivor Battle landing follow, on the ChoosePos map panel (UI_Sys_Chicken_MapPanelModel): a player follows a
+/// teammate (and lands with it), or invites teammates to follow it. The client sends only 82628; the team's relation
+/// comes back whole in 82673 and an invitation in 82674.
 /// </summary>
 public sealed partial class TimedBattleService
 {
-    public const uint SelectFollow = 82628, OpenPanel = 82672, FollowNotify = 82673, InviteFollowNotify = 82674;
+    public const uint SelectFollow = 82628, FollowNotify = 82673, InviteFollowNotify = 82674;
 
-    private long InviteCdSeconds() => PublicValue("InviteCdChicken") is var cd and > 0 ? cd : 5;
+    /// <summary>PublicParam InviteCdChicken 5 (s): the client's own invite cooldown, kept on the server as well.</summary>
+    private const long InviteCdSec = 5;
+    private const int FollowChainLimit = 10; // UI_Sys_Chicken_MapPanelModel.GetFollowLeader walks at most 10 hops
 
+    /// <summary>The end of the follow chain that starts at this role (the role itself when it follows nobody).</summary>
+    private static long FollowLeader(ChickenRun run, long role)
+    {
+        long at = role;
+        for (int i = 0; i < FollowChainLimit && run.Follow.TryGetValue(at, out long next); i++) at = next;
+        return at;
+    }
+
+    /// <summary>
+    /// 82628 SelectFollowReq{type, roleId, followedRoleId} (LC_DAL_Chicken.SendChickenFollow):
+    /// Followed (2) {self, target}: follow a teammate (also accepting its invite); Cancle (0) {self, target}: stop;
+    /// Invite (1) {target or 0 = every teammate, self}: invite. The checks mirror the panel (CanShowFollow,
+    /// CanShowInvite): no following inside one's own follow group or someone who follows another; no invite while
+    /// following, before a landing pick, or inside the invite cooldown. The response handler is empty.
+    /// </summary>
     public async Task SelectFollowAsync(GameSession session, SelectFollowReq req)
     {
         int result = ErrorCodes.Parameter;
-        if (Chicken(session) is (var match, var run, _))
+        if (Chicken(session) is (var match, var run, var me))
             await RunMatchTransitionAsync(match, "chicken follow", async () =>
             {
+                if (match.Settled || run.Stage != StageChoosePos) { result = ErrorCodes.FeatureUnavailable; return; }
                 long self = match.Participants[session].Id;
-                int faction = match.Faction[session];
-                var mates = Team(match, faction).ToDictionary(p => match.Participants[p].Id);
-                bool Mate(long id) => mates.ContainsKey(id);
+                var team = Team(match, match.Faction[session]).Where(p => p != session && !match.Absent.Contains(p))
+                    .ToDictionary(p => match.Participants[p].Id);
                 switch (req.Type)
                 {
-                    case EChickenFollowNotifyType.Invite:
-                        {
-                            if (req.FollowedRoleId != self || (req.RoleId != 0 && (!Mate(req.RoleId) || req.RoleId == self))) return;
-                            long now = _time.GetUtcNow().ToUnixTimeSeconds();
-                            var invited = (req.RoleId == 0 ? mates.Keys.Where(id => id != self) : [req.RoleId])
-                                .Where(id => run.InviteCd.GetValueOrDefault((self, id)) <= now).ToArray();
-                            if (invited.Length == 0) { result = ErrorCodes.DungeonBusy; return; }
-                            foreach (long id in invited)
-                            {
-                                run.InviteCd[(self, id)] = now + InviteCdSeconds();
-                                if (InRoom(match).Contains(mates[id]))
-                                    await mates[id].SendGameAsync(InviteFollowNotify, new ChickenInviteFollowNotify { FollowedRoleId = self });
-                            }
-                            break;
-                        }
                     case EChickenFollowNotifyType.Followed:
-                        // The follower itself, or (inferred) the one followed calling its teammates (the map's
-                        // "everyone follow me", UI_Sys_Chicken_MapPanelModel.lua:86-98).
-                        if (!Mate(req.RoleId) || !Mate(req.FollowedRoleId) || req.RoleId == req.FollowedRoleId
-                            || (req.RoleId != self && req.FollowedRoleId != self)) return;
-                        // No circles: whoever the target follows, directly or not, may not be the follower.
-                        long at = req.FollowedRoleId;
-                        for (int hops = 0; hops < mates.Count && run.Follow.TryGetValue(at, out long next); hops++)
-                            if ((at = next) == req.RoleId) return;
-                        run.Follow[req.RoleId] = req.FollowedRoleId;
+                        if (req.RoleId != self || !team.ContainsKey(req.FollowedRoleId) || run.Follow.ContainsKey(req.FollowedRoleId)
+                            || FollowLeader(run, req.FollowedRoleId) == FollowLeader(run, self)) return;
+                        run.Follow[self] = req.FollowedRoleId;
                         break;
                     case EChickenFollowNotifyType.Cancle:
-                        if (!run.Follow.TryGetValue(req.RoleId, out long followed) || (req.RoleId != self && followed != self)) return;
-                        run.Follow.Remove(req.RoleId);
+                        if (req.RoleId != self || run.Follow.GetValueOrDefault(self) != req.FollowedRoleId || req.FollowedRoleId == 0) return;
+                        run.Follow.Remove(self);
                         break;
-                    default: return;
+                    case EChickenFollowNotifyType.Invite:
+                        if (req.FollowedRoleId != self || run.Follow.ContainsKey(self) || !me.LandChosen) return;
+                        long now = NowMs() / 1000;
+                        GameSession[] invited = req.RoleId == 0 ? [.. team.Values]
+                            : team.TryGetValue(req.RoleId, out var one) ? [one] : [];
+                        invited = [.. invited.Where(p => run.InviteCdSec.GetValueOrDefault((self, match.Participants[p].Id)) <= now
+                            && FollowLeader(run, match.Participants[p].Id) != self)];
+                        if (invited.Length == 0) { result = ErrTooFrequent; return; }
+                        foreach (var invitee in invited)
+                        {
+                            run.InviteCdSec[(self, match.Participants[invitee].Id)] = now + InviteCdSec;
+                            if (InRoom(match).Contains(invitee))
+                                await invitee.SendGameAsync(InviteFollowNotify, new ChickenInviteFollowNotify { FollowedRoleId = self });
+                        }
+                        break;
+                    default:
+                        return;
                 }
                 result = 0;
-                await SendFollowAsync(match, run, faction);
+                await SendFollowAsync(match, run, InRoom(match).Where(p => match.Faction[p] == match.Faction[session]));
             });
         await session.SendGameAsync(SelectFollow, new SelectFollowResp { Result = result });
     }
 
-    private ChickenSelectFollowResp FollowState(Match match, ChickenRun run, GameSession player)
+    /// <summary>
+    /// 82673 ChickenSelectFollowResp{followedMap follower -> followed, inviteCd invitee -> end in seconds} to these
+    /// players of one team: LC_DAL_Chicken._processCheckFollowNotify replaces the team relation and pairs() both maps
+    /// unguarded, so an empty one carries a wire-only 0 -> 0 (no player is 0; GetFollowLeader stops on it).
+    /// </summary>
+    private async Task SendFollowAsync(Match match, ChickenRun run, IEnumerable<GameSession> to)
     {
-        int faction = match.Faction[player];
-        var team = Team(match, faction).Select(p => match.Participants[p].Id).ToHashSet();
-        long self = match.Participants[player].Id;
-        var state = new ChickenSelectFollowResp();
-        foreach (var (follower, followed) in run.Follow)
-            if (team.Contains(follower)) state.FollowedMap[follower] = followed;
-        long now = _time.GetUtcNow().ToUnixTimeSeconds();
-        foreach (var ((inviter, invitee), end) in run.InviteCd)
-            if (inviter == self && end > now) state.InviteCd[invitee] = end;
-        return state;
+        foreach (var group in to.GroupBy(p => match.Faction[p]))
+        {
+            var ids = Team(match, group.Key).Select(p => match.Participants[p].Id).ToHashSet();
+            var notify = new ChickenSelectFollowResp();
+            foreach (var (follower, followed) in run.Follow.Where(kv => ids.Contains(kv.Key))) notify.FollowedMap[follower] = followed;
+            long now = NowMs() / 1000;
+            foreach (var ((inviter, invitee), end) in run.InviteCdSec.Where(kv => ids.Contains(kv.Key.Inviter) && kv.Value > now))
+                notify.InviteCd[invitee] = Math.Max(end, notify.InviteCd.GetValueOrDefault(invitee));
+            if (notify.FollowedMap.Count == 0) notify.FollowedMap[0] = 0;
+            if (notify.InviteCd.Count == 0) notify.InviteCd[0] = 0;
+            await RoleFanout.EachAsync(group, p => p.SendGameAsync(FollowNotify, notify));
+        }
     }
 
-    private Task SendFollowAsync(Match match, ChickenRun run, int faction) =>
-        RoleFanout.EachAsync(Team(match, faction).Where(p => InRoom(match).Contains(p)),
-            p => p.SendGameAsync(FollowNotify, FollowState(match, run, p)));
-
-    /// <summary>The landing of the one a player follows (to the end of the chain), if it picked one.</summary>
-    private ChickenPlayer? Leader(Match match, ChickenRun run, GameSession player)
+    /// <summary>A player who leaves drops out of the follow relation (its followers stop following).</summary>
+    private async Task DropFollowAsync(Match match, ChickenRun run, GameSession player)
     {
-        var byId = match.Players.ToDictionary(p => match.Participants[p].Id);
-        long at = match.Participants[player].Id;
-        for (int hops = 0; hops < match.Players.Length && run.Follow.TryGetValue(at, out long next); hops++)
-        {
-            at = next;
-            if (byId.TryGetValue(at, out var leader) && run.Players[leader].LandChosen) return run.Players[leader];
-        }
-        return null;
-    }
-
-    // ---- 82672 head signs ----
-
-    public async Task OpenPanelAsync(GameSession session, ChickenOpenPanelReq req)
-    {
-        if (req.PanelNum is EChickenOpenPanel.Shop or EChickenOpenPanel.Adventure or EChickenOpenPanel.Ambulance
-            && Chicken(session) is (var match, _, _) && session.Role != null)
-        {
-            var sign = new CustomData
-            {
-                Id = (long)req.PanelNum,
-                CustomParam = new CustomParam { Tp = CustomParam.Types.ParamType.Int, IntParam = req.IsOpen ? 1 : 0 },
-            };
-            var change = new CustomDataChange { EntityId = session.Role.Id, CustomDatas = { sign } };
-            await RoleFanout.EachAsync(InRoom(match).Where(p => p != session),
-                p => p.SendGameAsync(WorldCoreService.CustomChange, change));
-        }
-        await session.SendGameAsync(OpenPanel, new ChickenOpenPanelResp { Req = req });
+        long id = match.Participants[player].Id;
+        bool changed = run.Follow.Remove(id);
+        foreach (long follower in run.Follow.Where(kv => kv.Value == id).Select(kv => kv.Key).ToArray())
+            changed |= run.Follow.Remove(follower);
+        if (changed && run.Stage == StageChoosePos)
+            await SendFollowAsync(match, run, InRoom(match).Where(p => match.Faction[p] == match.Faction[player]));
     }
 }

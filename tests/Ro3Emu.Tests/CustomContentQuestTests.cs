@@ -51,7 +51,7 @@ public sealed class CustomContentQuestTests : IAsyncLifetime
     private async Task Gm(string line)
     {
         using var http = new HttpClient();
-        (await http.PostAsync($"{_http}/ro3emu/gm?account=customalice", new StringContent(line))).EnsureSuccessStatusCode();
+        (await http.PostAsync($"{_http}/ro3emu/gm?account=customalice", Operator.Command(line))).EnsureSuccessStatusCode();
     }
 
     private static async Task<T> Next<T>(BotClient bot, uint id, Google.Protobuf.MessageParser<T> parser) where T : Google.Protobuf.IMessage<T> =>

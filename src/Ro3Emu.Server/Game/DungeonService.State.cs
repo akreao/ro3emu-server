@@ -14,15 +14,15 @@ public sealed partial class DungeonService
         public long SeasonStart { get; set; }
         public long JobPosition { get; set; }
         public bool FirstSetted { get; set; }
-        public Dictionary<string, Record> Records { get; set; } = new();
-        public Dictionary<string, Allowance> Allowances { get; set; } = new();
-        public Dictionary<long, byte[]> Statistics { get; set; } = new();
-        public Dictionary<string, byte[]> Results { get; set; } = new();
-        public Dictionary<string, JourneyVictory> PendingJourney { get; set; } = new();
+        public Dictionary<string, Record> Records { get; set; } = [];
+        public Dictionary<string, Allowance> Allowances { get; set; } = [];
+        public Dictionary<long, byte[]> Statistics { get; set; } = [];
+        public Dictionary<string, byte[]> Results { get; set; } = [];
+        public Dictionary<string, JourneyVictory> PendingJourney { get; set; } = [];
         /// <summary>Final Trial honors per "multi:mark": TenGameplayFinalTrialConfig id -> DBMultiDungeonHonorState.</summary>
-        public Dictionary<string, Dictionary<long, int>> Honors { get; set; } = new();
+        public Dictionary<string, Dictionary<long, int>> Honors { get; set; } = [];
         /// <summary>Sacred Blessing level (TenGameplayBuffConfig id) last acknowledged per boss (82588 clears isNeedTip).</summary>
-        public Dictionary<long, long> BlessingsSeen { get; set; } = new();
+        public Dictionary<long, long> BlessingsSeen { get; set; } = [];
         /// <summary>"multi:mark" whose first-clear reward (_iPartAward) was paid by 82587; a season reset clears it with Records.</summary>
         public HashSet<string> FirstPassPaid { get; set; } = [];
     }
@@ -154,7 +154,8 @@ public sealed partial class DungeonService
                 int maximum = _catalog.Refresh(multi) is { } refresh ? (int)GameData.Int(refresh, "_iRewardMaxNum") : 0;
                 var award = new DBMultiDungeonAwardInfo
                 {
-                    TotalNumber = maximum, UseNumber = maximum - allowance.Remaining,
+                    // Testing UnlimitedRewards (TEST AID, not original): the count shows full, as it is never spent.
+                    TotalNumber = maximum, UseNumber = _testing.UnlimitedRewards ? 0 : maximum - allowance.Remaining,
                     // Separate first clear from recurring counters: Lua adds a free first entitlement for NotPass.
                     IsFirst = FirstPassAwardState(state, $"{id}:{mark}", boss, record),
                     FirstPassState = (MultiDungeonFirstPassState)(record?.Passed == true ? 2 : 0),

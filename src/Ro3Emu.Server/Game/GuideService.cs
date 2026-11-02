@@ -1,7 +1,6 @@
 using Google.Protobuf;
 using Romsg;
 using Ro3Emu.Server.Accounts;
-using Ro3Emu.Server.Data;
 
 namespace Ro3Emu.Server.Game;
 
@@ -9,21 +8,12 @@ namespace Ro3Emu.Server.Game;
 /// Tutorial guides (LC_GuideManager): the client runs them and reports 84000 UPDATE_GUIDE {guideIds, records} and 31210
 /// CLIENT_COMPLETE_GUIDE {guildId (sic)}; the server keeps the finished set in DBGuideInfo (AUTO_SYNC 5055), which the
 /// client reads at login so a finished guide does not run again. Without it every login replays the guides.
-/// Both guideIds and the record keys are GuideConfig _iID values (LC_GuideManager sends its finished and triggered
-/// lists), so ids the table doesn't have are dropped, and the stored set and each message are capped: a modified client
-/// could otherwise send ~200k ids per frame and grow the blob that every login re-sends.
 /// </summary>
-public sealed class GuideService(RoleStore roles, GameData data, ILogger<GuideService> log)
+public sealed class GuideService(RoleStore roles, Data.GameData data, ILogger<GuideService> log)
 {
     public const uint GuideInfoSync = 5055;
     public const uint UpdateGuide = 84000;
     public const uint CompleteGuide = 31210;
-
-    /// <summary>Ids read from one 84000 message (and record entries); the rest are ignored. GuideConfig has ~160 rows.</summary>
-    internal const int MaxPerMessage = 256;
-
-    /// <summary>Finished ids and records kept per role; only reached without client data, where ids can't be checked.</summary>
-    internal const int MaxStored = 1024;
 
     /// <summary>
     /// LC_DAL_Guide._allDBGuideInfoProcess walks finishedGuideIds / guideFinishRecord without nil checks, and empty
@@ -34,69 +24,45 @@ public sealed class GuideService(RoleStore roles, GameData data, ILogger<GuideSe
     public async Task LoginAsync(GameSession session)
     {
         var saved = roles.LoadGuides(session.Role!.Id);
-        var guides = saved != null ? DBGuideInfo.Parser.ParseFrom(saved) : new DBGuideInfo();
-        session.Guides = Clean(guides, Known);
-        if (saved != null && !guides.Equals(session.Guides)) roles.SaveGuides(session.Role.Id, session.Guides.ToByteArray());
+        session.Guides = saved != null ? DBGuideInfo.Parser.ParseFrom(saved) : new DBGuideInfo();
         await SyncAsync(session);
     }
 
     public async Task UpdateAsync(GameSession session, UpdateGuideReq req)
     {
         if (session.Guides == null) return;
-        if (Apply(session.Guides, req.GuideIds.Take(MaxPerMessage), req.Records.Take(MaxPerMessage), Known))
-            await SaveAndSyncAsync(session, req.GuideIds.Count);
+        foreach (var id in req.GuideIds.Take(MaxPerUpdate)) Finish(session, id);
+        foreach (var (id, value) in req.Records.Take(MaxPerUpdate))
+            if (Known(id)) session.Guides.GuideFinishRecord[id] = value;
+        await SaveAndSyncAsync(session);
     }
 
     public async Task CompleteAsync(GameSession session, ClientCompleteGuideReq req)
     {
         if (session.Guides == null) return;
-        if (Apply(session.Guides, [req.GuildId], [], Known)) await SaveAndSyncAsync(session, 1);
+        Finish(session, req.GuildId);
+        await SaveAndSyncAsync(session);
     }
 
-    /// <summary>A GuideConfig row id; any positive id when the server runs without client data.</summary>
-    private bool Known(long id)
+    /// <summary>
+    /// Ids the client can report: GuideConfig rows (any id when the table is absent). Whatever else a modified client sends
+    /// would be saved with the role and sent back at every login, so it is dropped, and one update is cut at
+    /// <see cref="MaxPerUpdate"/> entries (inferred; the client reports one guide or a handful).
+    /// </summary>
+    private bool Known(long id) => data.Table("GuideConfig").Count == 0 || data.Row("GuideConfig", id) != null;
+
+    private const int MaxPerUpdate = 256;
+
+    private void Finish(GameSession session, long id)
     {
-        if (id <= Placeholder) return false;
-        var table = data.Table("GuideConfig");
-        return table.Count == 0 || table.ContainsKey(id.ToString());
+        if (id != Placeholder && Known(id) && !session.Guides!.FinishedGuideIds.Contains(id)) session.Guides.FinishedGuideIds.Add(id);
     }
 
-    /// <summary>Adds the known finished ids and records to <paramref name="guides"/> up to the caps; true if it changed.</summary>
-    internal static bool Apply(DBGuideInfo guides, IEnumerable<long> ids, IEnumerable<KeyValuePair<long, long>> records, Func<long, bool> known)
-    {
-        bool changed = false;
-        var finished = guides.FinishedGuideIds.ToHashSet();
-        foreach (var id in ids)
-        {
-            if (finished.Count >= MaxStored) break;
-            if (!known(id) || !finished.Add(id)) continue;
-            guides.FinishedGuideIds.Add(id);
-            changed = true;
-        }
-        foreach (var (id, value) in records)
-        {
-            if (!known(id)) continue;
-            if (guides.GuideFinishRecord.TryGetValue(id, out var old) ? old == value : guides.GuideFinishRecord.Count >= MaxStored) continue;
-            guides.GuideFinishRecord[id] = value;
-            changed = true;
-        }
-        return changed;
-    }
-
-    /// <summary>A saved blob reduced to known, distinct ids within the caps (roles saved before the limits existed).</summary>
-    internal static DBGuideInfo Clean(DBGuideInfo saved, Func<long, bool> known)
-    {
-        var clean = new DBGuideInfo { Ro3DefineSyncVersion = saved.Ro3DefineSyncVersion };
-        Apply(clean, saved.FinishedGuideIds, saved.GuideFinishRecord, known);
-        return clean;
-    }
-
-    private async Task SaveAndSyncAsync(GameSession session, int sent)
+    private async Task SaveAndSyncAsync(GameSession session)
     {
         var guides = session.Guides!;
         roles.SaveGuides(session.Role!.Id, guides.ToByteArray());
-        log.LogDebug("{Name} guides: {Sent} reported, {Finished} finished, {Records} records", session.Role.Name, sent,
-            guides.FinishedGuideIds.Count, guides.GuideFinishRecord.Count);
+        log.LogInformation("{Name} guides done: {Guides}", session.Role.Name, string.Join(",", guides.FinishedGuideIds));
         await SyncAsync(session);
     }
 

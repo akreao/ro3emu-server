@@ -1,154 +1,172 @@
 using System.Text.Json;
-using Ro3Emu.Server.Data;
+using Romsg;
+using Ro3Emu.Server.Data.Config;
+using Ro3Emu.Server.Maps;
 
 namespace Ro3Emu.Server.Game;
 
 /// <summary>
-/// Class companions: the Hunter's falcon, the Ranger's Demonic Wolf and the Mechanic's Madogear (Special Class Items,
-/// CareerSpecialService). A leased falcon or wolf follows as a pendant (PendantConfig _iType 1 falcon, 2 cart, 6 wolf);
-/// the wolf and the Madogear are also battle mounts (MountService.RidingBattle).
-/// <list type="bullet">
-/// <item>Skill conditions: SkillConfig._iSkillCondition names an LC_ConditionList row the client checks before a cast
-/// (LC_InteractCondition): [2001, subtype] an equipped item of that ItemConfig _iSubType (2002 none), [2003, id] riding
-/// that battle mount (2004 not), [2006, type] a pendant of that PendantConfig _iType (2007 none). Blitz Beat needs the
-/// falcon and no wolf ride, Warg Bite the wolf ride, Dragon Breath the dragon, Arm Cannon the Madogear, Pierce a spear.
-/// m_eType 1 is all of its clauses, 2 any; m_bInverse negates a clause.</item>
-/// <item>Companion buffs: a leased pendant's CartRemouldTable _iPendantBuffID (Falconry 1310101, Warg Accessory 1399901)
-/// lasts while it is leased (inferred lifetime). A ridden mount's bind buffs, Wolf's Fang and Wolf Taming's howl are
-/// RidingEffects.</item>
-/// <item>Warg Bite 13325 "resets the Cooldown of 【Warg Hunt】"; Swift Warg 13326: "Casting 【Warg Charge】 or 【Warg Hunt】
-/// resets this skill's Cooldown" (Warg Charge is Warg Strike's mounted form, 13312 mode 1).</item>
-/// <item>King of the Wargs 13322's 【King of the Pack】 (buff group 13326, _kLogicData [charge companion, bite companion]):
-/// "casting 【Warg Charge】 causes 4 wolf followers to charge alongside you, dealing 4 Extra hits ... totaling Physical
-/// ATK*320%" (the companion row 1332705 deals 80% per follower) and "Casting 【Warg Bite】 causes 3 wolf followers to bite
-/// the target ... totaling Physical ATK*240%" (row 1332805 deals the 240% at once) (inferred split).</item>
-/// </list>
+/// Allied companions in combat (CompanionUnit). A companion's cast is shown like a monster's (31100 UseInSkill, then
+/// 31101 SkillHit) and deals the skill's damage from its monster template through the shared formula; the hit is
+/// settled on the monster exactly like a player's (hit bookkeeping, durable kill, kill observers), credited to a present
+/// participant of the run (inferred: the original credited its own script). A monster answers with its normal attack;
+/// a companion at 0 HP dies and its owner removes it. Separate from the tower pet paths (CombatService.TowerPets).
 /// </summary>
 public sealed partial class CombatService
 {
-    private const int WargStrikeSkillGroup = 13312,
-        KingOfTheWargsGroup = 13322, WargHuntGroup = 13323, WargBiteGroup = 13325, SwiftWargGroup = 13326,
-        KingOfThePackBuffGroup = 13326, WolfMountType = 4;
+    /// <summary>(inferred) A hit lands at 40% of the cast's action, as for tower pets: the server hit point is not in the client.</summary>
+    private const double CompanionHitShare = 0.4;
+    /// <summary>EffectData 1000002, the hit effect a monster's normal swing shows on players and tower pets too.</summary>
+    private const int DefaultHitEffect = 1000002;
+    /// <summary>The window CompanionDps averages a rotation over.</summary>
+    private const long CompanionDpsWindowMs = 600_000;
 
-    // ------------------------------------------------------------------ skill conditions
+    private void WireCompanions() => _monsters.AttackCompanion = MonsterAttackCompanionAsync;
 
-    /// <summary>The row's _iSkillCondition holds (no condition, or an unknown clause type, holds).</summary>
-    internal bool SkillConditionMet(GameSession s, JsonElement row) =>
-        GameData.Int(row, "_iSkillCondition") is not (var id and > 0)
-        || _data.Row("LC_ConditionList", id) is not { } condition || ConditionMet(s, condition);
-
-    private bool ConditionMet(GameSession s, JsonElement node)
+    internal async Task CompanionAttackAsync(CompanionUnit companion, MonsterUnit target, CompanionUnit.Skill skill)
     {
-        int type = (int)GameData.Int(node, "m_eType");
-        bool met;
-        if (type is 1 or 2)
+        if (!Reaches(companion, target, skill, 1f) || SkillConfig.Get(_data, skill.Id) is not { } config) return;
+        long castId = ++_sessionIds;
+        await _world.ToUnitViewersAsync(companion, UseInSkill, new UseInSkillInfo
         {
-            var clauses = node.TryGetProperty("m_kSubConditionList", out var list) && list.ValueKind == JsonValueKind.Array
-                ? list.EnumerateArray().Select(clause => ConditionMet(s, clause)).ToArray() : [];
-            met = clauses.Length == 0 || (type == 1 ? clauses.All(c => c) : clauses.Any(c => c));
+            SrcID = companion.Uid, SkillID = skill.Id, TargetId = target.Uid, TargetPos = target.Pos, Face = companion.Face,
+            SessionId = castId, SkillMs = skill.ActionMs, StartTime = Now,
+        });
+        ScheduleRuntime(companion.WorldScene, TimeSpan.FromMilliseconds(skill.ActionMs * CompanionHitShare),
+            () => CompanionHitAsync(companion, target, skill, config.Row, castId));
+    }
+
+    private static bool Reaches(CompanionUnit companion, MonsterUnit target, CompanionUnit.Skill skill, float slack) =>
+        !companion.Dead && companion.Hp > 0 && !companion.Removed && !target.Dead && target.Hp > 0
+        && target.InstanceId == companion.InstanceId && target.WorldScene == companion.WorldScene
+        && MonsterService.Distance(companion.X, companion.Z, target.X, target.Z) <= skill.Range + slack;
+
+    private static Fighter CompanionFighter(MonsterTemplate t) =>
+        new(t.Atk, t.Matk, t.Hit, t.Cri, t.Level, t.Element) { Def = t.Def, Mdef = t.Mdef, Flee = t.Flee };
+
+    private async Task CompanionHitAsync(CompanionUnit companion, MonsterUnit target, CompanionUnit.Skill skill, JsonElement row, long castId)
+    {
+        if (!Reaches(companion, target, skill, 2f) || companion.Credit() is not { Role: { } role } player) return;
+        var attachment = player.Attachment;
+        long generation = player.SceneGeneration;
+        bool Current() => ReferenceEquals(player.Role, role) && ReferenceEquals(player.Attachment, attachment)
+            && !player.SceneLoading && player.SceneGeneration == generation && player.WorldScene == target.WorldScene;
+        var (damage, result) = Damage(CompanionFighter(companion.Template), MonsterFighter(target), row);
+        long previousHp = target.Hp;
+        target.Hp = Math.Max(0, target.Hp - damage);
+        bool lethal = target.Hp == 0; // reserved before the awaited settlement, as a player's hit does
+        await SettleMonsterHitAsync(player, target, previousHp, damage);
+        var hit = new SkillHitInfo
+        {
+            SrcID = companion.Uid, SkillId = skill.Id, ShowPoint = HitEffect(new SkillConfig(row).ScriptShow),
+            SessionId = castId, SrcElement = companion.Template.Element,
+            Dsts = { new DamageInfo { DstID = target.Uid, Damage = damage, HitResult = result, DstElement = target.Template.Element,
+                IsDead = target.Hp == 0 } },
+        };
+        foreach (var viewer in target.Viewers.Union(companion.Viewers).ToArray()) await viewer.SendGameAsync(SkillHit, hit);
+        if (target.Hp == 0 && !target.DeathDurable) return; // another cast's uncommitted death
+        await _world.ToUnitViewersAsync(target, AoiAttrChange, MonsterService.Hp(target));
+        if (target.Hp > 0)
+        {
+            _monsters.Engage(target, companion);
+            await FightingAsync(target);
+            return;
         }
-        else met = ClauseMet(s, Numbers(node, "m_kData"));
-        return node.TryGetProperty("m_bInverse", out var inverse) && inverse.ValueKind == JsonValueKind.True ? !met : met;
+        if (lethal) await CompanionKillAsync(player, target, castId, Current);
     }
 
-    private bool ClauseMet(GameSession s, double[] clause) => clause switch
+    /// <summary>A companion's kill, published as a player's: the corpse, the attackers' interrupted swings, the kill observers
+    /// (the dungeon's wave and step completion and statistics).</summary>
+    private async Task CompanionKillAsync(GameSession player, MonsterUnit target, long castId, Func<bool> current)
     {
-        [2001, var subType, ..] => EquipsSubType(s, (int)subType),
-        [2002, var subType, ..] => !EquipsSubType(s, (int)subType),
-        [2003, var mount, ..] => MountService.RidingBattle(s) == (long)mount,
-        [2004, var mount, ..] => MountService.RidingBattle(s) != (long)mount,
-        [2006, var pendant, ..] => HasPendantType(s, (int)pendant),
-        [2007, var pendant, ..] => !HasPendantType(s, (int)pendant),
-        // CheckSceneFlyable (LC_ConditionDefine): the map allows flight (MapConfig _iFly), e.g. Take Flight's 86000558.
-        [2009, var flag, ..] => (_data.Row("MapConfig", s.SceneEntry) is { } map && GameData.Int(map, "_iFly") == 1) == (flag != 0),
-        _ => true,
-    };
-
-    /// <summary>CheckEquipStatue: any worn ItemConfig _iType 5 (equipment) item of that subtype.</summary>
-    private bool EquipsSubType(GameSession s, int subType) => s.Items.Any(i => i.Grid > 0
-        && _data.Row("ItemConfig", i.Entry) is { } item && GameData.Int(item, "_iType") == 5 && GameData.Int(item, "_iSubType") == subType);
-
-    /// <summary>LC_Pendant_Manager.HasPendantByConfigId: a shown pendant whose PendantConfig _iType matches.</summary>
-    private bool HasPendantType(GameSession s, int type) =>
-        s.CareerPendants.Any(p => _data.Row("PendantConfig", p) is { } row && GameData.Int(row, "_iType") == type);
-
-    private bool RidesWolf(GameSession s) => RiddenMountType(s) == WolfMountType;
-
-    /// <summary>The ridden Battle mount's CartRemouldTable _iSubType (2 Peco Peco, 4 wolf, 5 Madogear, 6 dragon,
-    /// 7 gryphon); 0 on foot or on an ordinary mount.</summary>
-    private int RiddenMountType(GameSession session) =>
-        MountService.Rider(session) is var id and not 0 && _data.Row("CartRemouldTable", id) is { } row
-            && GameData.Int(row, "_iType") == 2 ? (int)GameData.Int(row, "_iSubType") : 0;
-
-    // ------------------------------------------------------------------ companion buffs
-
-    /// <summary>After a lease, a ride, a learned level, a job change or a scene load: grant or end the companion buffs, and
-    /// resend the normal attack when the ridden battle mount changed.</summary>
-    /// <summary>WorldCoreService.FlightChanged: a flying mount's ground/air buff and its wheel slot follow the flight.</summary>
-    public async Task FlightChangedAsync(GameSession s)
-    {
-        await SyncCompanionsAsync(s);
-        await _skills.RefreshMountSkillAsync(s);
-    }
-
-    public async Task SyncCompanionsAsync(GameSession s)
-    {
-        if (s.Role == null || s.Progress == null) return;
-        var want = new HashSet<int>();
-        var info = s.CareerSpecial;
-        foreach (long lease in new[] { info?.PendantSlot?.CartRemouldCfg ?? 0, info?.MountsSlot?.CartRemouldCfg ?? 0 })
-            if (lease != 0 && _data.Row("CartRemouldTable", lease) is { } cart && GameData.Int(cart, "_iPendantBuffID") is var buff and > 0
-                && s.CareerPendants.Contains((int)GameData.Int(cart, "_iPendantId")))
-                want.Add((int)buff);
-        long ride = MountService.RidingBattle(s);
-        // A flying System mount in the air: the buff that shares the landing skill's id (3112201, FlyBuffTag 3100000,
-        // which WorldCoreService.CanFly needs). On the ground its MountsConfig _kBindBuff (Starshatter Dragon 3112101)
-        // stands instead; RidingEffects grants the bind buffs of every ridden mount and Wolf's Fang. The two rows name
-        // each other's group in _kLogicData (31121 <-> 31122), so one replaces the other (inferred).
-        if (s.WorldState.Flying && MountService.RidingSystem(s) > 0 && MountService.FlySkills(s, _data) is { } fly) want.Add(fly.Down);
-        want.RemoveWhere(id => _data.Row("BuffConfig", id) == null);
-
-        foreach (var ending in s.Buffs.Where(b => s.CompanionBuffs.Contains(b.ConfigId) && !want.Contains(b.ConfigId)
-                     && b.ExpireMs == long.MaxValue).ToArray())
-            await _buffs.RemoveAsync(s, ending);
-        foreach (int id in want)
-            if (!s.Buffs.Any(b => b.ConfigId == id && b.ExpireMs == long.MaxValue)) await _buffs.AddLastingAsync(s, id, s.Role.Id);
-        s.CompanionBuffs = want;
-
-        if (s.CompanionRide != ride)
+        try
         {
-            s.CompanionRide = ride;
-            await _skills.WeaponChangedAsync(s);
+            await _monsters.KillAsync(target);
+            foreach (var other in _sessions.All().Where(o => o.Attack?.Target == target))
+            {
+                other.Attack = null;
+                await other.SendGameAsync(SkillEnd, new SkillEndNotify
+                {
+                    SrcID = other.Role!.Id, SessionId = castId, Type = SkillEndNotify.Types.SkillEndType.Interrupted,
+                    InterruptedInfo = new SkillInterruptedInfo { Type = SkillInterruptedInfo.Types.SkillInterruptType.LockerInvalid },
+                });
+            }
+            await PublishDurableKillAsync(player, target, current);
+        }
+        finally
+        {
+            if (target.Dead) await FinalizeLethalPublicationAsync(target);
         }
     }
 
-    // ------------------------------------------------------------------ wolf skill links
-
-    /// <summary>After a landed wolf skill: the cooldown resets and King of the Pack's extra companions.</summary>
-    private async Task WolfAfterCastAsync(GameSession s, ActiveSkillCast action)
+    private async Task MonsterAttackCompanionAsync(MonsterUnit monster, CompanionUnit companion)
     {
-        if (action.Proc) return;
-        var row = action.Row;
-        int group = (int)GameData.Int(row, "_iSkillID");
-        bool charge = group == WargStrikeSkillGroup && GameData.Int(row, "_iMode") == 1;
-        if (group == WargBiteGroup) await ResetCooldownAsync(s, WargHuntGroup);
-        if (charge || group == WargHuntGroup)
+        if (companion.Dead || companion.Hp <= 0 || monster.Dead || monster.Hp <= 0) return;
+        long castId = ++_sessionIds;
+        await _world.ToUnitViewersAsync(monster, UseInSkill, new UseInSkillInfo
         {
-            await ResetCooldownAsync(s, SwiftWargGroup);
-            ArmSwiftWarg(s);
-        }
-        if (!charge && group != WargBiteGroup) return;
+            SrcID = monster.Uid, SkillID = monster.Template.NormalSkill, TargetId = companion.Uid, TargetPos = companion.Pos,
+            Face = monster.Face, SessionId = castId, SkillMs = monster.Template.SkillMs, StartTime = Now,
+        });
+        ScheduleRuntime(monster.WorldScene, TimeSpan.FromSeconds(monster.Template.HitPointSeconds), async () =>
+        {
+            if (companion.Dead || companion.Hp <= 0 || companion.Removed || monster.Dead || monster.Hp <= 0
+                || monster.WorldScene != companion.WorldScene
+                || MonsterService.Distance(monster.X, monster.Z, companion.X, companion.Z) > monster.Template.AttackRange + 2f) return;
+            await DamageCompanionAsync(monster, companion, SkillConfig.Get(_data, monster.Template.NormalSkill)?.Row,
+                monster.Template.NormalSkill, castId, DefaultHitEffect);
+        });
+    }
 
-        long now = MonsterService.NowMs;
-        var pack = s.Buffs.Where(b => b.ExpireMs > now && !b.IsPassive).Select(b => _data.Row("BuffConfig", b.ConfigId))
-            .FirstOrDefault(r => r is { } c && GameData.Int(c, "_iBuffID") == KingOfThePackBuffGroup);
-        if (pack is not { } packRow || Numbers(packRow, "_kLogicData") is not [var chargeId, var biteId, ..]
-            || _data.Row("SkillConfig", (long)(charge ? chargeId : biteId)) is not { } companion
-            || FindMonster(s.WorldScene, action.Request.TargetId) is not { } target) return;
-        int followers = 1;
-        if (charge && _data.Row("SkillConfig", _skills.RealId(KingOfTheWargsGroup, (int)Math.Max(1, GameData.Int(packRow, "_iLevel")))) is { } king
-            && Numbers(king, "_kDescData") is [_, var count, ..] && count > 0)
-            followers = (int)count;
-        for (int i = 0; i < followers && !target.Dead && target.Hp > 0; i++) await ProcCastAsync(s, companion, target);
+    /// <summary>A monster's hit on a companion (its normal attack, or a boss area skill at the boss skills' damage
+    /// percent): the row's damage against the companion's template, its HP and death.</summary>
+    private async Task DamageCompanionAsync(MonsterUnit monster, CompanionUnit companion, JsonElement? row, int skillId,
+        long castId, int showPoint, int damagePercent = 100)
+    {
+        var t = companion.Template;
+        var defender = new Fighter(0, 0, 0, 0, t.Level, t.Element) { Def = t.Def, Mdef = t.Mdef, Flee = t.Flee };
+        var (damage, result) = row is { } r ? Damage(MonsterFighter(monster), defender, r)
+            : (Math.Max(1, monster.Template.Atk), DamageHitResult.Normal);
+        damage = MonsterBuffDamage(monster, row, ScaleMonsterDamage(damage, monster.DamageRatio));
+        if (damagePercent != 100) damage = damagePercent <= 0 ? 0 : ScaleMonsterDamage(damage, damagePercent * 100);
+        companion.Hp = Math.Max(0, companion.Hp - damage);
+        companion.Dead = companion.Hp == 0; // reserved before the awaited broadcasts
+        var hit = new SkillHitInfo
+        {
+            SrcID = monster.Uid, SkillId = skillId, ShowPoint = showPoint, SessionId = castId,
+            SrcElement = monster.Template.Element,
+            Dsts = { new DamageInfo { DstID = companion.Uid, Damage = damage, HitResult = result, DstElement = t.Element,
+                IsDead = companion.Dead } },
+        };
+        await _world.ToUnitViewersAsync(monster, SkillHit, hit);
+        await _world.ToUnitViewersAsync(companion, AoiAttrChange, companion.HpChange());
+        if (!companion.Dead) return;
+        await _world.ToUnitViewersAsync(companion, EntityBaseChange, companion.StateChange());
+        await companion.Fell(companion);
+    }
+
+    /// <summary>
+    /// A companion's expected damage per second against a monster, standing in reach: its rotation (CompanionUnit.Pick,
+    /// NextAttackMs) over a long window, each cast's expected damage from the same formula as its hits. The reconstructed
+    /// story bosses fought beside companions are tuned with it (DungeonTests.StoryBossTuning).
+    /// </summary>
+    internal double CompanionDps(CompanionUnit.Kit kit, MonsterTemplate target)
+    {
+        var attacker = CompanionFighter(kit.Template);
+        var defender = new Fighter(0, 0, target.Flee, 0, target.Level, target.Element) { Def = target.Def, Mdef = target.Mdef, Flee = target.Flee };
+        var ready = new Dictionary<int, long>();
+        double total = 0;
+        for (long now = 0; now < CompanionDpsWindowMs;)
+        {
+            if (CompanionUnit.Pick(kit, ready, now, 0) is not { } skill)
+            {
+                now = ready.Values.Where(v => v > now).DefaultIfEmpty(now + 1).Min();
+                continue;
+            }
+            if (SkillConfig.Get(_data, skill.Id) is { } row) total += ExpectedDamage(attacker, defender, row.Row);
+            ready[skill.Id] = now + skill.CooldownMs;
+            now = CompanionUnit.NextAttackMs(kit, skill, now);
+        }
+        return total * 1000.0 / CompanionDpsWindowMs;
     }
 }

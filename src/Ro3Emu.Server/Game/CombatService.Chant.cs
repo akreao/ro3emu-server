@@ -5,8 +5,7 @@ namespace Ro3Emu.Server.Game;
 
 public sealed partial class CombatService
 {
-    /// <summary>A player's chant: <see cref="ChantMilliseconds"/> over the player's whole stat sheet, so cast speed and
-    /// the chant attributes from every source (gear, buffs, a guardian's) count.</summary>
+    /// <summary>A player's chant from the role's own sheet, by the formula the client shows (<see cref="ChantMilliseconds"/>).</summary>
     internal int ChantMs(GameSession s, JsonElement row) => ChantMilliseconds(_data, row, _character.Stats(s));
 
     /// <summary>A*cspd/(B+C*cspd) from PublicParamConfig, cast speed clamped to FinalAtkSpdThdAndCastSpdThd[1].</summary>

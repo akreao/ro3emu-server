@@ -19,7 +19,7 @@ public sealed partial class CharacterService
         var removed = session.Items.Where(i => i.Grid == 0 && !EmblemService.IsReserved(session, i) && !TotemService.IsReserved(session, i)).ToList();
         var next = session.Items.Except(removed).Select(i => i.Clone()).ToList();
         await CommitCharacterAsync(session, "gm-clear", nextItems: next,
-            costs: removed.Select(i => (i.Entry, (long)i.Stack)).ToArray());
+            costs: [.. removed.Select(i => (i.Entry, (long)i.Stack))]);
         await SyncItemsAsync(session);
         if (removed.Count > 0) foreach (var handler in StateChanged) handler(session);
         return $"Removed {removed.Count} item(s).";
@@ -364,7 +364,7 @@ public sealed partial class CharacterService
             replacements[old] = item;
         }
         roles.Commit(builder, "character/card-pack-migration");
-        session.Items = session.Items.Select(i => replacements.GetValueOrDefault(i, i)).ToList();
+        session.Items = [.. session.Items.Select(i => replacements.GetValueOrDefault(i, i))];
     }
 
     /// <summary>Mail-only preflight for combined plain, bound, exact-instance and long-currency grants under StateLock.</summary>
@@ -429,6 +429,12 @@ public sealed partial class CharacterService
 
     private static long NextSort(GameSession session, int pack) =>
         session.Items.Where(i => i.Grid == 0 && i.Pack == pack).Select(i => i.Sort).DefaultIfEmpty(0).Max() + 1;
+
+    /// <summary>
+    /// A granted equipment piece as the bag shows it (instance id, appraisal, score), or null for anything else: a loot
+    /// notice must carry them for the client's quick-equip offer (RewardService.KilledAsync).
+    /// </summary>
+    internal ItemBaseInfo? EquipmentInfo(InvItem item) => IsEquipment(item.Entry) ? ItemInfo(item) : null;
 
     /// <summary>ItemBaseInfo as the client parses it: itemInfos must not be empty; equipment must be appraised to be worn.</summary>
     private ItemBaseInfo ItemInfo(InvItem item)

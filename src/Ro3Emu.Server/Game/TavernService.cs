@@ -1,5 +1,4 @@
 using System.Text.Json;
-using Google.Protobuf;
 using Microsoft.Extensions.Options;
 using Romsg;
 using Ro3Emu.Server.Accounts;
@@ -8,317 +7,319 @@ using Ro3Emu.Server.Data;
 namespace Ro3Emu.Server.Game;
 
 /// <summary>
-/// The Tavern (client "BarRoom", 酒馆): player-run chat and voice rooms opened from the chat window (function 2410, chat
-/// channel 10). Client: Logic/ChatBarroom (LC_BarRoomHelper, LC_BarRoomServer, LC_BarRoomTalk), LC_DAL_BarRoom and the
-/// UI_Sys_Chat_BarRoom* widgets; protocol MG_Barroom.proto 82481-82514. docs/systems/tavern.md has the whole picture.
-/// <list type="bullet">
-/// <item>Rooms live in memory (a restart clears them). A room has an owner, members, a mic list (curSpeaks), requests to
-/// speak, a mute list, a block list and Popularity (hotValue). The owner is always on the mic.</item>
-/// <item>Every change pushes 82506 BarRoomInfoUpdateNotify and the room's 82508 BarRoomGetResp to every member: the
-/// client asks for 82508 on 82506 only while the tavern window is open (UI_Sys_Chat_BarRoomWindowCtrl), and its 82508
-/// handler (LC_DAL_BarRoom.OnGetBarRoomPartyInfo -> LC_BarRoomHelper.OnPartyGetClient) replaces BarRoomTotalDetail.</item>
-/// <item>The room list is PartyService.getPartysSummary with partyType 4, each summary a BarRoomSummary
-/// (LC_BarRoomHelper.OnPartyQuerySummary); see <see cref="Directory"/>.</item>
-/// <item>Text chat is IM channel "10_&lt;room&gt;" (enum_EPublicChatChannelType.EChannelBarRoom, LC_ChatHelper
-/// ChooseMessageTargetChannelId); only members may join it (<see cref="InRoom"/>). Voice is the relay room of the
-/// same id (LC_BarRoomTalk.JoinChannel -> VoiceCall_Util.JoinChannel(tostring(room))), see <see cref="MayTalk"/>.</item>
-/// <item>5043 DBBarRoomInfo: barRoomId (LC_BarRoomHelper.OnGetBarRoomID re-joins the room's chat at login), the
-/// Star Power received from gifts (popularity, weekPopularity; achievement 106008), today's seconds in a room
-/// (inBarRoomTime; quest target 106010 of the Daily Tavern quest 2000) and the days it was done (actDays; 106007).</item>
-/// </list>
-/// Leaving the world leaves the room (inferred: the client never re-enters on login, and an offline member could not
-/// be removed or talk).
+/// The Tavern (MG_Barroom 82481-82514; FunctionConfig 2410 "Tavern", enum ChannelBarRoom; client LC_BarRoomServer,
+/// LC_DAL_BarRoom, LC_BarRoomHelper and its offline mock Lua_BarRoom_Mock): voice and text rooms opened from the chat
+/// side button. A player creates a room (topic and language from BarroomTypeConfig), browses the others through the
+/// micro-service PartyService.getPartysSummary (party type 4, <see cref="Directory"/>), joins, chats on public channel
+/// 10 (group "10_&lt;guid&gt;", ChatService) and talks on the voice relay (room = the guid in decimal, VoiceRooms).
+///
+/// The client keeps no room state of its own: every 82506 InfoChange makes an open Tavern window ask 82508 for the whole
+/// BarRoomTotalDetail again, and 82507 UserEnter does the same plus a welcome line. So every change answers its caller
+/// and pushes 82506 to the rest of the room. The owner (ownerGuid; the client has no other role, gmSpRoomCount is a GM
+/// field it never reads) runs the room: the speaking mode (Free: anyone, Manual: the seat list, Order: the speech
+/// list, at most PublicParamConfig.BarroomSpeakNum), mic requests, mute (forbiddenSpeaker, BarroomForbiddentime),
+/// remove (blackList), close all mics, transfer and the room's name, topic and language. The relay enforces it:
+/// <see cref="MaySpeak"/>. The client posts the gift, transfer and close-mic lines into the room chat itself.
+///
+/// Gifts are the four drinks (ItemConfig type 2 / subtype 213): use effect 110 GainBarroomHot adds to the room's heat,
+/// 111 GainStar to the receiver's Star Power (DBBarRoomInfo.popularity, achievement condition 106008). Time spent in a
+/// room counts toward the daily quest 2000 (target 106010 BarroomToDayActTime, TaskService.TavernTasks), whose award
+/// (MultiverseGroup 8000 -> AwardConfig 1008000) is three Hot Cocoa.
+///
+/// Rooms are online state, as the original's room list only ever shows live rooms: in memory, gone when the last member
+/// leaves or after a restart. A role's own counters are its role blob "barroom" (<see cref="RoleState"/>).
+/// (inferred) Members whose session is gone keep their place for <see cref="OfflineGraceMs"/> (5043 barRoomId brings a
+/// relogging client back in; error 2563 "recipient offline" names a member who is not online), then leave.
 /// </summary>
-public sealed partial class TavernService(GameData data, RoleStore roles, CharacterService character, SessionRegistry sessions, GameLoop loop,
-    IOptions<ServerOptions> options, TimeProvider clock, ILogger<TavernService> log) : IGameTicker
+public sealed partial class TavernService : Messaging.IMessageModule, IGameTicker
 {
-    public const uint Create = 82481, Enter = 82482, Exit = 82483, Invite = 82484, InviteNotify = 82485, InviteResponse = 82486,
-        ApplyMic = 82487, DownMic = 82488, Transfer = 82489, MicMode = 82490, Gift = 82491, HandleMic = 82492, MicOrder = 82493,
-        SetInfo = 82494, Forbid = 82498, CancelForbid = 82499, Kick = 82500, CancelKick = 82501, ShutUpAll = 82504,
-        CancelShutUpAll = 82505, InfoNotify = 82506, UserEnter = 82507, Get = 82508, GmSetInfo = 82513, MutePlayer = 82514,
-        Sync = 5043;
+    public const uint CreateMsg = 82481, EnterMsg = 82482, ExitMsg = 82483, InviteMsg = 82484, InviteNotify = 82485;
+    public const uint InviteResponseMsg = 82486, ApplyMicMsg = 82487, DownMicMsg = 82488, TransferMsg = 82489;
+    public const uint MicTypeMsg = 82490, GiftMsg = 82491, HandleApplyMsg = 82492, MicOrderMsg = 82493, SetInfoMsg = 82494;
+    public const uint ForbidMsg = 82498, UnforbidMsg = 82499, KickMsg = 82500, UnkickMsg = 82501;
+    public const uint ShutUpMsg = 82504, UnshutUpMsg = 82505, InfoChangeNotify = 82506, UserEnterNotify = 82507;
+    public const uint GetMsg = 82508, MuteMsg = 82514, MuteInChannelNotify = 77003, Sync = 5043;
 
-    /// <summary>LC_BarRoomServer / LC_DAL_BarRoom partyType of the room list (PartyService).</summary>
+    /// <summary>FunctionConfig 2410 "Tavern" (MG_Function Function_Barroom).</summary>
+    public const long Function = 2410;
+
+    /// <summary>LC_BarRoomServer's party type for the PartyService directory.</summary>
     public const int PartyType = 4;
 
-    // ErrorCodeConfig 2551-2580 (the Tavern block).
-    internal const int ErrCleared = 2551, ErrNoRoom = 2552, ErrBlocked = 2553, ErrNoPermission = 2554, ErrGiftLeft = 2555,
-        ErrData = 2556, ErrTransferBlocked = 2557, ErrTargetMuted = 2558, ErrMicFull = 2559, ErrOnMic = 2560,
-        ErrOwnerMic = 2561, ErrNotOnMic = 2562, ErrGiftOffline = 2563, ErrTooFast = 2573, ErrGiftSelf = 2574,
-        ErrNotBlocked = 2566, ErrFreeMic = 2567, ErrApplied = 2568, ErrNotApplied = 2569, ErrNotMuted = 2570,
-        ErrInRoom = 2571, ErrFull = 2572, ErrTransferCd = 2575, ErrNameLong = 2576, ErrName = 2577, ErrNotInRoom = 2578,
-        ErrType = 2579, ErrLanguage = 2580;
+    /// <summary>BarroomTypeConfig._iType of the topics and of the languages.</summary>
+    private const long TopicKind = 0, LanguageKind = 1;
 
-    /// <summary>ItemConfig _iType 2 / _iSubType 213: the four Tavern gifts (UI_Sys_Chat_BarRoom_GiveawayWidgetCtrl).
-    /// _iUseEffect 110 is the room's Popularity, 111 the recipient's Star Power, per gift (item texts 12390100369/70).</summary>
-    private const int GiftType = 2, GiftSubType = 213, EffectPopularity = 110, EffectStar = 111;
+    // ItemConfig._iUseEffect ids of the gift drinks (enum UseEffect GainBarroomHot / GainStar).
+    private const int EffectHeat = 110, EffectStar = 111;
 
-    private readonly GameData _data = data;
-    private readonly RoleStore _roles = roles;
-    private readonly CharacterService _character = character;
-    private readonly SessionRegistry _sessions = sessions;
-    private readonly GameLoop _loop = loop;
-    private readonly IOptions<ServerOptions> _options = options;
-    private readonly TimeProvider _clock = clock;
-    private readonly ILogger<TavernService> _log = log;
+    /// <summary>The higher drinks (ItemConfig 2/213): Gingerbread, Craft Brew, Grape Wine.</summary>
+    private const int Gingerbread = 1200802, CraftBrew = 1200803, GrapeWine = 1200804;
 
-    internal sealed class Room
+    // PublicParamConfig fallbacks (the client's own values), for a data set without them.
+    private const int DefaultNameLength = 18, DefaultSetInfoCdSec = 5, DefaultTransferCdSec = 30, DefaultPersonNum = 1000;
+    private const int DefaultSpeakNum = 10, DefaultHeatMiniIncrease = 50, DefaultHeatTagsNum = 2, DefaultHotTagsNum = 4;
+    private const long DefaultForbiddenMs = 86_400_000, DefaultHeatTagsMs = 300_000, DefaultTaskId = 2000, DefaultActSeconds = 1200;
+
+    /// <summary>LC_ConditionDefine BarroomToDayActTime, the daily quest's target.</summary>
+    private const long TargetStay = 106010;
+
+    /// <summary>(inferred) A member whose session is gone keeps its place this long.</summary>
+    public const long OfflineGraceMs = 300_000;
+
+    /// <summary>(inferred) Time in a room is written to the role every minute, and at once when it completes the day.</summary>
+    private const int FlushSeconds = 60;
+
+    /// <summary>The client sets no limit on a mic request's reason or an invite list; these bounds are ours.</summary>
+    private const int MaxReasonLength = 50, MaxInviteTargets = 50, MaxGiftCount = 999;
+
+    /// <summary>(inferred) A GM tag (op 137 GMSetBarroomRedBag) lasts a day: the panel gives it no end.</summary>
+    private const long GmTagSeconds = 86_400;
+
+    private static readonly TimeSpan SweepInterval = TimeSpan.FromSeconds(1);
+
+    private readonly GameData _data;
+    private readonly RoleStore _roles;
+    private readonly CharacterService _character;
+    private readonly ChatService _chat;
+    private readonly FunctionService _functions;
+    private readonly TaskService _tasks;
+    private readonly SessionRegistry _sessions;
+    private readonly GameLoop _loop;
+    private readonly IOptions<ServerOptions> _options;
+    private readonly TimeProvider _clock;
+    private readonly ILogger<TavernService> _log;
+
+    private readonly object _sync = new();
+    private readonly Dictionary<long, Room> _rooms = [];
+    private readonly Dictionary<long, long> _roomOf = []; // role -> room guid
+    private readonly Dictionary<long, double> _pendingSeconds = []; // role -> time in a room not yet written
+    private readonly HashSet<long> _flushing = []; // roles with a write of their time already posted
+    private long _nextGuid = Voice.VoiceRoomKey.TavernBase + 1;
+    private TimeSpan _lastSweep;
+    private long _heatWindowEndsMs;
+
+    public TavernService(GameData data, RoleStore roles, CharacterService character, ChatService chat, FunctionService functions,
+        TaskService tasks, SessionRegistry sessions, GameLoop loop, GmCommands gm, IOptions<ServerOptions> options,
+        TimeProvider clock, ILogger<TavernService> log)
     {
-        public long Id;
-        public int Type, Language, Hot, Region;
-        public string Name = "";
-        public long Owner, Created, TransferCd, InfoSetAt;
-        public SpeakAuthorityType Mode = SpeakAuthorityType.Free;
-        public bool MicClosed;
-        public int GmSpecial;
-        /// <summary>Members in join order: role, area, unix seconds of the join.</summary>
-        public readonly List<(long Role, long Area, long Joined)> Members = new();
-        public readonly HashSet<long> Blocked = new(), Muted = new();
-        public readonly Dictionary<long, string> Requests = new();
-        /// <summary>The mic list in order (micOrder 1..n); the owner is always on it.</summary>
-        public readonly List<long> Speakers = new();
-        public bool Has(long role) => Members.Any(m => m.Role == role);
+        _data = data; _roles = roles; _character = character; _chat = chat; _functions = functions; _tasks = tasks;
+        _sessions = sessions; _loop = loop; _options = options; _clock = clock; _log = log;
+        chat.TavernMember = IsMember;
+        tasks.TavernSeconds = TodaySeconds;
+        gm.Register("tavern", "[list] (Tavern test aid: the open rooms, or the room you are in)", GmTavernAsync);
     }
 
-    private readonly Dictionary<long, Room> _rooms = new();
-    private readonly Dictionary<long, Room> _byMember = new();
-    private readonly Dictionary<(long Target, long Room), long> _invites = new();
-    /// <summary>Room ids sit far above team ids (TeamService starts at 2^24), so the voice relay keys never collide.</summary>
-    private long _nextId = 1L << 40;
-    private TimeSpan _sinceCount;
+    /// <summary>Raised on the loop after a role's Star Power changed (AchievementService re-reads 106008).</summary>
+    public List<Action<GameSession>> PopularityChanged { get; } = [];
 
-    /// <summary>A role's Star Power or completed days changed (achievements 106007 / 106008 re-read them).</summary>
-    public List<Action<GameSession>> Changed { get; } = new();
-
-    /// <summary>A role left room (the chat channel stops reaching it).</summary>
-    public List<Action<GameSession, long>> Left { get; } = new();
-
-    /// <summary>Seconds a role spent in a room since the last count (quest target 106010, TaskService).</summary>
-    public List<Action<GameSession, int>> TimeSpent { get; } = new();
-
-    private long Now => _clock.GetUtcNow().ToUnixTimeSeconds();
-
-    private long Param(string key, int index = -1, long fallback = 0)
+    /// <summary>A role's own Tavern counters, role blob "barroom" (JSON). Popularity and WeekPopularity are the Star Power
+    /// received from gifts (5043 popularity / weekPopularity); ActDays counts the days whose stay reached the daily quest's
+    /// 1200 s (5043 actDays, condition 106009 BarroomActDays, inferred meaning); TodaySeconds is the day's time in a room
+    /// (5043 inBarRoomTime, quest target 106010), DayStartMs and WeekStartMs the 05:00 boundaries they belong to.</summary>
+    public sealed class RoleState
     {
-        if (!_data.Table("PublicParamConfig").TryGetValue(key, out var value)) return fallback;
-        if (index >= 0)
-            return value.ValueKind == JsonValueKind.Array && value.GetArrayLength() > index && GameData.Number(value[index]) is { } n
-                ? (long)n : fallback;
-        return GameData.Number(value) is { } number ? (long)number : fallback;
+        public int Version { get; set; } = 1;
+        public int Popularity { get; set; }
+        public int WeekPopularity { get; set; }
+        public long WeekStartMs { get; set; }
+        public int ActDays { get; set; }
+        public long DayStartMs { get; set; }
+        public int TodaySeconds { get; set; }
+        public bool TodayComplete { get; set; }
+        /// <summary>The drink an active day earned and the bag has not received yet (<see cref="ServerOptions.TavernDayDrinks"/>).</summary>
+        public int DrinkOwed { get; set; }
+
+        public RoleState Clone() => (RoleState)MemberwiseClone();
     }
 
-    private int NameLength => (int)Param("BarRoomNameLen", fallback: 18);
-    private int Capacity => (int)Param("BarroomPersonNum", fallback: 1000);
-    private int SpeakerLimit => (int)Param("BarroomSpeakNum", fallback: 10);
-    private long InfoCooldown => Param("BarRoomSetInfoCd", fallback: 5);
-    private long TransferCooldown => Param("BarRoomTransferRoomCd", fallback: 30);
+    private sealed class Member(long joinSec, int area)
+    {
+        public long JoinSec { get; } = joinSec;
+        public int Area { get; } = area;
+        /// <summary>Unix ms since the member's session is gone; 0 while online.</summary>
+        public long OfflineSinceMs { get; set; }
+    }
 
-    private GameSession? Online(long role) => _sessions.All().FirstOrDefault(s => s.Role?.Id == role && s.Tavern != null);
+    private sealed record Application(long Role, string Reason);
 
-    // ------------------------------------------------------------------ queries for chat, voice and the directory
+    private sealed class Room(long guid, long owner, long createSec, int region)
+    {
+        public long Guid { get; } = guid;
+        public long CreateSec { get; } = createSec;
+        public int Region { get; } = region;
+        public long Owner { get; set; } = owner;
+        public int Type { get; set; }
+        public int Language { get; set; }
+        public string Name { get; set; } = "";
+        public Dictionary<long, Member> Members { get; } = [];
+        public Dictionary<long, long> Blocked { get; } = []; // role -> removed at, unix s
+        public Dictionary<long, long> Forbidden { get; } = []; // role -> muted until, unix s
+        public List<Application> Applications { get; } = [];
+        public List<long> Speakers { get; } = []; // the seat (Manual) or speech (Order) list, in order
+        public SpeakAuthorityType Mode { get; set; } = SpeakAuthorityType.Free;
+        public bool MicClosed { get; set; }
+        public int Hot { get; set; }
+        public int LastHot { get; set; }
+        public int LastHotAdd { get; set; }
+        public Dictionary<RoomTagType, long> Tags { get; } = []; // tag -> ends, unix s
+        public long TransferReadySec { get; set; }
+        public long InfoReadySec { get; set; }
+        public int GmCount { get; set; }
+    }
 
-    /// <summary>The room a role is in, 0 when none.</summary>
-    public long RoomOf(long role) => _byMember.TryGetValue(role, out var room) ? room.Id : 0;
+    public void Map(Messaging.MessageRoutes routes)
+    {
+        routes.Map(CreateMsg, "tavern", (s, _, body) => CreateAsync(s, CreateBarRoomReq.Parser.ParseFrom(body.Span)));
+        routes.Map(EnterMsg, "tavern", (s, _, body) => EnterAsync(s, EnterBarRoomReq.Parser.ParseFrom(body.Span)));
+        routes.Map(ExitMsg, "tavern", (s, _, body) => ExitAsync(s, ExitBarRoomReq.Parser.ParseFrom(body.Span)));
+        routes.Map(GetMsg, "tavern", (s, _, _) => GetAsync(s));
+        routes.Map(InviteMsg, "tavern", (s, _, body) => InviteAsync(s, InviteEnterBarRoomReq.Parser.ParseFrom(body.Span)));
+        routes.Map(InviteResponseMsg, "tavern", (s, _, body) => InviteResponseAsync(s, ResponseInviteEnterBarRoomReq.Parser.ParseFrom(body.Span)));
+        routes.Map(ApplyMicMsg, "tavern", (s, _, body) => ApplyMicAsync(s, ApplyOpenMicReq.Parser.ParseFrom(body.Span)));
+        routes.Map(DownMicMsg, "tavern", (s, _, body) => DownMicAsync(s, DownMicReq.Parser.ParseFrom(body.Span)));
+        routes.Map(HandleApplyMsg, "tavern", (s, _, body) => HandleApplyAsync(s, OwnerHandleOpenMicReq.Parser.ParseFrom(body.Span)));
+        routes.Map(MicTypeMsg, "tavern", (s, _, body) => MicTypeAsync(s, ModifyControlMicTypeReq.Parser.ParseFrom(body.Span)));
+        routes.Map(MicOrderMsg, "tavern", (s, _, body) => MicOrderAsync(s, SetMicOrderReq.Parser.ParseFrom(body.Span)));
+        routes.Map(TransferMsg, "tavern", (s, _, body) => TransferAsync(s, TransferOwnerReq.Parser.ParseFrom(body.Span)));
+        routes.Map(SetInfoMsg, "tavern", (s, _, body) => SetInfoAsync(s, SetBarRoomInfoReq.Parser.ParseFrom(body.Span)));
+        routes.Map(ForbidMsg, "tavern", (s, _, body) => ForbidAsync(s, ForbiddenUserReq.Parser.ParseFrom(body.Span)));
+        routes.Map(UnforbidMsg, "tavern", (s, _, body) => UnforbidAsync(s, CanecelForbiddenUserReq.Parser.ParseFrom(body.Span)));
+        routes.Map(KickMsg, "tavern", (s, _, body) => KickAsync(s, KickUserReq.Parser.ParseFrom(body.Span)));
+        routes.Map(UnkickMsg, "tavern", (s, _, body) => UnkickAsync(s, CancelKickUserReq.Parser.ParseFrom(body.Span)));
+        routes.Map(ShutUpMsg, "tavern", (s, _, body) => CloseMicsAsync(s, ShutUpAllReq.Parser.ParseFrom(body.Span).BarRoomGuid, true));
+        routes.Map(UnshutUpMsg, "tavern", (s, _, body) => CloseMicsAsync(s, CancelShutUpAllReq.Parser.ParseFrom(body.Span).BarRoomGuid, false));
+        routes.Map(MuteMsg, "tavern", (s, _, body) => MuteAsync(s, MuteBarRoomPlayerReq.Parser.ParseFrom(body.Span)));
+        routes.Map(GiftMsg, "tavern", (s, _, body) => GiftAsync(s, PresentGiftReq.Parser.ParseFrom(body.Span)));
+    }
 
-    /// <summary>The role is a member of room <paramref name="room"/> (chat channel 10 and the voice relay).</summary>
-    public bool InRoom(long role, long room) => room != 0 && RoomOf(role) == room;
+    // ---- for the relay and the chat ----
+
+    /// <summary>For the relay and channel 10: <paramref name="role"/> is a member of room <paramref name="roomId"/>.</summary>
+    public bool IsMember(long role, long roomId)
+    {
+        lock (_sync) return _roomOf.TryGetValue(role, out long at) && at == roomId;
+    }
 
     /// <summary>
-    /// Whether the role may use its mic in its room (LC_BarRoomHelper.CheckMemberCanOpenMic): the owner always; nobody
-    /// muted or while "mute all" is on; anyone in Free mode, else only those on the mic list.
+    /// For the relay: whether the room hears <paramref name="role"/>'s mic. The owner always (LC_BarRoomHelper
+    /// CheckMemberCanOpenMic); nobody else while all mics are closed (isCloseMic) or while muted (forbiddenSpeaker); in
+    /// Free mode everyone else, in Manual and Order mode only who is on the list (curSpeaks).
     /// </summary>
-    public bool MayTalk(long role)
+    public bool MaySpeak(long role, long roomId)
     {
-        if (!_byMember.TryGetValue(role, out var room)) return false;
-        if (room.Owner == role) return true;
-        if (room.MicClosed || room.Muted.Contains(role)) return false;
-        return room.Mode == SpeakAuthorityType.Free || room.Speakers.Contains(role);
-    }
-
-    internal Room? RoomById(long id) => _rooms.GetValueOrDefault(id);
-
-    /// <summary>
-    /// PartyService getPartysSummary for partyType 4: one GameSummaryData (a BarRoomSummary) per room, busiest first
-    /// (inferred order). LC_BarRoomServer.PartyQuerySummaryRequest's "Discover" query adds PartyIntCondition
-    /// BaroomCreateTime [now - 1800, now + 1800] and BaroomHeadCount [2, 30] (PublicParamConfig.BarroomFindBarRoom) and
-    /// joins a random room of the answer (TryJoinRandomRoom).
-    /// </summary>
-    public object[] Directory(IReadOnlyDictionary<string, (long Min, long Max)> ranges, int offset, int limit)
-    {
-        IEnumerable<Room> rooms = _rooms.Values;
-        if (ranges.TryGetValue("BaroomCreateTime", out var created)) rooms = rooms.Where(r => r.Created >= created.Min && r.Created <= created.Max);
-        if (ranges.TryGetValue("BaroomHeadCount", out var heads)) rooms = rooms.Where(r => r.Members.Count >= heads.Min && r.Members.Count <= heads.Max);
-        return rooms.OrderByDescending(r => r.Hot).ThenByDescending(r => r.Members.Count).ThenBy(r => r.Id)
-            .Skip(Math.Max(0, offset)).Take(Math.Clamp(limit, 0, 100))
-            .Select(r => (object)new Dictionary<string, object?> { ["GameSummaryData"] = Summary(r).ToByteArray() }).ToArray();
-    }
-
-    /// <summary>getSubPartysCountByType for partyType 4: rooms per room type (BarRoomAllTargetCount).</summary>
-    public object[] TypeCounts() => _rooms.Values.GroupBy(r => r.Type).OrderBy(g => g.Key)
-        .Select(g => (object)new Dictionary<string, object?> { ["SubType"] = g.Key, ["Count"] = g.Count() }).ToArray();
-
-    // ------------------------------------------------------------------ wire views
-
-    private static BarRoomSummary Summary(Room room)
-    {
-        var summary = new BarRoomSummary
+        lock (_sync)
         {
-            BarRoomGuid = room.Id, BarRoomType = room.Type, LanguageType = room.Language, BarRoomName = room.Name,
-            HotValue = room.Hot, RegionId = room.Region,
-        };
-        summary.MemberList.Add(room.Members.Select(m => new MemberInfo { MemberId = m.Role, AreaId = m.Area, JoinTime = m.Joined }));
-        return summary;
-    }
-
-    internal static BarRoomTotalDetail Detail(Room room)
-    {
-        var detail = new BarRoomTotalDetail
-        {
-            BarRoomSummary = Summary(room), ControlMicType = room.Mode, IsCloseMic = room.MicClosed, OwnerGuid = room.Owner,
-            CreateTime = room.Created, TransferCd = room.TransferCd, HistoryHot = new HistoryHotInfo { LastHot = room.Hot },
-            GmSpRoomCount = room.GmSpecial,
-        };
-        // LC_BarRoomHelper.CheckIsForbiddenUser compares the map's values with the role id; keys and values are both
-        // the role for both lists (inferred for the keys).
-        foreach (long role in room.Blocked) detail.BlackList[role] = role;
-        foreach (long role in room.Muted) detail.ForbiddenSpeaker[role] = role;
-        foreach (var (role, reason) in room.Requests) detail.ApplyUsers[role] = reason;
-        for (int i = 0; i < room.Speakers.Count; i++) detail.CurSpeaks.Add(new CurSpeakUsers { UserId = room.Speakers[i], MicOrder = i + 1 });
-        return detail;
-    }
-
-    /// <summary>82506 and the room's 82508 to every member online (but <paramref name="except"/>).</summary>
-    private async Task PublishAsync(Room room, long except = 0)
-    {
-        var get = new BarRoomGetResp { Result = 0, Info = Detail(room) };
-        var notify = new BarRoomInfoUpdateNotify { BarRoomGuid = room.Id };
-        foreach (var (role, _, _) in room.Members.ToArray())
-            if (role != except && Online(role) is { } member)
-            {
-                await member.SendGameAsync(InfoNotify, notify);
-                await member.SendGameAsync(Get, get);
-            }
-    }
-
-    // ------------------------------------------------------------------ login, leave, 5043
-
-    public async Task LoginAsync(GameSession s)
-    {
-        var bytes = _roles.LoadTavern(s.Role!.Id);
-        var info = bytes is { Length: > 0 } ? DBBarRoomInfo.Parser.ParseFrom(bytes) : new DBBarRoomInfo();
-        RollDay(info, Now);
-        // Rooms live in memory: whatever room the blob names is gone, unless the role is still listed in one.
-        info.BarRoomId = RoomOf(s.Role.Id);
-        s.Tavern = info;
-        s.TavernCountedAt = info.BarRoomId != 0 ? Now : 0;
-        await SyncAsync(s);
-    }
-
-    private static Task SyncAsync(GameSession s) => CharacterService.SyncAsync(s, Sync, s.Tavern!.Clone());
-
-    public async Task LeaveRoleAsync(GameSession s)
-    {
-        if (s.Role is not { } role || s.Tavern == null) return;
-        if (_byMember.TryGetValue(role.Id, out var room)) await LeaveRoomAsync(s, room, notifySelf: false);
-        await SaveAsync(s);
-    }
-
-    /// <summary>Awaited by every caller: a dropped commit resumes on the loop after its caller's work (a role
-    /// handover's cleanup) has finished, as an untracked orphan continuation.</summary>
-    private Task SaveAsync(GameSession s)
-    {
-        if (s.Role == null || s.Tavern == null) return Task.CompletedTask;
-        var stored = s.Tavern.Clone();
-        stored.BarRoomId = 0;
-        var transaction = _roles.NewTransaction();
-        transaction.RoleBlob(s.Role.Id, "barroom", stored.ToByteArray());
-        return _roles.CommitAsync(transaction, "tavern/save");
-    }
-
-    /// <summary>The counters of a new day (05:00 realm time) and week (Monday 05:00, as Popularity), inferred.
-    /// beginBarRoomTime holds the start of the day inBarRoomTime counts.</summary>
-    private void RollDay(DBBarRoomInfo info, long now)
-    {
-        long day = DayStart(now);
-        if (info.BeginBarRoomTime != day)
-        {
-            if (info.BeginBarRoomTime < PersonalService.WeekStartMs(_clock) / 1000) info.WeekPopularity = 0;
-            info.BeginBarRoomTime = day;
-            info.InBarRoomTime = 0;
-            info.IsToDayActComplete = false;
+            if (!_rooms.TryGetValue(roomId, out var room) || !room.Members.ContainsKey(role)) return false;
+            if (room.Owner == role) return true;
+            if (room.MicClosed || IsForbidden(room, role, NowSec())) return false;
+            return room.Mode == SpeakAuthorityType.Free || room.Speakers.Contains(role);
         }
     }
 
-    private long DayStart(long now)
-    {
-        var local = DateTimeOffset.FromUnixTimeSeconds(now).ToOffset(_clock.GetLocalNow().Offset);
-        var day = local.AddHours(-5).Date.AddHours(5);
-        return new DateTimeOffset(day, local.Offset).ToUnixTimeSeconds();
-    }
-
-    /// <summary>PublicParamConfig.BarroomTaskID's quest (2000 "Spend @{1} minutes in any Tavern room") needs this many
-    /// seconds (its _kProgressTarget [106010, 1200]).</summary>
-    private long DailySeconds()
-    {
-        long task = Param("BarroomTaskID", fallback: 2000);
-        if (_data.Row("TaskConfig", task) is { } row && row.TryGetProperty("_kProgressTarget", out var targets)
-            && targets.ValueKind == JsonValueKind.Array)
-            foreach (var target in targets.EnumerateArray())
-                if (target.ValueKind == JsonValueKind.Array && target.GetArrayLength() == 2
-                    && GameData.Number(target[0]) == 106010 && GameData.Number(target[1]) is { } seconds) return (long)seconds;
-        return 1200;
-    }
-
-    // ------------------------------------------------------------------ time in a room
-
-    /// <summary>Today's seconds in a room (quest target 106010); 0 when the stored day is over.</summary>
-    public long SecondsToday(GameSession s) =>
-        s.Tavern is { } info && info.BeginBarRoomTime == DayStart(Now) ? info.InBarRoomTime : 0;
-
-    /// <summary>Star Power received (achievement 106008).</summary>
-    public static long StarPower(GameSession s) => s.Tavern?.Popularity ?? 0;
-
-    /// <summary>Days the Tavern quest time was reached (achievement 106007).</summary>
-    public static long QuestDays(GameSession s) => s.Tavern?.ActDays ?? 0;
-
-    private static readonly TimeSpan CountEvery = TimeSpan.FromSeconds(10);
+    // ---- ticks ----
 
     public void Tick(GameTime time)
     {
-        _sinceCount += time.Delta;
-        if (_sinceCount < CountEvery) return;
-        _sinceCount = TimeSpan.Zero;
-        foreach (var room in _rooms.Values.ToArray())
-            foreach (var (role, _, _) in room.Members.ToArray())
-                if (Online(role) is { } member) _loop.PostOwned(member, () => CountAsync(member), "tavern time");
-    }
-
-    private async Task CountAsync(GameSession s)
-    {
-        if (s.Role == null || !_byMember.ContainsKey(s.Role.Id)) return;
-        await CountCoreAsync(s, sync: true);
-    }
-
-    /// <summary>Adds the seconds since the last count to today's time; the day's quest time done marks the day.</summary>
-    private async Task CountCoreAsync(GameSession s, bool sync)
-    {
-        if (s.Tavern is not { } info || s.Role == null || s.TavernCountedAt == 0) return;
-        long now = Now;
-        long since = Math.Max(s.TavernCountedAt, DayStart(now));
-        RollDay(info, now);
-        int seconds = (int)Math.Clamp(now - since, 0, 3600);
-        s.TavernCountedAt = now;
-        if (seconds == 0) return;
-        info.InBarRoomTime = (int)Math.Min(int.MaxValue, (long)info.InBarRoomTime + seconds);
-        bool done = !info.IsToDayActComplete && info.InBarRoomTime >= DailySeconds();
-        if (done)
+        if (time.Now - _lastSweep < SweepInterval) return;
+        double seconds = _lastSweep == TimeSpan.Zero ? 0 : (time.Now - _lastSweep).TotalSeconds;
+        _lastSweep = time.Now;
+        long nowMs = NowMs();
+        var online = _sessions.All().Where(s => s.Role != null).GroupBy(s => s.Role!.Id).ToDictionary(g => g.Key, g => g.First());
+        List<long> dropped = [];
+        List<GameSession> flush = [];
+        lock (_sync)
         {
-            info.IsToDayActComplete = true;
-            info.ActDays++;
-            await SaveAsync(s);
+            if (_rooms.Count == 0 && _pendingSeconds.Count == 0) return;
+            foreach (var room in _rooms.Values)
+                foreach (var (role, member) in room.Members)
+                {
+                    if (online.TryGetValue(role, out var session))
+                    {
+                        member.OfflineSinceMs = 0;
+                        if (session.Tavern != null && Accrue(session, role, seconds)) flush.Add(session);
+                    }
+                    else if (member.OfflineSinceMs == 0) member.OfflineSinceMs = nowMs;
+                    else if (nowMs - member.OfflineSinceMs >= OfflineGraceMs) dropped.Add(role);
+                }
+            PruneLocked(nowMs);
         }
-        foreach (var handler in TimeSpent) handler(s, seconds);
-        if (done) foreach (var handler in Changed) handler(s);
-        if (sync) await SyncAsync(s);
+        foreach (var session in flush) QueueFlush(session);
+        foreach (long role in dropped) _loop.Post(() => RemoveAsync(role, null, "offline"));
     }
+
+    /// <summary>Adds a second of stay; true when the role's time is due to be written. Under the lock.</summary>
+    private bool Accrue(GameSession session, long role, double seconds)
+    {
+        double pending = _pendingSeconds.GetValueOrDefault(role) + seconds;
+        _pendingSeconds[role] = pending;
+        if (pending >= FlushSeconds) return true;
+        // The day's quest completes on time, not at the next minute.
+        var state = Rolled(session.Tavern!);
+        return !state.TodayComplete && state.TodaySeconds + (int)pending >= ActSeconds();
+    }
+
+    /// <summary>Expired mutes and tags, and the heat window. Under the lock.</summary>
+    private void PruneLocked(long nowMs)
+    {
+        long now = nowMs / 1000;
+        foreach (var room in _rooms.Values)
+        {
+            foreach (var (role, until) in room.Forbidden.ToList())
+                if (until <= now) room.Forbidden.Remove(role);
+            foreach (var (tag, ends) in room.Tags.ToList())
+                if (ends <= now) room.Tags.Remove(tag);
+        }
+        if (nowMs < _heatWindowEndsMs) return;
+        long window = Param("BarroomHeatTagsTime", DefaultHeatTagsMs);
+        _heatWindowEndsMs = nowMs + window;
+        HeatWindowLocked(now + window / 1000);
+    }
+
+    // ---- helpers ----
+
+    /// <summary>The caller's room when it is a member, and <paramref name="guid"/> (when given) names it.</summary>
+    private int InRoomLocked(long role, long guid, out Room room)
+    {
+        room = null!;
+        if (!_roomOf.TryGetValue(role, out long at)) return guid != 0 && !_rooms.ContainsKey(guid) ? ErrorCodes.TavernNotFound : ErrorCodes.TavernNotInRoom;
+        if (guid != 0 && guid != at) return _rooms.ContainsKey(guid) ? ErrorCodes.TavernNotInRoom : ErrorCodes.TavernNotFound;
+        room = _rooms[at];
+        return 0;
+    }
+
+    /// <summary>As <see cref="InRoomLocked"/>, and the caller owns the room.</summary>
+    private int HostedLocked(long role, long guid, out Room room)
+    {
+        int code = InRoomLocked(role, guid, out room);
+        return code != 0 ? code : room.Owner == role ? 0 : ErrorCodes.TavernNoPermission;
+    }
+
+    private static bool IsForbidden(Room room, long role, long now) => room.Forbidden.TryGetValue(role, out long until) && until > now;
+
+    private GameSession? Online(long role) => _sessions.All().FirstOrDefault(s => s.Role?.Id == role);
+
+    private long NowMs() => _clock.GetUtcNow().ToUnixTimeMilliseconds();
+
+    private long NowSec() => _clock.GetUtcNow().ToUnixTimeSeconds();
+
+    private long Param(string key, long fallback) => _data.Table("PublicParamConfig").TryGetValue(key, out var value)
+        && value.ValueKind == JsonValueKind.Number ? (long)(GameData.Number(value) ?? fallback) : fallback;
+
+    private long[] ParamList(string key) => _data.Table("PublicParamConfig").TryGetValue(key, out var value)
+        && value.ValueKind == JsonValueKind.Array ? [.. value.EnumerateArray().Select(v => (long)(GameData.Number(v) ?? 0))] : [];
+
+    private int SpeakNum() => (int)Math.Clamp(Param("BarroomSpeakNum", DefaultSpeakNum), 1, 100);
+
+    /// <summary>PublicParamConfig.BarroomTaskID, the daily Tavern quest.</summary>
+    public long TaskId() => Param("BarroomTaskID", DefaultTaskId);
+
+    /// <summary>A day's stay that counts as active: the daily quest's 106010 requirement (TaskConfig 2000: 1200 s).</summary>
+    private int ActSeconds()
+    {
+        var row = Data.Config.TaskConfig.Get(_data, TaskId());
+        long required = row?.ProgressTarget.FirstOrDefault(t => t is [TargetStay, _])?[1] ?? DefaultActSeconds;
+        return (int)Math.Clamp(required, 1, int.MaxValue);
+    }
+
+    private static int AddClamped(int value, long delta) => (int)Math.Clamp(value + delta, 0, int.MaxValue);
 }

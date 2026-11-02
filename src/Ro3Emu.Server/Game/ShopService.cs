@@ -42,7 +42,10 @@ public sealed partial class ShopService(GameData data, CharacterService characte
     private readonly Maps.WorldData _world = world;
     private readonly ILogger<ShopService> _log = log;
     private TimeSpan _lastTick;
+    /// <summary>The game day the online roles were last synced for. Taken when the server starts: taken by the first
+    /// throttled tick instead (a second into the loop), it missed a rollover that came before it.</summary>
     private DateTime _gameDay = DailyActivityService.GameDay(clock.GetLocalNow().DateTime);
+    private long Now => _clock.GetUtcNow().ToUnixTimeSeconds();
 
     /// <summary>
     /// At the 05:00 game-day rollover the online roles get 5024 again: their daily (and on Monday weekly, on the 1st
@@ -63,10 +66,10 @@ public sealed partial class ShopService(GameData data, CharacterService characte
     /// <summary>Saved per role: purchase counters with the period they were counted in, and favourites.</summary>
     public sealed class ShopState
     {
-        public Dictionary<int, Counter> Bought { get; set; } = new();
-        public HashSet<int> Favorites { get; set; } = new();
+        public Dictionary<int, Counter> Bought { get; set; } = [];
+        public HashSet<int> Favorites { get; set; } = [];
         /// <summary>RechargeConfig id -> tiers bought (Top Up); a tier at 0 still pays its first-purchase double.</summary>
-        public Dictionary<int, int> Recharged { get; set; } = new();
+        public Dictionary<int, int> Recharged { get; set; } = [];
     }
 
     public sealed class Counter
@@ -90,6 +93,7 @@ public sealed partial class ShopService(GameData data, CharacterService characte
         if (migrated) Save(session);
         await SyncAsync(session);
         await session.SendGameRawAsync(CashShopMsg, Encoding.UTF8.GetBytes(_freeCashShop ? "{\"free\":true}" : "{\"free\":false}"));
+        await LoginGiftsAsync(session);
     }
 
     /// <summary>
@@ -357,13 +361,12 @@ public sealed partial class ShopService(GameData data, CharacterService characte
     /// <summary>_kAppearanceParts: a JSON array of WardRobeConfig ids, or {} when empty.</summary>
     private static List<int> Parts(JsonElement commodity) =>
         commodity.TryGetProperty("_kAppearanceParts", out var parts) && parts.ValueKind == JsonValueKind.Array
-            ? parts.EnumerateArray().Select(p => (long)(GameData.Number(p) ?? 0)).Where(id => id is > 0 and <= int.MaxValue)
-                .Select(id => (int)id).ToList()
+            ? [.. parts.EnumerateArray().Select(p => (long)(GameData.Number(p) ?? 0)).Where(id => id is > 0 and <= int.MaxValue).Select(id => (int)id)]
             : [];
 
     private static ShopState Copy(ShopState state) => new()
     {
-        Favorites = new HashSet<int>(state.Favorites),
+        Favorites = [.. state.Favorites],
         Bought = state.Bought.ToDictionary(p => p.Key, p => new Counter { Count = p.Value.Count, Period = p.Value.Period }),
         Recharged = new Dictionary<int, int>(state.Recharged),
     };

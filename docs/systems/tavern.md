@@ -1,101 +1,118 @@
-# Tavern
+# Tavern: 82481-82514, 5043 and the PartyService room list
 
-The Tavern (client "BarRoom", 酒馆) is the player-run chat and voice rooms opened from the chat window (function 2410,
-chat channel 10). Server: `TavernService` (+ `.Rooms.cs`), routes in `TavernMessages`, tests in `TavernTests`.
+The Tavern (FunctionConfig 2410, level 36, opened from the chat side button) is a lobby of voice and text rooms. A
+player browses rooms by topic and language, creates one, joins, chats in it, asks for one of the mic seats, and gives
+drinks to other members. The owner runs the room. A daily quest pays for 20 minutes spent in any room, and two
+achievement lines count those days and the Star Power received.
 
-## Client sources
+The client keeps no room state of its own (`LC_BarRoomHelper`): every reply that carries a room (`BarRoomTotalDetail`)
+replaces what it shows, and every 82506 push makes an open Tavern window ask 82508 for the whole room again. The client's
+offline mock (`Lua_BarRoom_Mock.lua`) is switched off in this build and its shapes are older than the proto, so the
+handlers in `LC_DAL_BarRoom` / `LC_BarRoomHelper` are the reference.
 
-| Piece | Client |
+## Server (`TavernService`)
+
+### Rooms
+
+- A room lives in memory: guid, owner, topic, language, name, members (join time, area), the speaking mode and its
+  list, mic requests, the mute and Blocks lists, heat and tags. It closes when its last member leaves.
+- Guids start at `VoiceRoomKey.TavernBase` (2^40). The client joins the room's voice as the guid in decimal, the same
+  shape as a party's team id, so the two ranges must never meet.
+- 82481 create: name (trimmed, 1-18 characters, `BarRoomNameLen`), topic (`BarroomTypeConfig._iType` 0) and language
+  (`_iType` 1). Refusals 2576 / 2577 / 2579 / 2580, and 28 while the function is closed. The creator owns the room.
+- 82482 enter: 2552 room gone, 2571 already in it, 2553 on its Blocks list, 2572 at `BarroomPersonNum` (1000).
+  The others get 82507 UserEnter (their client asks for the room and shows the welcome line).
+- 82483 exit, 82508 get (2578 when the caller is in no room: `OnPartyGetClient` cannot take an empty room).
+- An owner who leaves hands the room to the first seated speaker who is online, else the longest-present online member.
+- 5043 `DBBarRoomInfo.barRoomId` is the room the role is in: the client joins its chat and voice from it after a login.
+
+### The room list
+
+`LC_BarRoomServer.PartyQuerySummaryRequest` calls the micro-service `PartyService.getPartysSummary` with party type 4
+(a msgpack array: type, string conditions, int conditions, sort conditions, start, size, direct query). The reply's
+`SummaryList[].GameSummaryData` is `BarRoomSummary` bytes. Discover adds two int conditions, `BaroomCreateTime`
+(created in the last `BarroomFindBarRoom[0]` = 1800 s) and `BaroomHeadCount` (2-30 members). The client filters by
+topic, language and name and sorts the list itself. `getSubPartysCountByType` for type 4 answers rooms per topic.
+
+### Seats and the owner's tools
+
+| Id | What |
 |---|---|
-| Requests and pushes | `MG_Barroom.proto` 82481-82514, `LC_BarRoomServer` (senders), `LC_DAL_BarRoom` (handlers) |
-| Room logic | `Logic/ChatBarroom/BarRoomLogic/LC_BarRoomHelper` |
-| Voice | `LC_BarRoomTalk.JoinChannel` → `VoiceCall_Util.JoinChannel(tostring(roomId))` |
-| Personal state | 5043 `DBBarRoomInfo` (auto-sync; `LC_BarRoomHelper.OnGetBarRoomID`) |
-| Configs | `BarroomTypeConfig` (`_iType` 0 = room types 1-6, 1 = languages 21-28), `PublicParamConfig` `BarRoom*` / `Barroom*` |
-| Errors | `ErrorCodeConfig` 2551-2580 (constants at the top of `TavernService`) |
+| 82490 | Speaking mode and its list: Free (anyone), Manual (the seat list), Order (the speech order). At most `BarroomSpeakNum` (10, 2559); a muted member cannot be listed (2558). The reply echoes the list as kept. |
+| 82493 | The list alone (no client code sends it). |
+| 82487 | A member asks for a seat with a reason. 2567 in Free mode or for the owner, 2560 already listed, 2558 muted, 2568 already asking. |
+| 82492 | The owner agrees or declines (2569 no request, 2559 seats full). The applicant gets the same reply ("The host has Agreed / Declined"). |
+| 82488 | A member leaves its seat (2561 the owner keeps the mic, 2562 no seat). |
+| 82498 / 82499 | Mute a member for `BarroomForbiddentime` (24 h) / lift it (2558 already muted, 2570 not muted). The muted member gets the reply too ("The host has muted you."). |
+| 82500 / 82501 | Remove a member onto the room's Blocks list / take it off (2566). The removed client gets 5043 with no room and an 82506 push. |
+| 82504 / 82505 | Close / reopen every other mic (`isCloseMic`). |
+| 82489 | Hand the room over (2557 blocked, 2558 muted, 2578 not in the room), once per `BarRoomTransferRoomCd` (30 s, 2575). |
+| 82494 | Rename, change topic or language, once per `BarRoomSetInfoCd` (5 s, 2573). |
+| 82514 | The owner's client asks to mute or unmute a member's own mic: the member gets 77003 `MutePlayerInChannel`. |
+| 82484 / 82485 / 82486 | Invite: the server fills the inviter's name, job and level in 82485. Accepting enters the room; the invitee's reply carries its own id as `inviterGuid` (the client then opens the window), the inviter gets a copy with the invitee's id ("${1} has accepted / declined your invitation"). |
 
-## Rooms
+Every change answers its caller and pushes 82506 to the other online members. The client posts the gift, transfer
+and close-mic lines into the room chat itself.
 
-Rooms live in memory: a restart clears them, and leaving the world leaves the room *(inferred: the client never
-re-enters one on login)*. A room has an owner, members in join order, a mic list (`curSpeaks`, the owner always first),
-requests to speak, a mute list, a block list and Popularity (`hotValue`). Room ids start at 2^40 so they never collide
-with party ids in the voice relay.
+### Chat and voice
 
-- **Create** (82481) checks the type, the language (0 = unset is allowed, *inferred*) and the name
-  (`BarRoomNameLen` 18 characters). Creating or entering leaves any room the player was in.
-- **Enter** (82482): unknown room 2552, blocked 2553, full (`BarroomPersonNum` 1000) 2572. The others get 82507.
-- **Exit** (82483) answers 0, on which the client drops the room and its chat channel. The owner's room passes to
-  the earliest member *(inferred)*; an empty room closes.
-- **Get** (82508) answers the player's room; not in a room answers 2578 (the client's handler reads `info` unguarded).
-- **Invite** (82484/85/86): any member may invite online players. An accept joins the room; the answer goes to both
-  the invited player (who then asks for 82508 and opens the window) and the inviter (tips 59224/59225).
+- The room's chat is public channel 10, IM group `10_<guid>` (`LC_ChatHelper`). `ChatService` lets only the room's
+  members join it or write there, and drops a closed room's channel and kept lines.
+- The voice relay serves the room as its guid (`VoiceRoomKey.IsTavern`). Only members may join (`TavernService.IsMember`);
+  `TavernService.MaySpeak` decides whose mic the room hears: the owner always, nobody else while all mics are closed
+  or while muted, anyone in Free mode, only listed members in Manual and Order mode. `Voice:MaxTavernRoomSize` (200)
+  bounds the listeners of one room. The client's voice hook holds one room at a time, so entering a Tavern room's
+  voice leaves the party or guild room.
 
-Every change pushes 82506 and the room's 82508 to every member online. The client only re-asks for 82508 on 82506
-while the Tavern window is open, so the server sends both.
+### Gifts, heat and tags
 
-## Room list
+- 82491 gives `giftNum` of a drink (`ItemConfig` type 2 / subtype 213) to a member. Use effect 110 `GainBarroomHot`
+  times the count goes to the room's heat (the reply's `hotAdd`), 111 `GainStar` to the receiver's Star Power
+  (`userBarRoomHot`). Refusals: 2574 yourself, 2555 the receiver left, 2563 offline, 2564 other server, 154 short.
+- The drinks are spent under an `event/tavern-gift` receipt; the Star Power is credited in the receiver's own commit.
 
-The list is the micro service `PartyService.getPartysSummary` with `partyType` 4. Each `GameSummaryData` is a
-`BarRoomSummary`, busiest first *(inferred order)*. The Discover button adds `PartyIntCondition`
-`BaroomCreateTime [now-1800, now+1800]` and `BaroomHeadCount [2, 30]` (`BarroomFindBarRoom`), which the server
-applies. `getSubPartysCountByType` with party type 4 counts rooms per room type (`BarRoomAllTargetCount`, unused by the
-UI).
+| Drink | Heat | Star Power |
+|---|---|---|
+| Hot Cocoa 1200801 | 1 | 1 |
+| Gingerbread 1200802 | 10 | 5 |
+| Craft Brew 1200803 | 60 | 35 |
+| Grape Wine 1200804 | 400 | 300 |
 
-## Owner tools
+### A role's counters (role blob `barroom`)
 
-| Message | Rule |
-|---|---|
-| 82494 room info | type, language, name; once per `BarRoomSetInfoCd` (5 s), else 2573 |
-| 82489 transfer | to a member not blocked (2557) or muted (2558); `BarRoomTransferRoomCd` (30 s, 2575); `transferCd` is the end time |
-| 82490 mic mode | Free / Set / Order (`SpeakAuthorityType`), optionally with the new mic list |
-| 82493 mic order | the listed members in `micOrder`, at most `BarroomSpeakNum` (10) with the owner |
-| 82492 handle request | an approval puts the member on the mic (2559 when full) |
-| 82498 / 82499 mute | off the mic and its requests; `forbiddenSpeaker` holds role → role (the client compares values) |
-| 82500 / 82501 kick | the target gets 82483 result 0 and is blocked (`blackList`, role → role) until unblocked |
-| 82504 / 82505 mute all | `isCloseMic`: every mic but the owner's |
-| 82514 mute a mic | answered to the **target**: `MutePlayerInChannel` mutes the receiving client's own mic |
-| 82513 GM | a GM (`GmCommands.Allowed`) sets Popularity and the special-room count |
+`TavernService.RoleState`, sent as 5043: Star Power in total and this week (`popularity`, `weekPopularity`), active
+days (`actDays`), today's seconds in a room (`inBarRoomTime`, `isToDayActComplete`). Time counts every second a member
+is online in a room and is written every minute, and at once when the day's 1200 s are reached.
 
-Members ask for the mic with 82487 (Free mode answers 2567) and leave it with 82488 (the owner cannot, 2561).
+### Quest and achievements
 
-## Chat and voice
+- Quest 2000 "Daily Tavern Quests" (`_iTaskType` 9, `BarroomTaskID`): `[106010, 1200]`, today's seconds in a room
+  (`TaskService.TavernTasks`). Its award 8000 (MultiverseGroupConfig) is AwardConfig 1008000, three Hot Cocoa.
+- 102100500-502 "A Nose for Wine": `[106007, 2000, n]`, deliveries of quest 2000 (1 / 7 / 30).
+- 102100600-602 "A Drink for a Story": `[106008, n]`, Star Power received (1000 / 5000 / 10000).
 
-Text chat is IM channel `10_<room>`, also with Tencent's `@TGS#_` prefix. `ChatService` admits only members
-(`TavernService.InRoom`) and removes a player from the channel when they leave the room.
+### GM
 
-Voice joins the relay room named by the room id. `VoiceGateServer` accepts the join for members, and
-`VoiceRooms.SweepMembership` drops non-members and forces the mic off when `TavernService.MayTalk` says no: the owner
-always may talk; nobody while muted or while "mute all" is on; anyone in Free mode, else only those on the mic list
-(`LC_BarRoomHelper.CheckMemberCanOpenMic`).
+The GM panel's Tavern ops (GMConfig 1024-1029): 134 print, 136 room heat / heat gain / extra head count, 137 a tag on a
+room, 138 Star Power, 139 quest completions (106007), 140 active days, 141 today's seconds. `!tavern` lists the rooms.
 
-## Gifts
+## Inferred
 
-82491 pays the gift items (`ItemConfig` `_iType` 2 / `_iSubType` 213) and reads their `_iUseEffect`: 110 is the
-room's Popularity, 111 the recipient's Star Power, per item.
-
-| Item | Name | Popularity | Star Power |
-|---|---|---|---|
-| 1200801 | Hot Cocoa | 1 | 1 |
-| 1200802 | Gingerbread | 10 | 5 |
-| 1200803 | Craft Brew | 60 | 35 |
-| 1200804 | Grape Wine | 400 | 300 |
-
-The recipient must be another member who is online (2574 self, 2555 left, 2563 offline). Star Power goes to the
-recipient's `popularity` and `weekPopularity` (reset on Monday 05:00, *inferred*). The answer goes to the gifter,
-whose client posts the gift line in the room chat.
-
-## Daily Tavern and achievements
-
-Every 10 s the server adds each member's seconds in a room to `inBarRoomTime` (reset at 05:00). Reaching the target
-of the Daily Tavern quest (`BarroomTaskID` 2000, `_kProgressTarget [[106010, 1200]]`, "Spend 20 minutes in any Tavern
-room") sets `isToDayActComplete` and adds one to `actDays`. This also moves the Event Calendar's Daily Tavern row.
-
-- Quest target 106010 reads today's seconds like the AFK seconds of 106901, so a quest accepted later in the day
-  sees time already spent. The guild tasks 1602050-1603014 reuse 106010 as `[106010, 5]` with another meaning; only
-  targets of a minute or more are read as Tavern time *(inferred)*.
-- Achievements 102100500-502 (`[106007, 2000, n]`) read `actDays`; 102100600-602 (`[106008, n]`) read `popularity`.
-
-## Not done
-
-- Room heat tags (red packets, activities, sparks, `BarroomHeatTags*`): no source found *(inferred)*.
-- Reports (`BarroomReportConfig`) and the GM panel's Tavern buttons.
+- **Rooms are online state.** The list only ever shows live rooms. A room closes when its last member leaves, and
+  nothing survives a restart.
+- **Offline members.** A member whose session is gone keeps its place for 5 minutes (a relog brings it back through
+  5043), then leaves. Error 2563 "recipient offline" shows the original kept offline members in rooms.
+- **Next owner.** The first seated speaker who is online, else the longest-present online member.
+- **Heat and tags.** Heat only grows while the room exists. Every `BarroomHeatTagsTime` (5 min) `historyHot` keeps the
+  heat and its gain over the window, Spark (the heat icon) goes to the `BarroomHeatTagsNum` (2) rooms that gained at
+  least `BarroomHeatTagsMiniIncrease` (50), and Boom (cheers) to the `BarroomHotTagsNum` (4) hottest rooms, both until
+  the next window. RedBag and Activity come only from GM op 137 and last a day. Past the page size, the list orders
+  rooms by `BarroomSortParam` [6000, 4000] on heat and head count.
+- **Mute and Blocks values.** `forbiddenSpeaker` holds the mute's end, `blackList` the removal time, unix seconds; a
+  removal lasts as long as the room.
+- **Active day.** A day whose stay reaches the quest's 1200 s counts in `actDays`; the Tavern day starts at 05:00.
+- **The quest** delivers itself when complete (no claim button, no `_kDeliverTask`) and is offered again every day.
+- **Gift drinks.** The tables give only Hot Cocoa a source (the quest). Every active day also brings one higher drink:
+  Grape Wine every 7th active day, Craft Brew every 3rd, Gingerbread otherwise (`Ro3Emu:TavernDayDrinks`, on by
+  default; off leaves only the quest's Hot Cocoa).
+- **Not checked:** a pending invitation (anybody may enter a room anyway) and room names against a word list.

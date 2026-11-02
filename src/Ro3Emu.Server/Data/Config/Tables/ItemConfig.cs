@@ -12,6 +12,8 @@ public readonly partial record struct ItemConfig(JsonElement Row)
     [ConfigField("_iCD")] public partial long Cd { get; }
     [ConfigField("_iCardGroup")] public partial long CardGroup { get; }
     [ConfigField("_iCardPart")] public partial long CardPart { get; }
+    /// <summary>[text id, @{1}, @{2}, ...]: the description and the values its placeholders show.</summary>
+    [ConfigField("_iDescription")] public partial JsonElement? Description { get; }
     [ConfigField("_iEnchantSlot")] public partial long EnchantSlot { get; }
     [ConfigField("_iEquipId")] public partial long EquipId { get; }
     [ConfigField("_iEquipPart")] public partial long EquipPart { get; }
@@ -38,5 +40,8 @@ public readonly partial record struct ItemConfig(JsonElement Row)
     [ConfigField("_kIcon")] public partial string Icon { get; }
     [ConfigField("_kJobNeed")] public partial long[] JobNeed { get; }
     [ConfigField("_kMultiverseArray")] public partial long[] MultiverseArray { get; }
+    [ConfigField("_kParam1")] public partial string Param1 { get; }
+    /// <summary>The item's large picture (a card's art); "item_null_*" when it has none.</summary>
+    [ConfigField("_kPic")] public partial string Pic { get; }
     [ConfigField("_kUseTimes")] public partial long[] UseTimes { get; }
 }

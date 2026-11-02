@@ -68,6 +68,9 @@ public sealed partial class CharacterService
         return $"Base level {p.Level}, job level {p.JobLevel}.";
     }
 
+    /// <summary>EXP just committed to a character: base and job (CheatMonitor.ExpGained keeps it per hour).</summary>
+    public List<Action<GameSession, long, long>> ExpCredited { get; } = [];
+
     /// <summary>Adds exp, levelling up through BaseLvConfig / JobLvConfig as needed.
     /// A kill reward may pass its role-owner check so a queued StateLock cannot credit a later role.</summary>
     public async Task<string> AddExpAsync(GameSession session, long baseExp, long jobExp, Func<bool>? stillOwner = null)
@@ -80,15 +83,17 @@ public sealed partial class CharacterService
         int oldLevel = p.Level, oldJob = p.JobLevel;
         // BaseExpAddConfig catch-up bonus below the server level (CharacterService.LevelRules).
         baseExp = WithPursueBonus(p.Level, Math.Max(0, baseExp));
+        jobExp = checked(Math.Max(0, jobExp) + JobExpFromBase(baseExp));
         var staged = CloneProgress(p);
-        ApplyExp(staged, baseExp, Math.Max(0, jobExp));
+        ApplyExp(staged, baseExp, jobExp);
         var builder = roles.NewTransaction();
         builder.ItemDelta(session.Role!.Id, session.Items, session.Items);
         builder.Progress(session.Role!.Id, staged);
         var expSource = new RewardSettlement($"exp/{session.Role.Id}/{Guid.NewGuid():N}", "cd13e/character-exp");
         builder.WithEconomy(RewardMutation(session, expSource, p, staged, [], [],
-            Math.Max(0, baseExp), Math.Max(0, jobExp), new ItemAutoDecomposeTipsNtf()));
+            Math.Max(0, baseExp), jobExp, new ItemAutoDecomposeTipsNtf()));
         await roles.CommitAsync(builder, "character/exp", _ => CopyProgress(p, staged));
+        foreach (var credited in ExpCredited) credited(session, baseExp, jobExp);
         if (stillOwner?.Invoke() == false || session.Attachment?.Cancelled == true) return string.Empty;
         var rewards = new Romsg.GetRewardNotify { TargetUid = session.Role!.Id };
         if (baseExp > 0) rewards.Rewards.Add(ItemInfo(new InvItem { Entry = BaseExpItem, Stack = (int)Math.Min(baseExp, int.MaxValue) }));
@@ -120,9 +125,8 @@ public sealed partial class CharacterService
         while (p.JobLevel < maxJob && JobLvRow(p.Career, p.JobLevel) is { } row && GameData.Int(row, "_iJobeExp") == 0) p.JobLevel++;
     }
 
-    /// <param name="levelUp">The base level rose: the client floats the attribute gains, and HP/SP refill to the new
-    /// maximum (inferred: classic RO heals fully on a base level up; the client shows no rule). Without it a level 3
-    /// Novice ends the first quest's five level 5 Porings near 20 of 129 HP, though it levels up after the third.</param>
+    /// <param name="levelUp">The base level rose: HP and SP refill to the new maximum (inferred: classic RO heals fully on
+    /// a base level up and the client shows no rule of its own; from akreao's fork).</param>
     private async Task AfterLevelChangeAsync(GameSession session, Func<bool>? stillOwner = null, bool persist = true, bool levelUp = false)
     {
         var p = session.Progress!;
@@ -174,6 +178,7 @@ public sealed partial class CharacterService
         foreach (var (stat, value) in req.Points)
             if (stat is >= 1 and <= 6) wanted[stat - 1] = value;
         bool ok = req.Points.Keys.All(k => k is >= 1 and <= 6)
+            // The panel's "-" goes down to 1 (LC_DAL_PlayerInfo.CanMinusBaseAttr) and the reset is free, so any value counts.
             && wanted.All(v => v is >= 1 and <= MaxStat) && wanted.Sum(StatCost) <= TotalPoints(p);
         if (ok)
         {
@@ -217,7 +222,7 @@ public sealed partial class CharacterService
         await CommitStatsAsync(session, "stat-reset", p, plans);
         await session.SendGameAsync(ResetAttrPoints, new ResetAttrPointResp { Result = 0, PlanIndex = index, PlanBaseProperty = plan.Clone() });
         await SendStatPlanAsync(session);
-        if (index == plans.CurPlanIndex) await SendStatsAsync(session);
+        if (index == plans.CurPlanIndex) await SendStatsAsync(session, showChange: true);
         foreach (var handler in ProgressHandlers) await handler(session);
         foreach (var handler in StateChanged) handler(session);
     }
@@ -251,12 +256,13 @@ public sealed partial class CharacterService
             if (error != 0) return;
             await PublishJobAsync(session);
         }
+        await PayJobExpCatchUpAsync(session);
         foreach (var handler in ProgressHandlers) await handler(session);
         foreach (var handler in JobChanged) await handler(session);
     }
 
     /// <summary>Called after a job change (quests: CheckJobChange / CheckJobRank targets).</summary>
-    public List<Func<GameSession, Task>> JobChanged { get; } = new();
+    public List<Func<GameSession, Task>> JobChanged { get; } = [];
 
     private int TransformJobError(GameSession session, int jobId)
     {
@@ -286,6 +292,7 @@ public sealed partial class CharacterService
             await session.SendGameAsync(PlayerTransformJob, new PlayerTransformJobResp { Result = 0, JobId = career });
             await PublishJobAsync(session);
         }
+        await PayJobExpCatchUpAsync(session);
         foreach (var handler in ProgressHandlers) await handler(session);
         foreach (var handler in JobChanged) await handler(session);
         return $"Job {career} {data.TextOf(data.Row("JobConfig", career)!.Value, "_iName")}".TrimEnd();

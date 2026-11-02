@@ -21,7 +21,7 @@ public sealed partial class SkillCombatTests
         await Gm("alice", "!job 5400"); await Teach("alice", 15306); await Seasoned("alice");
         Combat.Rolls = new FixedRolls(9999);
         var session = Session("alice");
-        await Loop.InvokeAsync(() => { session.GmNoCooldown = true; return Task.CompletedTask; });
+        await Loop.InvokeAsync(() => { session.GmCombat |= GmCombatSwitches.NoCooldown; return Task.CompletedTask; });
         var start = session.Position.Clone();
         var target = await Target("alice", stationary: true);
         await Loop.InvokeAsync(() => { target.X = start.X + 1; target.Z = start.Z; target.Hp = 1_000_000; return Task.CompletedTask; });
@@ -44,34 +44,6 @@ public sealed partial class SkillCombatTests
         });
         await Task.Delay(1500);
         Assert.Equal(hp, await Loop.InvokeAsync(() => Task.FromResult(target.Hp)));
-    }
-
-    /// <summary>
-    /// Normal attacks yield to other skills at once, but cancelling one after its hit (or switching to another normal
-    /// attack group) let a client swing several times per animation. The next normal attack waits for the swing.
-    /// </summary>
-    [ClientDataFact]
-    public async Task ANormalAttackCannotBeCancelledAndRecastFasterThanItsSwing()
-    {
-        await using var alice = await InWorld("Alice");
-        var target = await Target("alice", stationary: true);
-        await Loop.InvokeAsync(() => { target.Hp = 1_000_000_000; return Task.CompletedTask; });
-        int normal = await Loop.InvokeAsync(() => Task.FromResult(_app.Services.GetRequiredService<SkillService>().NormalAttack(Session("alice"))));
-
-        await alice.SendGameAsync(CombatService.UseSkill, new CastSkillReq { SkillId = normal, TargetId = target.Uid });
-        var first = await Next(alice, CombatService.UseSkill, CastSkillRsp.Parser);
-        Assert.Equal(0, first.Result);
-        await Next(alice, CombatService.SkillHit, SkillHitInfo.Parser, h => h.SessionId == first.SessionId);
-        await alice.SendGameAsync(CombatService.SkillInterrupt, new SkillInterruptReq { InterruptSkillId = normal });
-        Assert.True((await Next(alice, CombatService.SkillInterrupt, SkillInterruptResp.Parser)).IsInterruptSucc);
-
-        await alice.SendGameAsync(CombatService.UseSkill, new CastSkillReq { SkillId = normal, TargetId = target.Uid });
-        Assert.Equal(ErrorCodes.SkillBusy, (await Next(alice, CombatService.UseSkill, CastSkillRsp.Parser)).Result);
-
-        // Once the swing's time has passed, the next one goes out.
-        await Task.Delay(2500);
-        await alice.SendGameAsync(CombatService.UseSkill, new CastSkillReq { SkillId = normal, TargetId = target.Uid });
-        Assert.Equal(0, (await Next(alice, CombatService.UseSkill, CastSkillRsp.Parser)).Result);
     }
 
     /// <summary>

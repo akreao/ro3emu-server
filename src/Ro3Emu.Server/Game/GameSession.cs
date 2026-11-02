@@ -28,11 +28,15 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
     /// without NPCs, since the client's socket resync waits for one (spec §1.6.5).</summary>
     internal bool ReconnectAoiPending { get; set; }
 
-    /// <summary>Closes the connection for a recovery relogin; unlike a network drop it never waits for a reconnect.</summary>
+    /// <summary>While the web panel's GM console runs a command for this session (loop-owned), the GM replies sent to it.</summary>
+    internal List<string>? GmReplies { get; set; }
+
+    /// <summary>Closes the connection for a recovery relogin, after the replies already queued; unlike a network drop it
+    /// never waits for a reconnect.</summary>
     internal void AbortForRecovery()
     {
         ReconnectBlocked = true;
-        Channel.Abort();
+        Channel.AbortAfterFlush();
     }
 
     public long HandshakeToken { get; set; }
@@ -70,7 +74,7 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
         TerritoryWars = null; TerritoryBattle = null; SiegeBattle = null; TerritoryEscort = null;
         Defense = null; TimedBattle = null;
         LifeJob = null; Restrictions = null;
-        Items = new(); Pets = null;
+        Items = []; Pets = null;
         WorldState = new();
         Power = null; PowerPublishedMs = 0;
     }
@@ -141,33 +145,36 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
 
     /// <summary>Authoritative cast generation; delayed effects cannot outlive an interrupted/replaced cast.</summary>
     public ActiveSkillCast? SkillCast { get; set; }
-    /// <summary>The last accepted normal attack, which paces the next one (CombatService.NormalAttackTooSoon).</summary>
-    internal ActiveSkillCast? LastNormalAttack { get; set; }
+    /// <summary>The running Skill Bar Lineup (CombatService.StartLineup); pressing the Skill Bar again replaces it.</summary>
+    internal object? LineupRun { get; set; }
     public SemaphoreSlim SkillCastGate { get; } = new(1, 1);
-    public List<SkillObject> SkillObjects { get; } = new();
-    public Dictionary<(int Group, int Mode), long> SkillModeCds { get; } = new();
+    public List<SkillObject> SkillObjects { get; } = [];
+    public Dictionary<(int Group, int Mode), long> SkillModeCds { get; } = [];
     public CombatService.ProtocolState SkillProtocol { get; set; } = new();
 
     /// <summary>Status bits (property 2701, bit 15 = fighting) and when the player last dealt or took a hit.</summary>
     public long StatusBits { get; set; }
     public long LastCombatMs { get; set; }
+    /// <summary>No natural HP/SP regeneration before this server ms (CombatService.RegenAsync). Only tests set it, to keep
+    /// the five-second regeneration out of exact HP checks; fighting does not pause it.</summary>
+    internal long NoRegenUntilMs { get; set; }
 
     /// <summary>Active buffs (BuffService) and cooldown ends in server ms: skills by group id, items by id, item share groups.</summary>
-    public List<ActiveBuff> Buffs { get; } = new();
+    public List<ActiveBuff> Buffs { get; } = [];
     /// <summary>Buff-owned portions of 2701/2702/2711; 2701 also contains CombatService's fighting bit.</summary>
     public ulong BuffStatusBits { get; set; }
     public ulong ForbiddenBits { get; set; }
     /// <summary>The cast (ActiveSkillCast.Id) that holds the caster still: BuffService adds Walk to ForbiddenBits while set.</summary>
     public long CastMoveLockId { get; set; }
     public ulong StaggerBits { get; set; }
-    public HashSet<int> ForbiddenOrdinals { get; } = new();
+    public HashSet<int> ForbiddenOrdinals { get; } = [];
     /// <summary>Transient configured energy meters; BuffService sends each change as 31334.</summary>
-    public Dictionary<int, PlayerEnergyState> Energy { get; } = new();
+    public Dictionary<int, PlayerEnergyState> Energy { get; } = [];
     public int EnergyCareer { get; set; }
     /// <summary>No other player shows this one (World): a Survivor Battle spectator whose view follows the watched
     /// teammate. Set through World.SetHiddenAsync; a scene join clears it.</summary>
     public bool AoiHidden { get; internal set; }
-    /// <summary>Lasting buffs the falcon, wolf or Madogear grant right now (CombatService.Companions).</summary>
+    /// <summary>Lasting buffs the falcon, wolf or Madogear grant right now (CombatService.ClassCompanions).</summary>
     internal HashSet<int> CompanionBuffs { get; set; } = new();
     /// <summary>The battle mount ridden when companions were last synced: a change resends the normal attack.</summary>
     internal long CompanionRide { get; set; }
@@ -175,7 +182,7 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
     public int EnergyMounts { get; set; }
     /// <summary>31134/31135 lethal-hit choice; only an eligible active Osiris buff may create it.</summary>
     public ImmuneDeathOffer? ImmuneDeathOffer { get; set; }
-    public Dictionary<long, long> BuffEffectCds { get; } = new();
+    public Dictionary<long, long> BuffEffectCds { get; } = [];
     public long ImmuneRecoveryUntilMs { get; set; }
     /// <summary>Hits deal nothing until then (Wood Spirit's Blessing's "Tree Spirit's Blessing Trigger: Invincible.").</summary>
     internal long InvincibleUntilMs { get; set; }
@@ -202,9 +209,9 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
     /// <summary>Swift Warg is armed until then: the next movement casts it (CombatService.WargSkills).</summary>
     internal long SwiftWargArmedMs { get; set; }
     public int ImmuneRecoveryPercent { get; set; }
-    public Dictionary<int, long> SkillCds { get; } = new();
-    public Dictionary<int, long> ItemCds { get; } = new();
-    public Dictionary<int, long> ItemGroupCds { get; } = new();
+    public Dictionary<int, long> SkillCds { get; } = [];
+    public Dictionary<int, long> ItemCds { get; } = [];
+    public Dictionary<int, long> ItemGroupCds { get; } = [];
 
     /// <summary>Current HP / SP (null = full); maxima come from the stat sheet.</summary>
     public long? CurrentHp { get; set; }
@@ -213,11 +220,12 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
     /// <summary>GM override added to the speed attribute (113), not saved (!speed).</summary>
     public long SpeedBonus { get; set; }
 
-    /// <summary>GM panel GmUnlimit: hits on this player deal no damage. Test aid, not saved.</summary>
-    public bool GmInvincible { get; set; }
-
-    /// <summary>GM panel GmNoCD: casts start no cooldown. Test aid, not saved.</summary>
-    public bool GmNoCooldown { get; set; }
+    /// <summary>GM panel combat switches (GmNoCD, GmDamageFix, GmUnlimit), not saved; combat reads the field per cast or hit.</summary>
+    public GmCombatSwitches GmCombat { get; set; }
+    /// <summary>GM panel attribute changes (GmSetEntityAttr / GmChangeEntityAttr) as raw contributions, not saved.</summary>
+    internal Dictionary<int, double>? GmAttributes { get; set; }
+    /// <summary>The skill a GM panel cast (GmCastSkill / GmTargetCastSkill) may use unlearned, only while it is admitted.</summary>
+    internal int GmCastSkill { get; set; }
 
     /// <summary>Between sending 70010 and the client's 30005: walks still refer to the old map and are dropped.</summary>
     public bool SceneLoading { get; set; }
@@ -225,8 +233,20 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
     /// <summary>Time of the last accepted walk (speed check).</summary>
     public DateTime LastWalkUtc { get; set; }
 
-    /// <summary>Walk check refusals of this session (logged sparsely).</summary>
-    internal int WalkCheckWarnings { get; set; }
+    /// <summary>The distance the walk check still lets this client report (SceneService.AcceptWalkAsync).</summary>
+    internal WalkAllowance WalkAllowance { get; } = new();
+
+    /// <summary>The game message budgets of this connection (GameMessageHandler.WithinRate).</summary>
+    internal SessionRates? MessageRates { get; set; }
+
+    /// <summary>The chat line budget of this connection (ChatService).</summary>
+    internal RateBucket? ChatLines { get; set; }
+
+    /// <summary>The same for flight moves (WorldCoreService.FlyMoveAsync), at the flight speed.</summary>
+    internal WalkAllowance FlightAllowance { get; } = new();
+
+    /// <summary>WalkReq.dir of the last accepted walk: degrees, 0 = +z, clockwise toward +x.</summary>
+    public float WalkDir { get; set; }
 
     /// <summary>The last accepted walk was a move, not a stop: the client is somewhere along it now.</summary>
     public bool Walking { get; set; }
@@ -311,6 +331,8 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
     public PronteraDefenseService.State? Defense { get; set; }
     public TimedBattleService.State? TimedBattle { get; set; }
     public int EventFaction { get; set; }
+    /// <summary>EntityBase.teamId on this player's unit: its party (TeamService.SyncUnitTeamAsync), 0 when solo.</summary>
+    public long UnitTeamId { get; set; }
     public Romsg.DBTrainingGroundInfo? Training { get; set; }
     public long? ActivityServerDay { get; set; }
     public Romsg.DBLotteryData? Lottery { get; set; }
@@ -325,19 +347,15 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
     /// <summary>Chat emoticons unlocked by items (5041, role blob "emoji_info"); EmojiService.</summary>
     public Romsg.DBEmojiInfo? EmojiInfo { get; set; }
 
+    /// <summary>Tavern Star Power, active days and today's time in a room (5043, role blob "barroom"); TavernService.</summary>
+    public TavernService.RoleState? Tavern { get; set; }
+
     /// <summary>Profile card presets and 620 item unlocks (5016, role blob "personal"; other unlockInfos are derived); PersonalService.</summary>
     public Romsg.DBPersonalInfo? Personal { get; set; }
 
     /// <summary>Chat cosmetics unlocked by items and the worn choices (role blob "social_outfit"; 5044 lays them over the
     /// configuration's defaults); SocialOutfitService.</summary>
     public Romsg.DBSocialOutfit? SocialOutfit { get; set; }
-
-    /// <summary>Tavern Star Power, today's seconds in a room and completed days (5043, role blob "barroom"); TavernService.
-    /// barRoomId is the room the role is in now (rooms live in memory).</summary>
-    public Romsg.DBBarRoomInfo? Tavern { get; set; }
-
-    /// <summary>When this role's tavern seconds were last counted (unix seconds; 0 when not in a room); TavernService.</summary>
-    public long TavernCountedAt { get; set; }
 
     /// <summary>The emote or sitting in progress (state 17 Prepare or 14 Play); runtime only, gone at logout.</summary>
     public EmojiService.Emote? Emote { get; set; }
@@ -441,6 +459,9 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
     /// <summary>GM test aid only: this role session may start a multi-dungeon match alone. Never persisted.</summary>
     public bool DungeonSoloMatch { get; set; }
 
+    /// <summary>GM panel GmPlayerAsset openallfunc: every FunctionConfig function counts as open. This role session only (inferred).</summary>
+    public bool GmAllFunctionsOpen { get; set; }
+
     /// <summary>Territory war role counters and the shared, guild-qualified battle instance.</summary>
     public TerritoryWarsService.RoleState? TerritoryWars { get; set; }
     public TerritoryWarsService.Battle? TerritoryBattle { get; set; }
@@ -528,22 +549,22 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
     public (long Id, long Value)[] EntityProperties { get; set; } = [];
 
     /// <summary>Property ids already sent in 31008; retained across local Refresh until a zero is sent.</summary>
-    public HashSet<int> SentPropertyIds { get; } = new();
+    public HashSet<int> SentPropertyIds { get; } = [];
 
     /// <summary>EntityBase.equipInfo: item ids of equipment grids 1..7.</summary>
     public long[] EquipLook { get; set; } = [];
 
     /// <summary>Items of the role in play, bag and equipped (CharacterService).</summary>
-    public List<InvItem> Items { get; set; } = new();
+    public List<InvItem> Items { get; set; } = [];
 
     /// <summary>The last version of each AUTO_SYNC dataset the client got (msg id -> DB object), for AutoSync increments.</summary>
-    public Dictionary<uint, Google.Protobuf.IMessage> Synced { get; } = new();
+    public Dictionary<uint, Google.Protobuf.IMessage> Synced { get; } = [];
 
     /// <summary>Items still marked new in the bag (guidToNew, the red dot).</summary>
-    public HashSet<long> NewItems { get; } = new();
+    public HashSet<long> NewItems { get; } = [];
 
     /// <summary>Last AUTO_SYNC version sent per message id.</summary>
-    public Dictionary<uint, long> SyncVersions { get; } = new();
+    public Dictionary<uint, long> SyncVersions { get; } = [];
 
     /// <summary>Serializes changes to the role state (game messages vs. GM commands from the HTTP endpoint).</summary>
     public SemaphoreSlim StateLock { get; } = new(1, 1);
@@ -553,18 +574,18 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
 
     /// <summary>Other players this client currently shows (guarded by World's lock). Visibility is directed: a
     /// client with a lower view cap can show fewer players than see it (<see cref="Observers"/>).</summary>
-    public HashSet<GameSession> Visible { get; } = new();
+    public HashSet<GameSession> Visible { get; } = [];
 
     /// <summary>Players whose clients show this one: the reverse of their <see cref="Visible"/> sets. Broadcasts
     /// about this player (movement, attributes, effects) go to these.</summary>
-    public HashSet<GameSession> Observers { get; } = new();
+    public HashSet<GameSession> Observers { get; } = [];
 
     /// <summary>Most other players this client shows: its 30005 / 30007 viewMaxCount (min of the quality tier cap
     /// 39/49/79/99/149 and MaxOnScreenPlayers, LC_TransitionBase), clamped to 1..149.</summary>
     public int ViewLimit { get; set; } = Maps.World.MaxViewLimit;
 
     /// <summary>Server units (monsters...) this client currently shows.</summary>
-    public HashSet<Maps.WorldUnit> VisibleUnits { get; } = new();
+    public HashSet<Maps.WorldUnit> VisibleUnits { get; } = [];
 
     public Task SendRpcAsync(string method, params object?[] args)
     {
@@ -582,7 +603,7 @@ public sealed class GameSession(PhonestChannel channel, TrafficLog traffic)
     }
 
     /// <summary>Chat groups this player joined (guarded by ChatService's lock).</summary>
-    public HashSet<string> ChatGroups { get; } = new();
+    public HashSet<string> ChatGroups { get; } = [];
 
     private bool CanPresent() => Owners?.AllowsPresentation(this) != false
         && (Owners?.Current?.CanPresent(this) ?? true);

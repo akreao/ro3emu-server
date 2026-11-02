@@ -18,7 +18,7 @@ public sealed partial class SkillCombatTests : IAsyncLifetime
     private string _http = "";
     private GameLoop Loop => _app.Services.GetRequiredService<GameLoop>();
     private CharacterService Character => _app.Services.GetRequiredService<CharacterService>();
-    private GameSession Session(string name) => _app.Services.GetRequiredService<SessionRegistry>().All().Single(s => s.Account == name.ToLowerInvariant());
+    private GameSession Session(string name) => _app.Services.GetRequiredService<SessionRegistry>().All().Single(s => string.Equals(s.Account, name, StringComparison.OrdinalIgnoreCase));
 
     public async Task InitializeAsync()
     {
@@ -53,7 +53,7 @@ public sealed partial class SkillCombatTests : IAsyncLifetime
     private async Task Gm(string account, string line)
     {
         using var client = new HttpClient();
-        (await client.PostAsync($"{_http}/ro3emu/gm?account={account}", new StringContent(line))).EnsureSuccessStatusCode();
+        (await client.PostAsync($"{_http}/ro3emu/gm?account={account}", Operator.Command(line))).EnsureSuccessStatusCode();
     }
     private static string RepoRoot()
     {
@@ -61,7 +61,17 @@ public sealed partial class SkillCombatTests : IAsyncLifetime
         while (dir != null && !File.Exists(Path.Combine(dir.FullName, "Ro3Emu.slnx"))) dir = dir.Parent;
         return dir?.FullName ?? throw new DirectoryNotFoundException();
     }
-    private Task Teach(string name, int group) => Loop.InvokeAsync(() => { Session(name).Progress!.Skills[group] = 1; return Task.CompletedTask; });
+    /// <summary>
+    /// Learns the skill under the character's StateLock. A GM !lvl or !job leaves follow-up work (a quest reward, a
+    /// level-up award) that stages a copy of the progress under that lock and publishes it on commit: a skill written
+    /// beside it, without the lock, was dropped when a loaded run let that commit land after it (3002 SkillNotLearned).
+    /// </summary>
+    private Task Teach(string name, int group) => Loop.InvokeAsync(async () =>
+    {
+        var session = Session(name);
+        using var held = await CharacterService.Lock(session);
+        session.Progress!.Skills[group] = 1;
+    });
     private Task<MonsterUnit> Target(string name, bool stationary = false, int npcId = 5000001) => Loop.InvokeAsync(async () =>
     {
         var s = Session(name);
@@ -71,7 +81,8 @@ public sealed partial class SkillCombatTests : IAsyncLifetime
         {
             template = monsters.Template(npcId);
             Assert.NotNull(template);
-            template = template with { RoamDistance = 0 };
+            // A stationary dummy neither roams nor walks out to a surround slot (MonsterService.Surround).
+            template = template with { RoamDistance = 0, SurroundDistance = 0 };
         }
         var result = await monsters.SpawnSingleAsync(s.SceneEntry, npcId,
             new MapPoint(s.Position.X, s.Position.Y, s.Position.Z, 0), s.InstanceId, customTemplate: template);
@@ -611,9 +622,14 @@ public sealed partial class SkillCombatTests : IAsyncLifetime
         await Loop.InvokeAsync(() => { Assert.Equal(moved.EndPos, session.Position); return Task.CompletedTask; });
     }
 
+    /// <summary>WalkReq.dir from one point to another: degrees, 0 = +z, clockwise toward +x.</summary>
+    private static float Toward(Vec3 from, Vec3 to) =>
+        (float)((Math.Atan2(to.X - from.X, to.Z - from.Z) * 180 / Math.PI + 360) % 360);
+
     [ClientDataFact]
     public async Task ACasterStillWalkingIntoRangeIsAcceptedAndAStandingOneOutOfRangeIsNot()
     {
+        // The walk carries its direction (WalkReq.dir, what other clients are shown): the range slack lies along it.
         // In-game 11.10: the client sends the attack on reaching range and its stop 13 ms later; the server measured
         // from the last walk's start and refused 3024 on most approaches.
         await using var alice = await InWorld("Alice");
@@ -630,7 +646,7 @@ public sealed partial class SkillCombatTests : IAsyncLifetime
 
         long speed = await Loop.InvokeAsync(() => Task.FromResult(Session("alice").Speed));
         Assert.True(speed >= 400, $"speed {speed}"); // 0.5 s below covers the 1.5 m beyond range at ≥ 4 m/s
-        await alice.SendGameAsync(MsgId.Walk, new WalkReq { Pos = away, Dir = 180, Face = 180, SpeedRate = 1 });
+        await alice.SendGameAsync(MsgId.Walk, new WalkReq { Pos = away, Dir = Toward(away, start), Face = Toward(away, start), SpeedRate = 1 });
         await Task.Delay(500);
         await alice.SendGameAsync(CombatService.UseSkill, new CastSkillReq { SkillId = 1000001, TargetId = target.Uid, ComboIndex = 1 });
         var accepted = await Next(alice, CombatService.UseSkill, CastSkillRsp.Parser);
@@ -659,7 +675,7 @@ public sealed partial class SkillCombatTests : IAsyncLifetime
         // Walk until 2 m from the target: 7 m, longer than 0.75 s at this speed.
         int walkMs = (int)(7 / (speed / 100.0) * 1000);
         Assert.True(walkMs > 900, $"speed {speed}");
-        await alice.SendGameAsync(MsgId.Walk, new WalkReq { Pos = away, Dir = 180, Face = 180, SpeedRate = 1 });
+        await alice.SendGameAsync(MsgId.Walk, new WalkReq { Pos = away, Dir = Toward(away, start), Face = Toward(away, start), SpeedRate = 1 });
         await Task.Delay(walkMs);
         await alice.SendGameAsync(CombatService.UseSkill, new CastSkillReq { SkillId = 1000001, TargetId = target.Uid, ComboIndex = 1 });
         var accepted = await Next(alice, CombatService.UseSkill, CastSkillRsp.Parser);

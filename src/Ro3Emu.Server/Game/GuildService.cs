@@ -29,9 +29,9 @@ public sealed partial class GuildService(GameData data, GuildStore store, RoleSt
 
     /// <summary>An online member's committed guild view changed guild or position (create, join, leave, appoint;
     /// achievements 104007/107003). Runs inside the commit's apply: listeners post their work.</summary>
-    public List<Action<GameSession>> MembershipChanged { get; } = new();
+    public List<Action<GameSession>> MembershipChanged { get; } = [];
     /// <summary>Rank rights were saved for this guild. Listeners post work without changing membership.</summary>
-    public List<Action<long>> RightsChanged { get; } = new();
+    public List<Action<long>> RightsChanged { get; } = [];
     public const uint Apply = 32223, ApplyOpe = 32224, ApplyChange = 32225, Edit = 32230, BaseChange = 32231;
     public const uint ChangeOfficial = 32232, Kick = 32233, Leave = 32234, Invite = 32237, InviteNtf = 32238, InviteAck = 32239;
     public const uint Detail = 32290, BuildUpgrade = 32242, MarketBooth = 83900, MarketItems = 83903, MarketList = 83901, MarketUnlist = 83902;
@@ -41,7 +41,7 @@ public sealed partial class GuildService(GameData data, GuildStore store, RoleSt
     /// <summary>Guild-owned goods supplied by the territory escort ledger for the 32213 full snapshot.</summary>
     public Func<long, GuildItemData>? ItemDataOf { get; set; }
 
-    private readonly Dictionary<long, Invitation> _invites = new();
+    private readonly Dictionary<long, Invitation> _invites = [];
     private long _nextToken = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
     private sealed record Invitation(long GuildId, long Recipient, long Inviter, long ExpiresMs);
     // The injected clock, as WeekStart: membership times compared with the guild week must share its calendar.
@@ -118,7 +118,7 @@ public sealed partial class GuildService(GameData data, GuildStore store, RoleSt
             CatShopInfo = prior?.GuildId == guild.Id ? prior.CatShopInfo?.Clone() ?? new DBGuildCatShopInfo()
                 : new DBGuildCatShopInfo(),
             IsCatShopAllSubmit = prior?.GuildId == guild.Id && prior.IsCatShopAllSubmit,
-            ActiveRewardReceived = { prior?.GuildId == guild.Id ? prior.ActiveRewardReceived : new Google.Protobuf.Collections.MapField<long, long>() },
+            ActiveRewardReceived = { prior?.GuildId == guild.Id ? prior.ActiveRewardReceived : [] },
         };
     }
 
@@ -147,7 +147,7 @@ public sealed partial class GuildService(GameData data, GuildStore store, RoleSt
         foreach (var row in data.Table("GuildPermissionConfig").Values)
         {
             int id = (int)GameData.Int(row, "_iID");
-            result[id] = GameData.Pairs(row, "_iDetail").Where(p => p.Value >= 2).Select(p => (int)p.Id).ToList();
+            result[id] = [.. GameData.Pairs(row, "_iDetail").Where(p => p.Value >= 2).Select(p => (int)p.Id)];
         }
         return result;
     }
@@ -240,11 +240,12 @@ public sealed partial class GuildService(GameData data, GuildStore store, RoleSt
         PlayerID = a.RoleId, Name = a.Name, Level = a.Level, Career = a.Career, ApplyTime = a.ApplyTime,
     };
 
-    private Task SendFull(GameSession s, GuildStore.State g, bool joined)
+    private async Task SendFull(GameSession s, GuildStore.State g, bool joined)
     {
         var full = FullInfo(g, joined);
         full.IsLeagueElite = s.Role != null && IsLeagueElite(g, s.Role.Id);
-        return s.SendGameAsync(Full, full);
+        await s.SendGameAsync(Full, full);
+        await SendWartimeAsync(s, g);
     }
 
     /// <summary>Publish committed caravan funds/contribution from a freshly loaded guild aggregate.</summary>
@@ -309,6 +310,7 @@ public sealed partial class GuildService(GameData data, GuildStore store, RoleSt
         clear.HistoryNames.AddRange(former.HistoryNames.Count > 0 ? former.HistoryNames : [former.Name]);
         clear.Building.AddRange(former.Buildings.Select(k => BuildingInfo(former, k.Key)));
         await s.SendGameAsync(Full, clear);
+        await ClearWartimeAsync(s);
     }
 
     private int CheckName(string name, long except = 0)
@@ -339,7 +341,7 @@ public sealed partial class GuildService(GameData data, GuildStore store, RoleSt
     {
         var row = data.Table("GuildSettingConfig").Values.FirstOrDefault(r => r.TryGetProperty("_kSetting", out var v) && v.GetString() == name);
         if (row.ValueKind != JsonValueKind.Object || !row.TryGetProperty("_kValue", out var value)) return fallback;
-        if (value.ValueKind == JsonValueKind.Array) return value.EnumerateArray().Select(v => (long)(GameData.Number(v) ?? 0)).ToArray();
+        if (value.ValueKind == JsonValueKind.Array) return [.. value.EnumerateArray().Select(v => (long)(GameData.Number(v) ?? 0))];
         return GameData.Number(value) is { } n ? [(long)n] : fallback;
     }
 
@@ -706,6 +708,8 @@ public sealed partial class GuildService(GameData data, GuildStore store, RoleSt
             var member = g.Members[s.Role!.Id];
             g.Members.Remove(member.RoleId);
             bool elite = DropElite(g, member.RoleId);
+            var machines = DropWartime(g, member.RoleId);
+            bool returned = await TakeMachinesAsync(g, member.RoleId);
             var impeach = DropImpeacher(g, [member]);
             if (g.Members.Count == 0) await DeleteGuildAsync(g, [member.RoleId]);
             else
@@ -713,6 +717,8 @@ public sealed partial class GuildService(GameData data, GuildStore store, RoleSt
                 Journal(g, EvLeft, [member.RoleId], Str(member.Name));
                 await SaveGuildAsync(g, [member.RoleId]);
                 if (elite) await PushElitesAsync(g, LeagueElites(g).Values.ToHashSet());
+                await PushToolChangesAsync(g, machines);
+                if (returned) await PushStoreAsync(g);
                 if (impeach != null) await impeach();
             }
             await s.SendGameAsync(Leave, new GuildMemberLeaveResp { Result = 0 });
@@ -732,6 +738,8 @@ public sealed partial class GuildService(GameData data, GuildStore store, RoleSt
         var removed = new List<GuildStore.Member>();
         var targetViews = new List<(GuildStore.Member Member, GameSession? Session, DBRoleGuildInfo Personal)>();
         bool eliteDropped = false;
+        var machines = new List<(WartimeToolType Type, int Index)>();
+        bool returned = false;
         Func<Task>? impeach = null;
         if (code == 0 && g != null)
         {
@@ -757,6 +765,8 @@ public sealed partial class GuildService(GameData data, GuildStore store, RoleSt
                 {
                     g.Members.Remove(m.RoleId);
                     eliteDropped |= DropElite(g, m.RoleId);
+                    machines.AddRange(DropWartime(g, m.RoleId));
+                    returned |= ReturnPrepay(g, m.RoleId);
                     Journal(g, EvKicked, [kicker.RoleId, m.RoleId], Str(kicker.Name), Str(m.Name));
                 }
                 impeach = DropImpeacher(g, removed);
@@ -789,6 +799,15 @@ public sealed partial class GuildService(GameData data, GuildStore store, RoleSt
                 }
             }
         if (code == 0 && g != null && eliteDropped) await PushElitesAsync(g, LeagueElites(g).Values.ToHashSet());
+        if (code == 0 && g != null) await PushToolChangesAsync(g, machines);
+        if (code == 0 && g != null)
+        {
+            // Their war machines go only once the kick is committed.
+            bool restocked = false;
+            foreach (var m in removed) restocked |= await TakeMachinesAsync(g, m.RoleId);
+            if (restocked) { await SaveGuildAsync(g); returned = true; }
+        }
+        if (code == 0 && g != null && returned) await PushStoreAsync(g);
         if (impeach != null) await impeach();
         await s.SendGameAsync(Kick, resp);
     }
@@ -889,7 +908,7 @@ public sealed partial class GuildService(GameData data, GuildStore store, RoleSt
                     code = CheckRights(req.Right);
                     if (code == 0 && !req.IsCheck)
                         foreach (var setting in req.Right.Data)
-                            g.Rights[(int)setting.RightType] = setting.AbledOfficial.Select(x => (int)x).ToList();
+                            g.Rights[(int)setting.RightType] = [.. setting.AbledOfficial.Select(x => (int)x)];
                     break;
                 case 5:
                     if (Sensitive(req.Notice)) code = ErrorCodes.TextSensitive;

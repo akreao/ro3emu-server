@@ -2,213 +2,265 @@ using System.Text.Json;
 using Romsg;
 using Ro3Emu.Server.Data;
 using static Ro3Emu.Server.Game.ChickenRules;
+using Ro3Emu.Server.Data.Config;
 
 namespace Ro3Emu.Server.Game;
 
 /// <summary>
-/// Survivor Battle Magic Dice (the in-match "adventure", 奇遇). Touching a die (interact 2900010: action 325
-/// TriggerAdventureEvent 10001, then 3 RemoveInteractionNpc) offers a card pick from AdventureDeckConfig 1003:
-/// _kRewardStagePersonal [3, 1] = 3 cards drawn by _iWeight from AdventureCardConfig pool 1003, choose 1 (inferred
-/// meaning). The pick reaches the client only through the 5039 DBAdventureInfo autosync (LC_DAL_Roguelike):
-/// functionInfos[curActiveFunctionId 1003].deck[curActiveSourceId].needSelectMap[operateId] =
-/// AdventureEventSelectInfo {poolId, refreshCount, chooseCount, cards keyed 1..n, endTime (s)}; the DAL queues them by
-/// operateId and opens UI_Sys_Chicken_AdventurePanel, and an empty map closes it. deck.cards is UI_Sys_Chicken_DecksPanel.
-/// 83421 AdventureEventSelectReq {operateId, cardId[]} takes exactly chooseCount cards; 83422 AdventureRefreshReq redraws
-/// for Kaka Coin (_kRewardStageAuction [3 Pay, 10006, 1000, 2000, 3000, 4000...]: refresh n costs the n-th price, the
-/// last one after; _iLimit 10 refreshes, LC_RoguelikeHelper.GetCostOfEachRefresh). (inferred) After _iAutoSelection 10 s
-/// the server picks the first card. Card effects (_kEffect): 203 GivePlayerBuff, 326 GainChickenItem [item, count],
-/// 338 UpgradeList (Baphomet: every worn equipment to its _iUpgradeItem, one quality up).
+/// Survivor Battle Encounters (roguelike cards). The Magic Die 15000301 (interaction 2900010: ActionConfig 325
+/// TriggerAdventureEvent [10001, 1] then 3 RemoveInteractionNpc, both server-hosted) offers cards of AdventureEventConfig
+/// 10001's function 1003, deck pool 1003 (AdventureDeckConfig: _kRewardStagePersonal [3, 1] = 3 shown, 1 chosen;
+/// _kRewardStageAuction [3 Pay, 10006, 1000, 2000, 3000, 4000] = refresh costs in Kaka Coin; _iLimit 10 refreshes;
+/// _iAutoSelection 10 s). The offer reaches the client only through AUTO_SYNC 5039 DBAdventureInfo: a new needSelectMap
+/// entry of functionInfos[curActiveFunctionId].deck[curActiveSourceId] opens UI_Sys_Chicken_AdventurePanel
+/// (LC_DAL_Roguelike._onAdventureSelectNotify). 83421 picks, 83422 re-rolls; the client removes an offer from its
+/// queue only on the 83421 reply, and re-reads a refresh from the 5039 that follows the 83422 reply. Inferred: the
+/// die count and places (scene-editor region 899), that one die serves one player and goes away, the deck key (the
+/// match), and the server's own pick of the first cards when the countdown ends.
 /// </summary>
 public sealed partial class TimedBattleService
 {
     public const uint AdventureSelect = 83421, AdventureRefresh = 83422, AdventureSync = 5039;
+    private const int MagicDie = 15000301, AdventureEvent = 10001;
+    private const int RefreshPay = 3; // enum_RoguelikeRefreshType.Pay
+    private const int CardGiveBuff = 203, CardGainItem = 326, CardUpgradeAll = 338; // ActionConfig
+    /// <summary>Scene-editor region 899 "adventure '?' refresh area".</summary>
+    private const float DieX = 426, DieZ = 415, DieRadius = 400;
+    private const int DiePerPlayers = 10, MinDice = 2;
 
-    private JsonElement? AdventureDeck() => _data.Row("AdventureDeckConfig", AdventureFunction);
-
-    private static int[] DeckList(JsonElement deck, string field) =>
-        deck.TryGetProperty(field, out var list) && list.ValueKind == JsonValueKind.Array
-            ? list.EnumerateArray().Select(x => (int)(GameData.Number(x) ?? 0)).ToArray() : [];
-
-    /// <summary>Weighted draw of distinct cards from the deck's pool.</summary>
-    private List<long> DrawCards(ChickenRun run, int count)
+    private sealed class AdventureOffer
     {
-        var pool = _data.Table("AdventureCardConfig").Values
-            .Where(r => GameData.Int(r, "_iPoolId") == AdventureFunction)
-            .Select(r => (Id: GameData.Int(r, "_iCardId"), Weight: Math.Max(0, GameData.Int(r, "_iWeight"))))
-            .Where(c => c.Weight > 0).OrderBy(c => c.Id).ToList();
-        var drawn = new List<long>();
-        while (drawn.Count < count && pool.Count > 0)
+        public required long OperateId { get; init; }
+        public required int PoolId { get; init; }
+        public required int ChooseCount { get; init; }
+        public required long EndSec { get; init; }
+        public int RefreshCount;
+        public long[] Cards = [];
+    }
+
+    private async Task SpawnDiceAsync(Match match, ChickenRun run)
+    {
+        if (_data.Row("NPCConfig", MagicDie) is not { } row || _data.Row("AdventureEventConfig", AdventureEvent) == null) return;
+        int count = Math.Max(MinDice, match.Players.Length / DiePerPlayers);
+        for (int i = 0; i < count && !match.Settled; i++)
         {
-            long roll = (long)(run.Rng.NextDouble() * pool.Sum(c => c.Weight));
-            int i = 0;
-            for (; i < pool.Count - 1 && roll >= pool[i].Weight; i++) roll -= pool[i].Weight;
-            drawn.Add(pool[i].Id);
-            pool.RemoveAt(i);
-        }
-        return drawn;
-    }
-
-    private long AutoSelectSeconds() =>
-        AdventureDeck() is { } deck && GameData.Int(deck, "_iAutoSelection") is var s and > 0 ? s : 10;
-
-    private void Redraw(ChickenRun run, AdventureEventSelectInfo pick)
-    {
-        var personal = AdventureDeck() is { } deck ? DeckList(deck, "_kRewardStagePersonal") : [];
-        pick.Cards.Clear();
-        int i = 1;
-        foreach (long card in DrawCards(run, personal.Length > 0 && personal[0] > 0 ? personal[0] : 3)) pick.Cards[i++] = card;
-        pick.EndTime = _time.GetUtcNow().ToUnixTimeSeconds() + AutoSelectSeconds();
-    }
-
-    /// <summary>32700 on a die (TryChickenInteractAsync, inside the match transition): the die goes, a pick opens.</summary>
-    private async Task TriggerAdventureAsync(Match match, ChickenRun run, GameSession session, ChickenPlayer me, ChickenNpcUnit die)
-    {
-        run.Npcs.Remove(die);
-        if (match.Room != null) await _instances.RemovePropAsync(match.Room, die);
-        var personal = AdventureDeck() is { } deck ? DeckList(deck, "_kRewardStagePersonal") : [];
-        var pick = new AdventureEventSelectInfo
-        {
-            OperateId = ++me.NextOperate, PoolId = AdventureFunction,
-            ChooseCount = personal.Length > 1 && personal[1] > 0 ? personal[1] : 1,
-        };
-        Redraw(run, pick);
-        me.Picks[pick.OperateId] = pick;
-        await SyncAdventureAsync(match, session, me);
-    }
-
-    private static DBAdventureInfo AdventureState(Match match, ChickenPlayer me)
-    {
-        var info = new DBAdventureInfo();
-        if (me.Picks.Count == 0 && me.Cards.Count == 0) return info;
-        long source = match.Room?.Id ?? 0;
-        var deck = new AdventureCardDeck { FunctionId = AdventureFunction };
-        for (int i = 0; i < me.Cards.Count; i++) deck.Cards[i + 1] = new AdventureCardInfo { CardId = me.Cards[i] };
-        foreach (var (id, pick) in me.Picks) deck.NeedSelectMap[id] = pick.Clone();
-        var function = new AdventureFunctionInfo();
-        function.Deck[source] = deck;
-        info.FunctionInfos[AdventureFunction] = function;
-        info.CurActiveFunctionId = AdventureFunction;
-        info.CurActiveSourceId = source;
-        return info;
-    }
-
-    private static Task SyncAdventureAsync(Match match, GameSession session, ChickenPlayer me) =>
-        CharacterService.SyncAsync(session, AdventureSync, AdventureState(match, me));
-
-    /// <summary>83421.</summary>
-    public async Task AdventureSelectAsync(GameSession session, AdventureEventSelectReq req)
-    {
-        int result = ErrorCodes.Parameter;
-        if (Chicken(session) is (var match, var run, var me))
-            await RunMatchTransitionAsync(match, "chicken adventure pick", async () =>
+            var (x, z) = RandomPoint(run, DieX, DieZ, DieRadius * 0.8f);
+            if (WalkablePoint(x, z) is not { } at) continue;
+            var unit = new ChickenNpcUnit
             {
-                if (!me.Picks.TryGetValue(req.OperateId, out var pick)) return;
-                var offered = pick.Cards.Values.ToHashSet();
-                if (req.CardId.Count != pick.ChooseCount || req.CardId.Distinct().Count() != req.CardId.Count
-                    || req.CardId.Any(c => !offered.Contains(c))) return;
-                result = 0;
-                await ResolvePickAsync(match, run, session, me, pick, req.CardId.ToArray());
-            });
-        await session.SendGameAsync(AdventureSelect, new AdventureEventSelectResp { Result = result, Req = req });
+                Uid = ChestUidBase | Interlocked.Increment(ref _chestSerial), SceneEntry = ChickenScene, InstanceId = match.Room!.Id,
+                X = at.X, Y = at.Y, Z = at.Z, Face = (float)(run.Rng.NextDouble() * 360), NpcId = MagicDie, Name = NpcName(row),
+            };
+            if (await _instances.AddPropAsync(match.Room, unit)) run.Dice.Add(unit);
+        }
     }
 
-    /// <summary>83422.</summary>
-    public async Task AdventureRefreshAsync(GameSession session, AdventureRefreshReq req)
+    private (int Pool, int Show, int Choose, int Limit, int AutoSec, long[] Costs)? Deck()
+    {
+        if (_data.Row("AdventureEventConfig", AdventureEvent) is not { } evt
+            || _data.Table("AdventureDeckConfig").Values.FirstOrDefault(r => r.ValueKind == JsonValueKind.Object
+                && new AdventureDeckConfig(r).PoolId == new AdventureEventConfig(evt).FunctionId) is not { ValueKind: JsonValueKind.Object } row) return null;
+        var deck = new AdventureDeckConfig(row);
+        long[] personal = deck.RewardStagePersonal, auction = deck.RewardStageAuction;
+        return ((int)deck.PoolId, personal.Length > 0 ? (int)personal[0] : 3, personal.Length > 1 ? (int)personal[1] : 1,
+            (int)deck.Limit, (int)deck.AutoSelection,
+            auction.Length > 2 && auction[0] == RefreshPay ? auction[2..] : []);
+    }
+
+
+    /// <summary>`show` different cards of the pool, by AdventureCardConfig._iWeight.</summary>
+    private long[] DrawCards(ChickenRun run, int pool, int show)
+    {
+        var cards = _data.Table("AdventureCardConfig").Values.Where(r => r.ValueKind == JsonValueKind.Object
+            && new AdventureCardConfig(r).PoolId == pool).Select(r => new AdventureCardConfig(r))
+            .Select(c => (Id: c.CardId, Weight: Math.Max(1, c.Weight))).ToList();
+        var drawn = new List<long>();
+        while (drawn.Count < show && cards.Count > 0)
+        {
+            long pick = run.Rng.NextInt64(cards.Sum(c => c.Weight));
+            var card = cards.First(c => (pick -= c.Weight) < 0);
+            cards.Remove(card);
+            drawn.Add(card.Id);
+        }
+        return [.. drawn];
+    }
+
+    internal IReadOnlyList<(long Uid, float X, float Z)> DiceForTest(GameSession session) =>
+        Chicken(session) is (_, var run, _) ? [.. run.Dice.Select(d => (d.Uid, d.X, d.Z))] : [];
+
+    /// <summary>32700 on a Magic Die in reach: a new offer for this player, and the die is gone.</summary>
+    private async Task<bool> TryDieInteractAsync(GameSession session, NpcInteractionReq req)
+    {
+        if (Chicken(session) is not (var match, var run, var me) || run.Dice.FirstOrDefault(d => d.Uid == req.NpcUid) is not { } die) return false;
+        int result = ErrorCodes.Parameter;
+        await RunMatchTransitionAsync(match, "chicken die", async () =>
+        {
+            if ((result = CanAct(run, me, session)) != 0) return;
+            if (!run.Dice.Contains(die)) { result = ErrorCodes.NpcMissing; return; }
+            if (MonsterService.Distance(session.Position.X, session.Position.Z, die.X, die.Z) > PickupReach) { result = ErrorCodes.NpcTooFar; return; }
+            if (Deck() is not { } deck) { result = ErrorCodes.FeatureUnavailable; return; }
+            long now = NowMs() / 1000;
+            var offer = new AdventureOffer
+            {
+                OperateId = ++run.NextOperateId, PoolId = deck.Pool, ChooseCount = deck.Choose, EndSec = now + deck.AutoSec,
+                Cards = DrawCards(run, deck.Pool, deck.Show),
+            };
+            if (offer.Cards.Length < offer.ChooseCount) { result = ErrorCodes.FeatureUnavailable; return; }
+            me.Offers[offer.OperateId] = offer;
+            me.EventTriggers++;
+            run.Dice.Remove(die);
+            result = 0;
+            await session.SendGameAsync(SceneService.NpcInteraction, new NpcInteractionRsp { Result = 0, Req = req });
+            await _instances.RemovePropAsync(match.Room!, die);
+            await SyncAdventureAsync(match, session, me);
+        });
+        if (result != 0) await session.SendGameAsync(SceneService.NpcInteraction, new NpcInteractionRsp { Result = result, Req = req });
+        return true;
+    }
+
+    /// <summary>83422: re-roll an offer's cards for the next refresh price (the client's GetCostOfEachRefresh).</summary>
+    public async Task RefreshAdventureAsync(GameSession session, AdventureRefreshReq req)
     {
         int result = ErrorCodes.Parameter;
+        bool changed = false;
         if (Chicken(session) is (var match, var run, var me))
             await RunMatchTransitionAsync(match, "chicken adventure refresh", async () =>
             {
-                if (!me.Picks.TryGetValue(req.OperateId, out var pick) || AdventureDeck() is not { } deck) return;
-                if (pick.RefreshCount >= GameData.Int(deck, "_iLimit")) { result = ErrorCodes.PurchaseLimit; return; }
-                var stage = DeckList(deck, "_kRewardStageAuction");
-                if (stage.Length < 3) { result = ErrorCodes.FeatureUnavailable; return; }
-                int currency = stage[1];
-                long cost = stage[Math.Min(stage.Length - 1, pick.RefreshCount + 2)];
-                if (me.Pack.Values.Where(i => i.Entry == currency).Sum(i => (long)i.Stack) < cost) { result = ErrorCodes.CurrencyShort; return; }
-                long due = cost;
-                foreach (var stack in me.Pack.Values.Where(i => i.Entry == currency).OrderBy(i => i.Stack).ToArray())
-                {
-                    int take = (int)Math.Min(due, stack.Stack);
-                    RemoveFromPack(me, stack.Guid, take);
-                    if ((due -= take) <= 0) break;
-                }
-                pick.RefreshCount++;
-                Redraw(run, pick);
+                if ((result = CanAct(run, me, session)) != 0) return;
+                if (!me.Offers.TryGetValue(req.OperateId, out var offer) || Deck() is not { } deck) { result = ErrorCodes.Parameter; return; }
+                if (offer.RefreshCount >= deck.Limit || deck.Costs.Length == 0) { result = ErrorCodes.PurchaseLimit; return; }
+                long cost = deck.Costs[Math.Min(offer.RefreshCount, deck.Costs.Length - 1)];
+                if (me.Pack.Values.Where(i => i.Entry == CurrencyItem).Sum(i => (long)i.Stack) < cost) { result = ErrorCodes.ItemsShort; return; }
+                PayCoins(me, cost);
+                offer.RefreshCount++;
+                offer.Cards = DrawCards(run, offer.PoolId, offer.Cards.Length);
                 result = 0;
+                changed = true;
                 await SyncRoundAsync(match, run, session);
-                await SyncAdventureAsync(match, session, me);
             });
         await session.SendGameAsync(AdventureRefresh, new AdventureRefreshResp { Result = result, Req = req });
+        if (changed && Chicken(session) is (var m, _, var p)) await RunMatchTransitionAsync(m, "chicken adventure sync", () => SyncAdventureAsync(m, session, p));
     }
 
-    private async Task ResolvePickAsync(Match match, ChickenRun run, GameSession session, ChickenPlayer me,
-        AdventureEventSelectInfo pick, long[] cards)
+    /// <summary>83421: the chosen cards of an offer take effect and join the deck.</summary>
+    public async Task SelectAdventureAsync(GameSession session, AdventureEventSelectReq req)
     {
-        me.Picks.Remove(pick.OperateId);
-        long now = NowMs();
-        bool bag = false, gear = false;
-        foreach (long card in cards)
+        int result = ErrorCodes.Parameter;
+        if (Chicken(session) is (var match, var run, var me))
+            await RunMatchTransitionAsync(match, "chicken adventure select", async () =>
+            {
+                if (!me.Offers.TryGetValue(req.OperateId, out var offer) || req.CardId.Count != offer.ChooseCount
+                    || req.CardId.Distinct().Count() != req.CardId.Count || req.CardId.Any(id => !offer.Cards.Contains(id))) return;
+                if ((result = CanAct(run, me, session)) != 0) return;
+                result = 0;
+                await ChooseCardsAsync(match, run, session, me, offer, [.. req.CardId], reply: false);
+            });
+        await session.SendGameAsync(AdventureSelect, new AdventureEventSelectResp { Result = result, Req = req });
+        if (result == 0 && Chicken(session) is (var m, _, var p)) await RunMatchTransitionAsync(m, "chicken adventure sync", () => SyncAdventureAsync(m, session, p));
+    }
+
+    private async Task ChooseCardsAsync(Match match, ChickenRun run, GameSession session, ChickenPlayer me, AdventureOffer offer,
+        long[] chosen, bool reply)
+    {
+        me.Offers.Remove(offer.OperateId);
+        foreach (long card in chosen)
         {
             me.Cards.Add(card);
-            if (_data.Row("AdventureCardConfig", card) is not { } row || !row.TryGetProperty("_kEffect", out var effects)
-                || effects.ValueKind != JsonValueKind.Array) continue;
-            foreach (var effect in effects.EnumerateArray())
+            if (_data.Table("AdventureCardConfig").Values.FirstOrDefault(r => r.ValueKind == JsonValueKind.Object
+                && new AdventureCardConfig(r).CardId == card) is not { ValueKind: JsonValueKind.Object } row) continue;
+            foreach (long[] args in new AdventureCardConfig(row).Effect)
             {
-                if (effect.ValueKind != JsonValueKind.Array || effect.GetArrayLength() == 0) continue;
-                long Arg(int i) => effect.GetArrayLength() > i ? (long)(GameData.Number(effect[i]) ?? 0) : 0;
-                switch (Arg(0))
+                if (args.Length == 0) continue;
+                switch (args[0])
                 {
-                    case 203 when !session.Dead:
-                        await ApplyItemBuffAsync(session, me, (int)Arg(1), now);
+                    case CardGiveBuff when args.Length > 1:
+                        await _buffs.AddAsync(session, (int)args[1], 0, session.Role!.Id);
                         break;
-                    case 326 when ItemRow((int)Arg(1)) != null && Arg(2) > 0:
-                        AddToPack(run, me, (int)Arg(1), (int)Arg(2));
-                        bag = true;
+                    case CardGainItem when args.Length > 2 && ItemRow((int)args[1]) != null:
+                        AddToPack(run, me, (int)args[1], (int)Math.Min(args[2], int.MaxValue));
                         break;
-                    case 338:
-                        foreach (var (slot, guid) in me.EquipBar.ToArray())
-                        {
-                            if (!me.Pack.TryGetValue(guid, out var worn) || ItemRow(worn.Entry) is not { } item
-                                || GameData.Int(item, "_iUpgradeItem") is not (> 0 and var next and <= int.MaxValue) || ItemRow((int)next) == null) continue;
-                            RemoveFromPack(me, guid, worn.Stack);
-                            var better = AddToPack(run, me, (int)next, 1, worn.OwnerId, worn.OwnerName);
-                            if (better.Count > 0) me.EquipBar[slot] = better[0].Guid;
-                            bag = gear = true;
-                        }
+                    case CardUpgradeAll:
+                        UpgradeWornGear(run, me);
                         break;
                 }
             }
         }
-        if (gear) await _character.RefreshStatsAsync(session);
-        if (bag) await SyncRoundAsync(match, run, session);
-        await SyncAdventureAsync(match, session, me);
+        await SyncRoundAsync(match, run, session);
+        if (reply)
+        {
+            var req = new AdventureEventSelectReq { OperateId = offer.OperateId, CardId = { chosen } };
+            await session.SendGameAsync(AdventureSelect, new AdventureEventSelectResp { Result = 0, Req = req });
+            await SyncAdventureAsync(match, session, me);
+        }
     }
 
-    /// <summary>Per tick: picks past their endTime take the first card (inferred auto-selection).</summary>
-    private async Task TickAdventureAsync(Match match, ChickenRun run)
+    /// <summary>338 UpgradeList (card 3001014 "Raises the quality of all equipped gear by one tier"): each worn item
+    /// becomes its EatChickenItemConfig._iUpgradeItem in the same bar slot.</summary>
+    private void UpgradeWornGear(ChickenRun run, ChickenPlayer me)
     {
-        long now = _time.GetUtcNow().ToUnixTimeSeconds();
+        foreach (var (slot, guid) in me.EquipBar.Where(worn => me.Pack.ContainsKey(worn.Value)).ToArray())
+        {
+            if (ItemRow(me.Pack[guid].Entry) is not { } row) continue;
+            int next = (int)new EatChickenItemConfig(row).UpgradeItem;
+            if (next <= 0 || ItemRow(next) == null) continue;
+            RemoveFromPack(me, guid, 1);
+            me.EquipBar[slot] = AddToPack(run, me, next, 1)[^1].Guid;
+        }
+    }
+
+    private void PayCoins(ChickenPlayer me, long amount)
+    {
+        foreach (var coins in me.Pack.Values.Where(i => i.Entry == CurrencyItem).OrderBy(i => i.Stack).ToArray())
+        {
+            int take = (int)Math.Min(amount, coins.Stack);
+            RemoveFromPack(me, coins.Guid, take);
+            if ((amount -= take) == 0) return;
+        }
+    }
+
+    /// <summary>Per second: an offer whose countdown ran out takes its first cards (the client's own fallback pick,
+    /// UI_Sys_Chicken_AdventurePanelCtrl._checkCountAandAutoSelect), with an unasked 83421 reply so the queue clears.</summary>
+    private async Task TickAdventureAsync(Match match, ChickenRun run, long now)
+    {
+        long sec = now / 1000;
         foreach (var (player, me) in run.Players.ToArray())
-            foreach (var pick in me.Picks.Values.Where(p => p.EndTime <= now).ToArray())
+            foreach (var offer in me.Offers.Values.Where(o => sec >= o.EndSec).ToArray())
             {
-                if (!InRoom(match).Contains(player)) { me.Picks.Remove(pick.OperateId); continue; }
-                var chosen = pick.Cards.OrderBy(c => c.Key).Select(c => c.Value).Take(Math.Max(1, pick.ChooseCount)).ToArray();
-                await ResolvePickAsync(match, run, player, me, pick, chosen);
+                if (Chicken(player) == null || player.Dead || me.State != RoundRoleStatus.InWar) { me.Offers.Remove(offer.OperateId); continue; }
+                await ChooseCardsAsync(match, run, player, me, offer, offer.Cards[..offer.ChooseCount], reply: true);
             }
     }
 
-    /// <summary>Tests: an open pick with the given cards (as a die would give).</summary>
-    internal async Task OfferForTestAsync(GameSession session, params long[] cards)
+    /// <summary>
+    /// 5039 of this player's encounters: one deck of function 1003 under the match's key, its chosen cards keyed from 0,
+    /// the open offers (cards keyed 0..n-1: the panel loops `for i = 0, #cards`; endTime in seconds), and the event's
+    /// trigger count. AutoSync sends the change since the last send, the whole object the first time.
+    /// </summary>
+    private Task SyncAdventureAsync(Match match, GameSession session, ChickenPlayer me)
     {
-        if (Chicken(session) is not (var match, _, var me)) return;
-        var pick = new AdventureEventSelectInfo
+        if (session.Role == null || !InRoom(match).Contains(session) || Deck() is not { } deck) return Task.CompletedTask;
+        var info = new DBAdventureInfo { CurActiveFunctionId = deck.Pool, CurActiveSourceId = match.Room!.Id };
+        var cardDeck = new AdventureCardDeck { FunctionId = deck.Pool, CreateTime = match.Open };
+        for (int i = 0; i < me.Cards.Count; i++) cardDeck.Cards[i] = new AdventureCardInfo { CardId = me.Cards[i] };
+        foreach (var offer in me.Offers.Values)
         {
-            OperateId = ++me.NextOperate, PoolId = AdventureFunction, ChooseCount = 1,
-            EndTime = _time.GetUtcNow().ToUnixTimeSeconds() + AutoSelectSeconds(),
-        };
-        for (int i = 0; i < cards.Length; i++) pick.Cards[i + 1] = cards[i];
-        me.Picks[pick.OperateId] = pick;
-        await SyncAdventureAsync(match, session, me);
+            var select = new AdventureEventSelectInfo
+            {
+                OperateId = offer.OperateId, PoolId = offer.PoolId, RefreshCount = offer.RefreshCount,
+                ChooseCount = offer.ChooseCount, EndTime = offer.EndSec,
+            };
+            for (int i = 0; i < offer.Cards.Length; i++) select.Cards[i] = offer.Cards[i];
+            cardDeck.NeedSelectMap[offer.OperateId] = select;
+        }
+        if (me.EventTriggers > 0)
+            cardDeck.ProgressInfo[AdventureEvent] = new AdventureProgress { AdventureId = AdventureEvent, TriggerTimes = me.EventTriggers };
+        var function = new AdventureFunctionInfo();
+        function.Deck[match.Room.Id] = cardDeck;
+        info.FunctionInfos[deck.Pool] = function;
+        return CharacterService.SyncAsync(session, AdventureSync, info);
     }
+
+    /// <summary>Leaving the match: the deck goes away (the client clears its own queue on leaving too).</summary>
+    private static Task ClearAdventureAsync(GameSession session) =>
+        session.Synced.ContainsKey(AdventureSync) ? CharacterService.SyncAsync(session, AdventureSync, new DBAdventureInfo()) : Task.CompletedTask;
 }

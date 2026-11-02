@@ -385,7 +385,7 @@ public sealed partial class DungeonTests
                 await Service<CharacterService>().SetHpSpAsync(session, 1, 1);
                 await Service<SceneService>().TeleportInMapAsync(session,
                     new MapPoint(monster.X + 1, monster.Y, monster.Z, monster.Face));
-                Service<MonsterService>().Retarget(monster, session); // a story boss (1022001) picks its own targets otherwise
+                Service<MonsterService>().Engage(monster, session);
             });
             await Next(alice, CombatService.SkillHit, SkillHitInfo.Parser,
                 hit => hit.SrcID == monster.Uid && hit.Dsts.Any(d => d.DstID == (long)alice.Self!.Uuid && d.IsDead));
@@ -459,6 +459,7 @@ public sealed partial class DungeonTests
             foreach (var monster in session.DungeonAttempt!.Room.Monsters) monster.Dead = true;
             session.LastCombatMs = MonsterService.NowMs;
             session.StatusBits |= 1L << 15;
+            session.NoRegenUntilMs = MonsterService.NowMs + 10000; // fighting no longer pauses regeneration
             await Service<CharacterService>().SetHpSpAsync(session, hp, sp);
         });
         var self = await ReturnFromDungeon(alice, RoleStore.SpawnSceneEntry);

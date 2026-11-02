@@ -612,7 +612,7 @@ public sealed class GuardianPetTests
     [Theory]
     [InlineData(false, 2500)]
     [InlineData(true, 2500)]
-    public async Task GuardianAndOtherCastSpeedShortenTheVariableChant(bool guardian, int expectedMs)
+    public async Task CastSpeedShortensTheVariableChantWhereverItComesFrom(bool guardian, int expectedMs)
     {
         await using var f = new Fixture();
         await f.Start();

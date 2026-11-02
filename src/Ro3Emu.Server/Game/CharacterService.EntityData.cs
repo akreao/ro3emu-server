@@ -20,7 +20,7 @@ public sealed partial class CharacterService
     public void Refresh(GameSession session)
     {
         var stats = Stats(session);
-        session.EntityProperties = PropertyIds(stats).Select(id => (Id: (long)id, Value: stats[id])).ToArray();
+        session.EntityProperties = [.. PropertyIds(stats).Select(id => (Id: (long)id, Value: stats[id]))];
         session.EquipLook = EquipInfo(session);
         session.Speed = stats[Speed];
     }
@@ -120,6 +120,7 @@ public sealed partial class CharacterService
 
         var sheet = EquipmentStunts.ApplyConversions(session, raw, data);
         if (matchAttributes == null) sheet = EmblemService.ApplyResonanceConversions(session, raw, sheet, data);
+        sheet = ApplySpeedOverflow(raw, sheet);
         long maxHp = sheet[MaxHp], maxSp = sheet[MaxSp];
         sheet[Hp] = Math.Clamp(session.CurrentHp ?? maxHp, 0, maxHp);
         sheet[Sp] = Math.Clamp(session.CurrentSp ?? maxSp, 0, maxSp);
@@ -145,6 +146,33 @@ public sealed partial class CharacterService
         long now = MonsterService.NowMs;
         return session.Buffs.Any(b => b.ExpireMs > now && data.Row("BuffConfig", b.ConfigId) is { } row
             && GameData.Int(row, "_iBuffID") == WeaponDamagedBuffGroup);
+    }
+
+    /// <summary>
+    /// Speed past its cap turns into damage: ASPD (115) above FinalAtkSpdThdAndCastSpdThd[0] (500) adds Physical ATK%
+    /// (OverflowAtkSpd2PhysDmgR [115, 1, 1034, 10, 2000]) and cast speed (116) above [1] (400) adds Magic ATK%
+    /// (OverflowCastSpd2MagicDmgR [116, 1, 1044, 10, 2000]): every step of excess gives perStep, up to the cap. The
+    /// client's own tooltips say so (AttributeConfig 115/116 _kTips: "Every 1 excess ASPD is converted to 0.1% Physical
+    /// ATK (Max: 20%)") and its panel shows the excess (LC_PlayerInfoHelper._doFormulaOverThreshold).
+    /// </summary>
+    internal StatSheet ApplySpeedOverflow(Dictionary<int, double> raw, StatSheet sheet)
+    {
+        var parameters = data.Table("PublicParamConfig");
+        if (!parameters.TryGetValue("FinalAtkSpdThdAndCastSpdThd", out var limits) || limits.ValueKind != JsonValueKind.Array
+            || limits.GetArrayLength() < 2) return sheet;
+        bool changed = false;
+        foreach (var (key, index) in new[] { ("OverflowAtkSpd2PhysDmgR", 0), ("OverflowCastSpd2MagicDmgR", 1) })
+        {
+            if (!parameters.TryGetValue(key, out var rule) || rule.ValueKind != JsonValueKind.Array || rule.GetArrayLength() < 5
+                || GameData.Number(limits[index]) is not { } threshold) continue;
+            var r = rule.EnumerateArray().Select(v => GameData.Number(v) ?? 0).ToArray();
+            (int source, double step, int target, double perStep, double cap) = ((int)r[0], r[1], (int)r[2], r[3], r[4]);
+            double excess = sheet[source] - threshold;
+            if (excess <= 0 || step <= 0) continue;
+            raw[target] = raw.GetValueOrDefault(target) + Math.Min(Math.Floor(excess / step) * perStep, cap);
+            changed = true;
+        }
+        return changed ? StatCalculator.Compute(raw, data) : sheet;
     }
 
     /// <summary>The character's own raw contributions (gear, cards, talents, buffs, level and job rows, conversions).</summary>
@@ -259,13 +287,13 @@ public sealed partial class CharacterService
     public Func<GameSession, long>? TitleOf { get; set; }
 
     /// <summary>Configured contributions from other owned systems (pet lineup/collection).</summary>
-    public List<Func<GameSession, IEnumerable<(long Id, double Value)>>> ExtraAttributes { get; } = new();
+    public List<Func<GameSession, IEnumerable<(long Id, double Value)>>> ExtraAttributes { get; } = [];
 
     /// <summary>A match owner's replacement build (null: the character's own), e.g. a Survivor Battle career.</summary>
     public Func<GameSession, IReadOnlyList<(long Id, double Value)>?>? MatchAttributes { get; set; }
 
     /// <summary>Runtime properties such as an absorb shield, projected on full stats and late AOI snapshots.</summary>
-    public List<Func<GameSession, IEnumerable<(int Id, long Value)>>> DynamicProperties { get; } = new();
+    public List<Func<GameSession, IEnumerable<(int Id, long Value)>>> DynamicProperties { get; } = [];
 
     /// <summary>Set by BuffService: puts a buff on the player (item use action 203).</summary>
     public Func<GameSession, int, int, Task>? GiveBuff { get; set; }
@@ -309,7 +337,7 @@ public sealed partial class CharacterService
         if (hp is { } h) session.CurrentHp = Math.Clamp(h, 0, before[MaxHp]);
         if (sp is { } s) session.CurrentSp = Math.Clamp(s, 0, before[MaxSp]);
         var stats = Stats(session);
-        session.EntityProperties = PropertyIds(stats).Select(id => (Id: (long)id, Value: stats[id])).ToArray();
+        session.EntityProperties = [.. PropertyIds(stats).Select(id => (Id: (long)id, Value: stats[id]))];
         var all = new AllProperty { EntityID = session.Role!.Id };
         var aoi = new AOIAttrChange { EntityUuid = (ulong)session.Role.Id };
         foreach (var id in new[] { Hp, Sp })

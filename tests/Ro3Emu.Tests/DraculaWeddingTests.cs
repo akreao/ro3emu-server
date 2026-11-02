@@ -79,7 +79,7 @@ public sealed class DraculaWeddingTests : IAsyncLifetime
     private async Task Gm(BotClient bot, string command)
     {
         using var client = new HttpClient();
-        (await client.PostAsync($"{_http}/ro3emu/gm?account={bot.Account}", new StringContent(command))).EnsureSuccessStatusCode();
+        (await client.PostAsync($"{_http}/ro3emu/gm?account={bot.Account}", Operator.Command(command))).EnsureSuccessStatusCode();
     }
 
     private GameSession Session(BotClient bot) => Service<SessionRegistry>().All().Single(s => s.Account == bot.Account && s.Role != null);
@@ -262,12 +262,20 @@ public sealed class DraculaWeddingTests : IAsyncLifetime
         Assert.Equal(instance, await Read(() => Session(bob).InstanceId));
         var info = await Next(bob, DungeonService.BaseInfo, DungeonBaseInfoNotify.Parser);
         Assert.Equal([select.BridePlayerId], info.Vars.Single(v => v.VarId == 1301).Vi64);
-        // The tracker runs the lair's first task.
-        Assert.Contains(await Read(() => Service<TaskService>().ExtraTasks.SelectMany(f => f(Session(bob))).ToArray()),
-            t => t.TaskId == 9000100 && t.Status == TaskState.Running);
+        // The tracker runs the lair's first task (posted on the member's owner loop).
+        await Until(() => Service<TaskService>().ExtraTasks.SelectMany(f => f(Session(bob)))
+            .Any(t => t.TaskId == 9000100 && t.Status == TaskState.Running), "the lair's first task");
 
         var plan = await Read(() => Session(alice).DungeonAttempt!.Plan);
         var map = Service<WorldData>().Map(Lair)!;
+        // Fresh level 1 roles against the lair's waves, which fight back and kill them through any heal: !hp stops at MaxHp.
+        // Alice kills them one right after the other, faster than her basic attack's cooldown.
+        await OnLoop(() =>
+        {
+            Session(alice).GmCombat |= GmCombatSwitches.Unlimited | GmCombatSwitches.NoCooldown;
+            Session(bob).GmCombat |= GmCombatSwitches.Unlimited;
+            return Task.CompletedTask;
+        });
         for (int wave = 0; wave < plan.Waves.Count - 1; wave++)
         {
             await Until(() => Session(alice).DungeonAttempt?.Wave == wave, $"wave {wave + 1}");
@@ -277,14 +285,13 @@ public sealed class DraculaWeddingTests : IAsyncLifetime
                 await Gm(alice, FormattableString.Invariant($"!actors walk {region.X} {region.Z}"));
                 continue;
             }
-            await Gm(alice, "!hp 999999");
             foreach (var actor in await WaveIn(instance, plan.Waves[wave].Spawns.Count)) await Kill(alice, actor);
         }
 
         // The key: Alice did the fighting, Bob searches the bushes until one holds it.
         await Until(() => Session(alice).DungeonAttempt?.Wave == plan.Waves.Count - 1, "the key step");
-        Assert.Contains(await Read(() => Service<TaskService>().ExtraTasks.SelectMany(f => f(Session(bob))).ToArray()),
-            t => t.TaskId == 9000110);
+        await Until(() => Service<TaskService>().ExtraTasks.SelectMany(f => f(Session(bob))).Any(t => t.TaskId == 9000110),
+            "the lair's last task");
         var actors = await Read(() => Session(alice).DungeonAttempt!.SceneActors.ToArray());
         Assert.Equal(5, actors.Length);
         var cage = actors.Single(a => a.NpcId == 4114038);

@@ -64,7 +64,7 @@ public sealed class ItemActionTests : IAsyncLifetime
     private async Task<BotClient> Relogin(BotClient bot, string name)
     {
         await bot.DisposeAsync();
-        await WaitUntil(() => !Sessions.All().Any(s => s.Account == name.ToLowerInvariant() && s.Role != null), name + " still online");
+        await WaitUntil(() => !Sessions.All().Any(s => string.Equals(s.Account, name, StringComparison.OrdinalIgnoreCase) && s.Role != null), name + " still online");
         return await InWorld(name, create: false);
     }
 
@@ -72,7 +72,7 @@ public sealed class ItemActionTests : IAsyncLifetime
     { var e = await b.Inbox.WaitAsync(e => e.IsGame(id) && (match == null || match(p.ParseFrom(e.Body))), Wait); return p.ParseFrom(e.Body); }
 
     private async Task Gm(string account, string command)
-    { using var h = new HttpClient(); (await h.PostAsync($"{_http}/ro3emu/gm?account={account}", new StringContent(command))).EnsureSuccessStatusCode(); }
+    { using var h = new HttpClient(); (await h.PostAsync($"{_http}/ro3emu/gm?account={account}", Operator.Command(command))).EnsureSuccessStatusCode(); }
 
     private SessionRegistry Sessions => _app.Services.GetRequiredService<SessionRegistry>();
     private RoleStore Roles => _app.Services.GetRequiredService<RoleStore>();
@@ -150,10 +150,13 @@ public sealed class ItemActionTests : IAsyncLifetime
     {
         await using var alice = await InWorld("Alice");
         await Gm("alice", "!item 1220003 2");
-        Assert.Equal(0, await Use(alice, 1220003));
+        // Login sent 5041 whole: a wire-only 0 in emojiInfo and the default Survivor wheel (both walked unguarded).
         var full = await Next(alice, EmojiService.EmoticonSync, DBEmojiInfoIncrement.Parser, m => m.SyncAllMark);
-        Assert.Equal(Enumerable.Range(50, 18).Select(i => (long)i), full.EmojiInfo.All.Value.Order()); // EmoticonTabConfig 2
-        Assert.True(full.DungeonEmojiInstalls.ContainsKey(0)); // the full handler walks it unguarded
+        Assert.Equal([0L], full.EmojiInfo.All.Value);
+        Assert.Equal([1001, 1002, 1003, 1004, 0, 0], full.DungeonEmojiInstalls[0].All.EmojiIds);
+        Assert.Equal(0, await Use(alice, 1220003));
+        var unlocked = await Next(alice, EmojiService.EmoticonSync, DBEmojiInfoIncrement.Parser, m => !m.SyncAllMark);
+        Assert.Equal(Enumerable.Range(50, 18).Select(i => (long)i), unlocked.EmojiInfo.All.Value.Order()); // EmoticonTabConfig 2
         Assert.Equal(1, Count(alice, 1220003));
         Assert.Equal(18, DBEmojiInfo.Parser.ParseFrom(Roles.LoadEmojiInfo(RoleId(alice))!).EmojiInfo.Count);
         Assert.Equal(EmojiService_ErrUnlocked, await Use(alice, 1220003));

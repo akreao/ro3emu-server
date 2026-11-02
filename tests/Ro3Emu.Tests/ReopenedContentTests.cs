@@ -57,7 +57,7 @@ public sealed class ReopenedContentTests : IAsyncLifetime
     private async Task Gm(string line)
     {
         using var http = new HttpClient();
-        (await http.PostAsync($"{_http}/ro3emu/gm?account=reopenalice", new StringContent(line))).EnsureSuccessStatusCode();
+        (await http.PostAsync($"{_http}/ro3emu/gm?account=reopenalice", Operator.Command(line))).EnsureSuccessStatusCode();
     }
 
     private static async Task Barrier(BotClient bot)

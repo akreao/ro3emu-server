@@ -25,7 +25,7 @@ public sealed partial class TradeService(
         Penalties = 32623, MultiQuery = 32625, Preorder = 32626, QueryPreorders = 32628, RefundPreorder = 32629,
         InQueue = 32622;
 
-    private const string Listings = "trade_listing", History = "trade_history", Orders = "trade_preorder";
+    internal const string Listings = "trade_listing", History = "trade_history", Orders = "trade_preorder";
     private const int TaxBasisPoints = 900; // TradeConfigTax._kTaxZeny/_kTaxMiao; currency 1 rule is inferred.
 
     public sealed class Listing
@@ -255,5 +255,5 @@ public sealed partial class TradeService(
         };
     }
 
-    private static List<Listing> Active(MarketTransaction tx) => tx.All<Listing>(Listings).Where(l => l.Quantity > 0).ToList();
+    private static List<Listing> Active(MarketTransaction tx) => [.. tx.All<Listing>(Listings).Where(l => l.Quantity > 0)];
 }

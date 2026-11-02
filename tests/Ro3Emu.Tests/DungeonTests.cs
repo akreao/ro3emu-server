@@ -78,7 +78,7 @@ public sealed partial class DungeonTests : IAsyncLifetime
     private async Task Gm(BotClient bot, string command)
     {
         using var client = new HttpClient();
-        (await client.PostAsync($"{_http}/ro3emu/gm?account={bot.Account}", new StringContent(command))).EnsureSuccessStatusCode();
+        (await client.PostAsync($"{_http}/ro3emu/gm?account={bot.Account}", Operator.Command(command))).EnsureSuccessStatusCode();
     }
 
     private GameSession Session(BotClient bot) => Service<SessionRegistry>().All()
@@ -149,6 +149,7 @@ public sealed partial class DungeonTests : IAsyncLifetime
 
     private async Task Kill(BotClient bot, MonsterUnit actor)
     {
+        await SwingWait.UntilDoneAsync(Service<GameLoop>(), Session(bot), actor.Uid);
         await OnLoop(async () =>
         {
             Assert.True(actor.Hp > 1);
@@ -160,13 +161,11 @@ public sealed partial class DungeonTests : IAsyncLifetime
             // A revive can leave this actor returning home. Engage through the owner before the
             // controlled HP setup, so the next return-completion tick cannot restore full health.
             Service<MonsterService>().Engage(actor, Session(bot));
-            actor.HpFloor = 0; // a story boss held by its encounter's stage (DungeonService.Encounter)
             actor.Hp = 1;
             // A swing still in flight from an earlier kill would refuse this press: a Normal Attack never breaks itself.
             var role = Session(bot);
             role.Attack = null;
             if (role.SkillCast is { } swing) { swing.Cancelled = true; role.SkillCast = null; }
-            role.LastNormalAttack = null;
         });
         await bot.SendGameAsync(CombatService.UseSkill, new CastSkillReq { SkillId = 1000001, TargetId = actor.Uid });
         Assert.Equal(0, (await Next(bot, CombatService.UseSkill, CastSkillRsp.Parser)).Result);

@@ -19,8 +19,6 @@ public sealed partial class DungeonService
 {
     /// <summary>DungeonVariableFunctionConfig 100020016: start function PlayCutSceneStory, array; [plot] plays it.</summary>
     public const int StoryVar = 100020016;
-    /// <summary>LC_DunGeon_VarDefine 10021 PGuideWayList: guide points drawn as guide arrow lines (GuideWays).</summary>
-    public const int GuideWayVar = 10021;
     /// <summary>
     /// Scene actor UIDs: their own namespace, so 32700 for them never reaches the world NPC lookup. It must stay below
     /// 2^53: LC_InteractManager hands unit ids to UT_SceneObjectManagerHelper through a double array (m_kShareMemory),
@@ -47,7 +45,7 @@ public sealed partial class DungeonService
         public required string Name { get; init; }
         public MonsterTemplate? Template { get; init; }
         public long BornMs { get; init; }
-        public List<BuffInfo> Buffs { get; } = new();
+        public List<BuffInfo> Buffs { get; } = [];
 
         public override EntityBase Entity()
         {
@@ -81,20 +79,22 @@ public sealed partial class DungeonService
     private async Task BeginStepAsync(Attempt a, ReconstructedDungeons.ScriptedStep step)
     {
         a.StepSeen.Clear();
+        a.StepHeld = a.StepHoldOver = false;
         // A fight-only step has no client event to wait for: its kills complete it.
         a.StepDone = step.Complete.Count == 0;
         await SyncSceneActorsAsync(a, step.Actors);
+        await SyncCompanionsAsync(a, step.Companions);
         a.StepGeneration++;
         if (step.Seek is { } seek) StartSeek(a, seek);
         if (step.Shelter is { } shelter) StartShelter(a, shelter);
-        if (step.Guide.Count > 0) await SendGuideAsync(a);
         if (step.Slide is { } slide && !a.Settled && !a.Room.Closed) await StartSlideAsync(a, slide);
-        if (step.Fallback is { FromMount: false } fallback) ScheduleFallback(a, fallback);
+        if (step.Fallback is { } fallback) ScheduleFallback(a, fallback);
         int wave = a.Wave;
         foreach (var line in step.Lines.Where(l => l.Ms > 0))
-            _loop.ScheduleLegacy(SceneDelay(line.Ms),
+            _loop.ScheduleLegacy(Paced(line.Ms),
                 () => a.Wave != wave || a.Settled || a.Room.Closed ? Task.CompletedTask : SayStepLinesAsync(a, [line]));
         await SayStepLinesAsync(a, step.Lines.Where(l => l.Ms <= 0).ToArray());
+        if (step.React is { } react) StartReaction(a, react);
         if (step.Story != 0 && !a.Settled && !a.Room.Closed)
         {
             foreach (var s in Present(a).Where(a.Loaded.Contains)) s.BeginCutscene();
@@ -108,19 +108,7 @@ public sealed partial class DungeonService
     }
 
     /// <summary>
-    /// The guide line (GuideWays) in a var-change event, as the story var goes: drawn when a step that has one starts,
-    /// cleared when it completes.
-    /// </summary>
-    private Task SendGuideAsync(Attempt a) => GuideWays(a) is { } guide && !a.Room.Closed
-        ? BroadcastAsync(a, Event, new DungeonEventNotify
-        {
-            DungeonEntry = a.Plan.SceneEntry, EventType = (DungeonEventType)4, // DungeonEventDungeonVarChange
-            StageNum = a.Wave + 1, LevelNum = 1, Vars = { guide },
-        })
-        : Task.CompletedTask;
-
-    /// <summary>
-    /// A step's story lines, as the story encounters say theirs (30404 DungeonEventInvokeClientFunc): a type-2 bubble
+    /// A step's story lines (30404 DungeonEventInvokeClientFunc): a type-2 bubble
     /// through ShowShoutingChatBubble(chat, speaker uid), needing its speaker (a shown scene actor or a living monster of
     /// the room with that NPC id), every other type through Shouting(chat). When each line is said is (inferred).
     /// </summary>
@@ -164,6 +152,7 @@ public sealed partial class DungeonService
         foreach (var gone in shown)
         {
             a.SceneActors.Remove(gone);
+            a.RetiredActors.Add(gone.Uid);
             await _instances.RemovePropAsync(a.Room, gone);
         }
         foreach (var (unit, spec) in kept) await SetActorBuffsAsync(unit, spec.Buffs);
@@ -220,8 +209,16 @@ public sealed partial class DungeonService
     public async Task<bool> TryInteractAsync(GameSession s, NpcInteractionReq req)
     {
         if (req.NpcUid < SceneActorUidBase || req.NpcUid >= SceneActorUidBase << 1) return false;
+        if (await TryTrialInteractAsync(s, req)) return true;
         var a = Active(s);
         var actor = a?.SceneActors.FirstOrDefault(u => u.Uid == req.NpcUid);
+        if (actor == null && a != null && a.RetiredActors.Contains(req.NpcUid))
+        {
+            // The step it served already ended (the vortex of 1000201 by its region before the client's auto
+            // interaction arrived): echo it as done, so the client shows no "NPC not found"; it counts for nothing.
+            await s.SendGameAsync(SceneService.NpcInteraction, new NpcInteractionRsp { Result = 0, Req = req });
+            return true;
+        }
         int code = actor == null ? ErrorCodes.NpcMissing
             : req.SceneConfigId != 0 && req.SceneConfigId != s.SceneEntry ? ErrorCodes.NpcParameter
             : !_catalog.Interactions(actor.NpcId).Contains(req.InteractionId) ? ErrorCodes.NpcParameter
@@ -234,11 +231,11 @@ public sealed partial class DungeonService
         if (code != 0) return true;
         // Dracula's Lair: a bush search may find the key; its finder is the rescuer, the only one the cage opens for.
         if (a!.Dracula is { } dracula) await dracula.Owner.InteractedAsync(a, s, actor!.NpcId);
-        if (await RideInteractionAsync(a, s, actor!, (int)req.InteractionId)) return true;
-        await StrikeAsync(a, s, actor!, req.InteractionId);
+        await StrikeAsync(a!, s, actor!, req.InteractionId);
+        await SeatRiderAsync(a!, s, actor!, (int)req.InteractionId);
         var events = new List<(Kind, long)> { (Kind.Interaction, req.InteractionId) };
         if (_catalog.DungeonMessage(req.InteractionId) is { } message) events.Add((Kind.Message, message));
-        await StepEventAsync(a!, s, events);
+        await StepEventAsync(a!, s, events, actor);
         return true;
     }
 
@@ -338,6 +335,7 @@ public sealed partial class DungeonService
     /// <summary>A participant's accepted walk: server regions and points of the current step.</summary>
     public async Task PlayerMovedAsync(GameSession s)
     {
+        if (Active(s) is { Raid.Active: { } trial } raid) await TrialTouchesAsync(raid, trial);
         if (s.DungeonAttempt == null || Active(s) is not { } a || Step(a) is not { } step || a.StepDone) return;
         if (step.Seek != null) return; // a hiding place counts when the seeker looks (DungeonService.HideAndSeek)
         foreach (var t in step.Complete)
@@ -353,15 +351,18 @@ public sealed partial class DungeonService
         }
     }
 
-    private async Task StepEventAsync(Attempt a, GameSession s, IReadOnlyList<(Kind Kind, long Id)> events)
+    /// <param name="used">The scene actor the player interacted with, which a reaction's effect is placed by.</param>
+    private async Task StepEventAsync(Attempt a, GameSession s, IReadOnlyList<(Kind Kind, long Id)> events,
+        SceneActorUnit? used = null)
     {
         if (a.Settled || a.Room.Closed || a.Spawning || a.StepDone || Step(a) is not { } step) return;
         bool Matches(ReconstructedDungeons.StepTrigger t) => events.Any(e => e.Kind == t.Kind && e.Id == t.Id);
         if (!step.Complete.Any(Matches))
         {
-            if (step.Ignore.Any(Matches))
-                _log.LogInformation("Scripted scene {Scene} step {Step}: {Role} sent {Events}, which does not advance it",
-                    a.Plan.SceneEntry, a.Wave + 1, s.Role?.Id, string.Join(", ", events));
+            if (!step.Ignore.Any(Matches)) return;
+            _log.LogInformation("Scripted scene {Scene} step {Step}: {Role} sent {Events}, which does not advance it",
+                a.Plan.SceneEntry, a.Wave + 1, s.Role?.Id, string.Join(", ", events));
+            await RespondAsync(a, step.React, step.React?.Ignored, used);
             return;
         }
         if (step.All)
@@ -378,12 +379,20 @@ public sealed partial class DungeonService
         _log.LogInformation("Scripted scene {Scene} step {Step} '{Stage}' completed by {Role} ({Events})",
             a.Plan.SceneEntry, a.Wave + 1, step.Stage, s.Role?.Id, string.Join(", ", events));
         await EndStepMovementAsync(a);
-        if (step.Guide.Count > 0) await SendGuideAsync(a);
-        if (step.TeleportAfter != 0 && _catalog.ScenePoint(a.Plan.SceneEntry, step.TeleportAfter) is { } to)
-            foreach (var member in Present(a).Where(m => a.Loaded.Contains(m) && !m.SceneLoading))
-                await _scenes.TeleportInMapAsync(member, to);
-        // The next step or the settlement runs in its own owner scope, like the room's timers: the message that
-        // completed the step (a walk, an interaction, a plot end) reserves only what its own route needs.
-        _loop.PostLegacy(() => AdvanceAsync(a), "dungeon scripted step");
+        int hold = await RespondAsync(a, step.React, step.React?.Complete, used);
+        async Task FinishAsync()
+        {
+            if (step.TeleportAfter != 0 && _catalog.ScenePoint(a.Plan.SceneEntry, step.TeleportAfter) is { } to)
+                foreach (var member in Present(a).Where(m => a.Loaded.Contains(m) && !m.SceneLoading))
+                    await _scenes.TeleportInMapAsync(member, to);
+            // The next step or the settlement runs in its own owner scope, like the room's timers: the message that
+            // completed the step (a walk, an interaction, a plot end) reserves only what its own route needs. A completing
+            // reaction's line is read first (inferred).
+            if (hold > 0)
+                _loop.ScheduleLegacy(Paced(hold), () => a.Room.Closed ? Task.CompletedTask : AdvanceAsync(a), "dungeon scripted step");
+            else _loop.PostLegacy(() => AdvanceAsync(a), "dungeon scripted step");
+        }
+        // A step with a ride first walks it; the teleport and the next step follow its arrival.
+        if (!TryStartRide(a, step, used, FinishAsync)) await FinishAsync();
     }
 }

@@ -58,7 +58,7 @@ public sealed class DraculaWeddingService : IGameTicker
     private readonly GameLoop _loop;
     private readonly ILogger<DraculaWeddingService> _log;
     /// <summary>The guild's current (or last) occurrence.</summary>
-    private readonly Dictionary<long, Run> _runs = new();
+    private readonly Dictionary<long, Run> _runs = [];
     private long _lastSecond;
     private bool _sweeping;
     private long Now => _clock.GetUtcNow().ToUnixTimeSeconds();
@@ -72,7 +72,6 @@ public sealed class DraculaWeddingService : IGameTicker
         this._functions = functions; this._tasks = tasks; this._buffs = buffs; this._mail = mail; this._sessions = sessions;
         this._clock = clock; this._loop = loop; this._log = log;
         scene.Loaded.Add(LoadedAsync);
-        tasks.ExtraTasks.Add(LairTasks);
         gm.Register("dracula", "open|close (test aid: Wedding Crashers opens now for 30 minutes, or closes)", TestWindowAsync);
     }
 
@@ -93,7 +92,7 @@ public sealed class DraculaWeddingService : IGameTicker
         /// <summary>The member the bride is spectating (custom data 1002 on her entity), 0 for none.</summary>
         public long Watched { get; set; }
         public EntityBase? RescuerEntity { get; set; }
-        public HashSet<int> Searched { get; } = new();
+        public HashSet<int> Searched { get; } = [];
         public bool StoryStarted { get; set; }
         public bool Settled { get; set; }
         public bool Closed { get; set; }
@@ -122,9 +121,7 @@ public sealed class DraculaWeddingService : IGameTicker
         && _functions.IsOpen(s, GameData.Int(row, "_iFunction"));
 
     /// <summary>The eligible members loaded inside the guild's home room.</summary>
-    private GameSession[] InHome(InstanceService.Room room) => room.ActiveMembers.Select(m => m.Session)
-        .Where(s => s.Role != null && s.InstanceId == room.Id && s.SceneEntry == _home.Scene && !s.SceneLoading && Eligible(s))
-        .ToArray();
+    private GameSession[] InHome(InstanceService.Room room) => [.. room.ActiveMembers.Select(m => m.Session).Where(s => s.Role != null && s.InstanceId == room.Id && s.SceneEntry == _home.Scene && !s.SceneLoading && Eligible(s))];
 
     private Run? Current(long guild) => _runs.TryGetValue(guild, out var run) && !run.Settled && !run.Closed && Now < run.End
         ? run : null;
@@ -292,23 +289,10 @@ public sealed class DraculaWeddingService : IGameTicker
         return true;
     }
 
-    /// <summary>The lair's dungeon task for the wave being played (TaskConfig 9000100-9000110, in chain order).</summary>
-    private long[] LairTaskIds() => _data.Index("TaskConfig", "_iDungeonID", r => GameData.Int(r, "_iDungeonID")).All(Lair)
-        .Select(r => GameData.Int(r, "_iTaskID")).Order().ToArray();
-
     /// <summary>
-    /// TaskService.ExtraTasks: inside the lair the current task of the chain runs. The client tracker shows RingTask
-    /// (24) son type 3 tasks whose _iDungeonID is the current scene (LC_TaskHelper.lua:892-940). Earlier tasks leave the
-    /// list as the chain moves on (inferred: the client also hides finished ones).
+    /// A wave begins (DungeonService.SpawnWaveAsync): the tracker moves on, one lair task (TaskConfig 9000100-9000110,
+    /// TaskService.DungeonTasks.cs) per wave; the first one plays story 3003.
     /// </summary>
-    private IEnumerable<TaskInfo> LairTasks(GameSession s)
-    {
-        if (s.DungeonAttempt is not { Dracula: not null, Settled: false } a || s.InstanceId != a.Room.Id) return [];
-        var ids = LairTaskIds();
-        return a.Wave < ids.Length ? [new TaskInfo { TaskId = ids[a.Wave], Status = TaskState.Running, CompleteNum = { 0 } }] : [];
-    }
-
-    /// <summary>A wave begins (DungeonService.SpawnWaveAsync): the tracker moves on; the first one plays story 3003.</summary>
     internal async Task WaveAsync(DungeonService.Attempt a)
     {
         var members = DungeonService.LoadedMembers(a);
@@ -320,7 +304,7 @@ public sealed class DraculaWeddingService : IGameTicker
                 s.BeginCutscene();
                 await SendQuietAsync(s, DungeonService.Event, Story(Lair, StoryId(1)));
             }
-        foreach (var s in members) await _tasks.SyncTasksAsync(s);
+        _dungeons.TrackRun(a, members, a.Wave);
     }
 
     /// <summary>The cage opens only for the key's holder (its client button shows only with the key buff, too).</summary>
@@ -370,20 +354,17 @@ public sealed class DraculaWeddingService : IGameTicker
         await SetWatchedAsync(a, s, run, target);
     }
 
-    /// <summary>31018 on her entity to the lair (the guild league's flags go the same way); outside the lair her entity
-    /// carries no camera binding.</summary>
+    /// <summary>31018 on her entity to her alone: ProcessCamera binds the camera of whichever client gets it, whoever's
+    /// unit carries it (DirtyDataConfig 1002 _iSyncScope 0 = self), so it neither goes to the lair nor rides on her AOI
+    /// entity.</summary>
     private async Task SetWatchedAsync(DungeonService.Attempt a, GameSession bride, Run run, long target)
     {
         run.Watched = target;
-        if (target == 0) bride.WorldState.CustomData.Remove(CameraBind);
-        if (bride.Role == null || bride.SceneLoading) { bride.WorldState.CustomData.Remove(CameraBind); return; }
+        bride.WorldState.CustomData.Remove(CameraBind);
+        if (bride.Role == null || bride.SceneLoading) return;
         var value = new CustomData
         { Id = CameraBind, CustomParam = new CustomParam { Tp = CustomParam.Types.ParamType.Long, LongParam = target } };
-        if (target != 0) bride.WorldState.CustomData[CameraBind] = value.Clone();
-        var change = new CustomDataChange { EntityId = bride.Role.Id, CustomDatas = { value } };
-        await SendQuietAsync(bride, WorldCoreService.CustomChange, change);
-        foreach (var member in DungeonService.LoadedMembers(a).Where(m => !ReferenceEquals(m, bride)))
-            await SendQuietAsync(member, WorldCoreService.CustomChange, change);
+        await SendQuietAsync(bride, WorldCoreService.CustomChange, new CustomDataChange { EntityId = bride.Role.Id, CustomDatas = { value } });
     }
 
     /// <summary>
@@ -454,7 +435,6 @@ public sealed class DraculaWeddingService : IGameTicker
             s.Attack = null;
             await SendQuietAsync(s, WeddingComplete, complete);
             await SendQuietAsync(s, DungeonService.Result, new DungeonResNotify { DungeonEntry = Lair, Res = (DungeonRes)(success ? 1 : 2) });
-            await _tasks.SyncTasksAsync(s);
         }
         await StopWatchingAsync(a);
         var keyHolders = members.Where(s => s.Buffs.Any(b => b.ConfigId == KeyBuff)).ToArray();

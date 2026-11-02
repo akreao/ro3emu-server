@@ -2,6 +2,7 @@ using Romsg;
 using Ro3Emu.Server.Data;
 using Ro3Emu.Server.Maps;
 using static Ro3Emu.Server.Game.ChickenRules;
+using Ro3Emu.Server.Data.Config;
 
 namespace Ro3Emu.Server.Game;
 
@@ -49,10 +50,25 @@ public sealed partial class TimedBattleService
             || !run.Players.ContainsKey(killer) || match.Faction[killer] == match.Faction[victim]) return Task.CompletedTask;
         match.Kills[killer] = match.Kills.GetValueOrDefault(killer) + 1;
         long now = NowMs();
+        List<GameSession> credited = [killer];
         foreach (var (helper, at) in dead.LastHitBy)
             if (helper != killer && now - at <= 10_000 && run.Players.TryGetValue(helper, out var assist)
-                && match.Faction[helper] != match.Faction[victim]) assist.Assists++;
+                && match.Faction[helper] != match.Faction[victim]) { assist.Assists++; credited.Add(helper); }
         dead.LastHitBy.Clear();
+        return CountersAsync(match, credited);
+    }
+
+    /// <summary>30123: the battle report button's own kill and assist counters (DungeonService.PlayerCounters).</summary>
+    private Task CountersAsync(Match match, IEnumerable<GameSession> players) =>
+        RoleFanout.EachAsync(players.Where(p => _active.GetValueOrDefault(p) == match && match.Loaded.Contains(p)), p =>
+            p.SendGameAsync(DungeonService.PlayerStatistics, DungeonService.PlayerCounters(match.Participants[p].Id,
+                match.Kills.GetValueOrDefault(p), match.Chicken?.Players.GetValueOrDefault(p)?.Assists ?? 0)));
+
+    /// <summary>CombatService.CastLanded: a participant's resolved cast, counted per skill family.</summary>
+    private Task ChickenCastAsync(GameSession caster, System.Text.Json.JsonElement skill)
+    {
+        if (Chicken(caster) is (_, { Stage: StageStartGame }, var me) && new SkillConfig(skill).SkillId is var family and > 0)
+            me.CastFamilies[family] = me.CastFamilies.GetValueOrDefault(family) + 1;
         return Task.CompletedTask;
     }
 
@@ -67,6 +83,7 @@ public sealed partial class TimedBattleService
         me.State = RoundRoleStatus.Death;
         me.Heals.Clear();
         await InterruptChannelsAsync(match, run, c => c.Reviver == player);
+        await ClosePanelSignsAsync(match, player);
         if (!me.GaveUp && me.FreeRelifeLeft > 0 && now < run.BattleStartMs + FirstResurrectionMs)
         {
             me.FreeRelifeLeft--;
@@ -76,7 +93,7 @@ public sealed partial class TimedBattleService
         {
             Eliminate(match, run, player, now);
             await DropBelongingsAsync(match, run, player, me);
-            await OfferWatchAsync(match, run, player, me, now);
+            await OfferWatchAsync(match, run, player, now);
         }
         await SyncTeamAsync(match, match.Faction[player]);
         await BroadcastHudAsync(match);
@@ -153,19 +170,20 @@ public sealed partial class TimedBattleService
     private async Task ReviveAtAsync(Match match, ChickenRun run, GameSession player, float x, float z)
     {
         var me = run.Players[player];
-        await StopWatchAsync(match, player, me);
         // A death still being published (or another revive) holds the claim: the tick retries a second later.
         if (!_combat.TryClaimRevive(player)) { me.RelifeUntilMs = NowMs() + 1000; return; }
         me.RelifeUntilMs = 0;
         try
         {
             if (!_combat.CommitReviveClaim(player)) return;
+            await StopWatchingAsync(match, run, player);
             me.State = RoundRoleStatus.InWar;
             me.Revived++;
             match.Fallen.Remove(player);
             await _combat.PublishReviveAsync(player, WalkablePoint(x, z));
         }
         finally { _combat.ReleaseReviveClaim(player); }
+        if (!player.SceneLoading) await _world.RefreshVisibilityAsync(player);
         await player.SendGameAsync(RelifeNotify, new ChickenRelifeNotify { RelifeEndTime = 0 });
         await SyncTeamAsync(match, match.Faction[player]);
         await BroadcastHudAsync(match);
@@ -256,7 +274,13 @@ public sealed partial class TimedBattleService
                 : RandomPoint(run, cx, cz, Math.Max(1, radius * 0.8f));
             await ReviveAtAsync(match, run, player, x, z);
         }
+        await TickWatchAsync(match, run, now);
     }
+
+    /// <summary>82662 at a Rescue Wagon (UI_Com_ChickenAmbulanceRevivalPanelCtrl.lua:435): no wagon NPC is placed on this
+    /// server (inferred: their refresh region 877 has no schedule), so it is refused.</summary>
+    public Task RelifeOtherAsync(GameSession session, ChickenRelifeOtherReq _) =>
+        session.SendGameAsync(RelifeOther, new ChickenRelifeOtherResp { Result = ErrorCodes.FeatureUnavailable });
 
     /// <summary>31013 inside the match: the generic revive is not this mode's (revival is 82661 after 82663). A Rift
     /// fight is NoRevive (TimedBattleService.OnePiece): no self-revive there either.</summary>
@@ -334,9 +358,9 @@ public sealed partial class TimedBattleService
     private async Task ChickenDetachAsync(Match match, GameSession player)
     {
         player.Synced.Remove(RoundSync);
-        if (match.Chicken is { } watching && watching.Players.TryGetValue(player, out var me)) await StopWatchAsync(match, player, me);
-        // The Magic Die picks belong to the match: an empty 5039 closes the panel (LC_DAL_Roguelike).
-        if (player.Synced.ContainsKey(AdventureSync)) await CharacterService.SyncAsync(player, AdventureSync, new DBAdventureInfo());
+        ClearChickenCustom(player);
+        await ReappearAsync(player);
+        await ClearAdventureAsync(player);
         if (match.Chicken is { } run && run.Channels.Count > 0) await InterruptChannelsAsync(match, run, c => c.Reviver == player);
         if (player.Role != null && player.Progress != null)
         {
@@ -348,7 +372,8 @@ public sealed partial class TimedBattleService
     /// <summary>32700 on a chest: the pickup panel is client-hosted (ActionConfig OpenPickUpPanel), so only acknowledge.</summary>
     private async Task<bool> TryChestInteractAsync(GameSession session, NpcInteractionReq req)
     {
-        if (Chicken(session) is not (_, var run, _) || run.Chests.All(c => c.Uid != req.NpcUid)) return false;
+        if (Chicken(session) is not (_, var run, var me) || run.Chests.FirstOrDefault(c => c.Uid == req.NpcUid) is not { } chest) return false;
+        if (BoxDrop.ContainsKey(chest.NpcId)) me.OpenedCrates.Add(chest.Uid); // a supply crate (weekly task 106504)
         await session.SendGameAsync(SceneService.NpcInteraction, new NpcInteractionRsp { Result = 0, Req = req });
         return true;
     }

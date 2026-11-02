@@ -4,138 +4,153 @@ using static Ro3Emu.Server.Game.ChickenRules;
 namespace Ro3Emu.Server.Game;
 
 /// <summary>
-/// Survivor Battle spectating. A player out of the battle (no revive map open) watches a standing teammate: the client
-/// binds its camera to the unit named by the custom data Unit_CameraBindUnitCustomData (1002) on its own player and
-/// opens UI_Sys_Chicken_SpectatingWidget (LC_DunGeon_Chicken.lua:960-1004, LC_ChickenHelper.lua:899-1019). 82675
-/// ChickenWatchNotify {autoWatchTime, seconds} shows "auto spectate in N s" while the player is dead and watches nobody;
-/// the server then picks the first standing teammate. 82640 ChickenChangeWatchPlayerReq {player_id} switches (the
-/// spectating widget's arrows and the team list; the client allows only a teammate in war, CheckCanWatchPlayer;
-/// the response is NullArg). (inferred) Server side the spectator's view follows the watched teammate: its position
-/// moves there and World hides it from every other player (its Death crate and ID tag stay where it fell). A revive,
-/// a revive map, or nobody left to watch ends it and puts the player back where it fell.
+/// Survivor Battle spectating. An eliminated player watches a teammate who still fights: the camera follows the unit
+/// named by custom data 1002 on the watcher's own entity (LC_DunGeon_Chicken._switchWatchMode enters the
+/// ChickenWatchMode 3C, LC_CustomDataComp_Base.ProcessCamera binds the camera), and the watcher shows Watch in the
+/// team list (5036 RoundRoleStatus.Watch). 82675 starts the client's countdown; when it runs out the server binds the
+/// camera (the client does nothing at 0). 82640 switches to another living teammate.
 /// </summary>
 public sealed partial class TimedBattleService
 {
     public const uint ChangeWatch = 82640, WatchNotify = 82675;
-    public const long CameraBindData = 1002;
 
-    private bool Standing(Match match, ChickenRun run, GameSession player) =>
-        run.Players.TryGetValue(player, out var state) && state.State == RoundRoleStatus.InWar && !player.Dead
-        && !match.Fallen.Contains(player) && !match.Absent.Contains(player) && InRoom(match).Contains(player);
+    /// <summary>
+    /// Watchers: their client shows what is around the watched teammate, so the server keeps the watcher's own
+    /// position (and with it its area of interest) on the teammate, and nobody else sees the watcher meanwhile
+    /// (World.CanObserve). Its own client gets no movement for it; a revive teleports it to its chosen point.
+    /// (inferred) The original's way is not in the client: an eliminated player's body is gone for the others.
+    /// </summary>
+    private readonly HashSet<GameSession> _spectators = new(ReferenceEqualityComparer.Instance);
 
-    /// <summary>The next standing teammate after <paramref name="after"/> in team order (or the first one).</summary>
-    private GameSession? NextWatchTarget(Match match, ChickenRun run, GameSession player, GameSession? after)
+    /// <summary>How far the watched teammate may get before the watcher's view is moved after it (m).</summary>
+    private const float WatchViewSlack = 6f;
+
+    private bool CanBeSeen(GameSession viewer, GameSession subject) => viewer == subject || !_spectators.Contains(subject);
+
+    /// <summary>PublicParam EatChickenObserve 10 (s): (inferred) also the wait before spectating starts on its own.</summary>
+    private const long AutoWatchMs = 10_000;
+
+    /// <summary>The client refuses a switch within 2 s (LC_DunGeon_Chicken._trySendswitchWatchPlayer, tip 63568); the
+    /// server keeps a little slack for the network (inferred).</summary>
+    private const long WatchSwitchMs = 1_500;
+
+    /// <summary>82675 to a player just eliminated while a teammate still fights: autoWatchTime is in seconds
+    /// (LC_DAL_Chicken._onProcessWatchNotify compares it with TimerManager:GetSystemTime).</summary>
+    private async Task OfferWatchAsync(Match match, ChickenRun run, GameSession player, long now)
     {
-        var mates = Team(match, match.Faction[player]).Where(p => p != player)
-            .OrderBy(p => run.Players[p].TeamIndex).ToList();
-        int start = after == null ? 0 : mates.IndexOf(after) + 1;
-        for (int i = 0; i < mates.Count; i++)
-        {
-            var mate = mates[(start + i) % mates.Count];
-            if (Standing(match, run, mate)) return mate;
-        }
-        return null;
-    }
-
-    private bool CanSpectate(Match match, ChickenPlayer me, GameSession player) =>
-        player.Dead && match.Fallen.Contains(player) && me.RelifeUntilMs == 0 && !me.GaveUp;
-
-    /// <summary>After an elimination: the countdown to watching a teammate, if one still stands.</summary>
-    private async Task OfferWatchAsync(Match match, ChickenRun run, GameSession player, ChickenPlayer me, long now)
-    {
-        if (!CanSpectate(match, me, player) || me.Watching != null || NextWatchTarget(match, run, player, null) == null) return;
+        var me = run.Players[player];
+        if (me.GaveUp || FightingMate(match, run, player) == null) return;
         me.AutoWatchAtMs = now + AutoWatchMs;
         await player.SendGameAsync(WatchNotify, new ChickenWatchNotify { AutoWatchTime = me.AutoWatchAtMs / 1000 });
     }
 
-    /// <summary>82640.</summary>
+    /// <summary>The first teammate (by team slot) still in the fight and in the room, as the client's own pick.</summary>
+    private GameSession? FightingMate(Match match, ChickenRun run, GameSession player, long except = 0)
+    {
+        var room = InRoom(match).ToHashSet();
+        return Team(match, match.Faction[player])
+            .Where(mate => mate != player && room.Contains(mate) && !mate.Dead && run.Players[mate].State == RoundRoleStatus.InWar
+                && match.Participants[mate].Id != except)
+            .OrderBy(mate => run.Players[mate].TeamIndex).FirstOrDefault();
+    }
+
+    /// <summary>
+    /// 82640 ChickenChangeWatchPlayerReq{player_id} (LC_ChickenHelper.SendSwitchWatchPlayer): a teammate's portrait, the
+    /// Spectating widget's arrows, or the client's own retarget when the watched one falls. CheckCanWatchPlayer allows
+    /// it only out of the fight and only toward a living teammate. No response (NullArg, no handler); a refused switch
+    /// is dropped.
+    /// </summary>
     public async Task ChangeWatchAsync(GameSession session, ChickenChangeWatchPlayerReq req)
     {
         if (Chicken(session) is not (var match, var run, var me)) return;
         await RunMatchTransitionAsync(match, "chicken watch", async () =>
         {
-            if (!CanSpectate(match, me, session)) return;
-            var target = Team(match, match.Faction[session])
-                .FirstOrDefault(p => p != session && match.Participants[p].Id == req.PlayerId);
-            if (target == null || !Standing(match, run, target)) return;
-            await WatchAsync(match, session, me, target);
+            long now = NowMs();
+            if (match.Settled || run.Stage != StageStartGame || me.GaveUp || me.State == RoundRoleStatus.InWar
+                || me.RelifeUntilMs > 0 || !session.Dead || now < me.WatchSwitchMs + WatchSwitchMs) return;
+            var target = Team(match, match.Faction[session]).FirstOrDefault(mate => mate != session
+                && match.Participants[mate].Id == req.PlayerId && !mate.Dead && run.Players[mate].State == RoundRoleStatus.InWar
+                && InRoom(match).Contains(mate));
+            if (target == null) return;
+            await WatchAsync(match, run, session, req.PlayerId, now);
         });
     }
 
-    private async Task WatchAsync(Match match, GameSession player, ChickenPlayer me, GameSession target)
+    /// <summary>Binds (or with 0 releases) the watcher's camera and shows it as Watch to its team.</summary>
+    private async Task WatchAsync(Match match, ChickenRun run, GameSession watcher, long target, long now)
     {
+        var me = run.Players[watcher];
         me.AutoWatchAtMs = 0;
         if (me.Watching == target) return;
-        if (me.Watching == null) me.FellAt = (player.Position.Clone(), player.Face);
         me.Watching = target;
-        await _world.SetHiddenAsync(player, true);
-        await ViewFromAsync(player, target.Position);
-        await SendCameraBindAsync(match, player, match.Participants[target].Id);
+        me.WatchSwitchMs = now;
+        if (me.State is RoundRoleStatus.Death or RoundRoleStatus.Watch)
+            me.State = target != 0 ? RoundRoleStatus.Watch : RoundRoleStatus.Death;
+        await SendCameraAsync(watcher, target);
+        await SyncTeamAsync(match, match.Faction[watcher]);
+        if (target != 0 && _spectators.Add(watcher)) await _world.RefreshVisibilityAsync(watcher);
+        await FollowViewAsync(match, watcher, me);
     }
 
-    /// <summary>Ends spectating: the camera back on the player's own unit, its view back where it fell.</summary>
-    private async Task StopWatchAsync(Match match, GameSession player, ChickenPlayer me)
+    /// <summary>Moves a watcher's view onto its watched teammate once it is more than a few metres away.</summary>
+    private async Task FollowViewAsync(Match match, GameSession watcher, ChickenPlayer me)
     {
-        me.AutoWatchAtMs = 0;
-        if (me.Watching == null && !player.AoiHidden) return;
-        me.Watching = null;
-        await SendCameraBindAsync(match, player, 0);
-        if (me.FellAt is var (at, face))
-        {
-            me.FellAt = null;
-            player.Face = face;
-            await ViewFromAsync(player, at);
-        }
-        await _world.SetHiddenAsync(player, false);
+        if (me.Watching == 0 || watcher.SceneLoading
+            || Team(match, match.Faction[watcher]).FirstOrDefault(p => match.Participants[p].Id == me.Watching) is not { } target
+            || target.SceneLoading || target.WorldScene != watcher.WorldScene) return;
+        if (MonsterService.Distance(watcher.Position.X, watcher.Position.Z, target.Position.X, target.Position.Z) <= WatchViewSlack) return;
+        var pos = target.Position.Clone();
+        watcher.Position = pos;
+        await _world.MoveAsync(watcher, new WalkReq { Pos = pos, Face = watcher.Face, BStop = true, SpeedRate = 1 }, forceTeleport: true);
     }
 
-    /// <summary>Moves only the server's view point: the spectator's client keeps its own unit where it fell.</summary>
-    private async Task ViewFromAsync(GameSession player, Vec3 at)
+    /// <summary>A watcher that stops watching is seen again (after its revive moved it, or as it leaves).</summary>
+    private async Task ReappearAsync(GameSession player)
     {
-        player.PreviousPosition = player.Position;
-        player.Position = at.Clone();
-        await _world.MoveAsync(player, new WalkReq { Pos = at.Clone(), Face = player.Face, BStop = true, SpeedRate = 1 }, forceTeleport: true);
+        if (_spectators.Remove(player) && !player.SceneLoading) await _world.RefreshVisibilityAsync(player);
     }
 
-    private static Task SendCameraBindAsync(Match match, GameSession player, long target)
-    {
-        var bind = new CustomData
-        {
-            Id = CameraBindData,
-            CustomParam = new CustomParam { Tp = CustomParam.Types.ParamType.Int, IntParam = target },
-        };
-        return player.SendGameAsync(WorldCoreService.CustomChange,
-            new CustomDataChange { EntityId = match.Participants[player].Id, CustomDatas = { bind } });
-    }
+    /// <summary>31018 with 1002 on the watcher's entity, to the watcher only (see <see cref="CustomCamera"/>).</summary>
+    private static Task SendCameraAsync(GameSession watcher, long target) => watcher.Role == null || watcher.SceneLoading
+        ? Task.CompletedTask
+        : watcher.SendGameAsync(WorldCoreService.CustomChange,
+            new CustomDataChange { EntityId = watcher.Role.Id, CustomDatas = { LongCustom(CustomCamera, target) } });
 
-    /// <summary>Per tick: due auto-watches, a watched teammate that fell or left (the next one, or the end), and the
-    /// spectator's view following the watched one.</summary>
+    /// <summary>Per second: the countdowns that ran out bind to the first fighting teammate, and a watcher whose
+    /// teammate fell is moved on when its client did not do it itself (inferred fallback).</summary>
     private async Task TickWatchAsync(Match match, ChickenRun run, long now)
     {
         foreach (var (player, me) in run.Players.ToArray())
         {
-            if (me.Watching == null && me.AutoWatchAtMs == 0) continue;
-            if (!CanSpectate(match, me, player) || !InRoom(match).Contains(player))
+            if (Chicken(player) == null || !player.Dead || me.RelifeUntilMs > 0 || me.GaveUp)
             {
-                await StopWatchAsync(match, player, me);
-                continue;
-            }
-            if (me.Watching == null)
-            {
-                if (now < me.AutoWatchAtMs) continue;
                 me.AutoWatchAtMs = 0;
-                if (NextWatchTarget(match, run, player, null) is { } first) await WatchAsync(match, player, me, first);
                 continue;
             }
-            var watched = me.Watching;
-            if (!Standing(match, run, watched))
+            if (me.Watching == 0)
             {
-                if (NextWatchTarget(match, run, player, watched) is { } next) await WatchAsync(match, player, me, next);
-                else await StopWatchAsync(match, player, me);
+                if (me.AutoWatchAtMs == 0 || now < me.AutoWatchAtMs) continue;
+                if (FightingMate(match, run, player) is { } first) await WatchAsync(match, run, player, match.Participants[first].Id, now);
+                else me.AutoWatchAtMs = 0;
                 continue;
             }
-            if (MonsterService.Distance(player.Position.X, player.Position.Z, watched.Position.X, watched.Position.Z) > WatchFollowStep)
-                await ViewFromAsync(player, watched.Position);
+            bool fighting = Team(match, match.Faction[player]).Any(mate => match.Participants[mate].Id == me.Watching
+                && !mate.Dead && run.Players[mate].State == RoundRoleStatus.InWar && InRoom(match).Contains(mate));
+            await FollowViewAsync(match, player, me);
+            if (fighting || now < me.WatchSwitchMs + 2 * WatchSwitchMs) continue;
+            if (FightingMate(match, run, player, me.Watching) is { } next)
+                await WatchAsync(match, run, player, match.Participants[next].Id, now);
         }
+    }
+
+    /// <summary>A revived player gets its own camera back (and is seen again once its revive has moved it).</summary>
+    private async Task StopWatchingAsync(Match match, ChickenRun run, GameSession player)
+    {
+        var me = run.Players[player];
+        me.AutoWatchAtMs = 0;
+        _spectators.Remove(player);
+        if (me.Watching == 0) return;
+        me.Watching = 0;
+        await SendCameraAsync(player, 0);
     }
 }

@@ -107,13 +107,22 @@ public sealed partial class TaskService
     //   guild GVE this client runs is Ilmata (GuildChallengeService; the client's GuildGVE/GVEWhaleRally, its result panel
     //   is UI_Sys_GVE_VictoryNewPanelCtrl). The classic GVE (GVEconfig, sc_GVE_MonsterDragon) has no server here. One per
     //   settled Ilmata stage attempt the member was present for, won or lost (participation, inferred).
-    // - 210006 [n] "Complete a Training Ground Dummy Challenge" (side quest 10200120, GuideConfig 83; ProgressConfig
-    //   210006 has only a generic "Attempt requirement Not Reached"): one per committed result of a full challenge on
-    //   2100011 (TrainingService.ChallengeSettled). A reset or leaving early settles nothing, so it does not count; no
-    //   DPS threshold is applied, since the target has none (inferred).
+    // - 210006 [n] "Complete a Training Ground Dummy Challenge" (side quest 10200120; ProgressConfig 210006 has only the
+    //   generic "Attempt requirement Not Reached", LC_InteractCondition has no formatter for it): one per committed result
+    //   of a full challenge on 2100011, the moment the client's rule text says the countdown ends and the DMG/DPS are
+    //   calculated (TrainingService.ChallengeSettled). Practice, a reset or leaving early settles nothing; no DPS threshold,
+    //   since the target has none (inferred).
     private const int TDummyChallenge = 210006;
     private const int TStunts = 302005, TPetRoom = 306004, TTenBossWin = 106602, TTreasureDig = 106802,
         TCoffinOrSurvivor = 210012, TDragonCoffin = 210009, TLeagueJoin = 106603, TGveJoin = 103014;
+
+    // Survivor Battle weekly targets (TaskConfig 2501-2507, type 10), LC_InteractCondition Chicken* (:2030-2050 and the
+    // default formatter): 106501 ChickenRankWeek [top, n], 106502 ChickenUseItem [item type, n] and 106505
+    // ChickenEquipTeam [quality, n] count p3; 106503 ChickenKillMonster [n], 106504 ChickenBox [n], 106506
+    // ChickenDisguiseTeam [n, first, last] and 106507 ChickenKillPlayerTeam [n] count p2. Each counts what a settled match
+    // brought (TimedBattleService.Settlement stages them with the 106509 match count).
+    internal const int TChickenRank = 106501, TChickenUse = 106502, TChickenMonster = 106503, TChickenBox = 106504,
+        TChickenEquip = 106505, TChickenDisguise = 106506, TChickenKill = 106507;
 
     // Everyday state and activity targets (default formatter, R = p2, unless said otherwise).
     // - 104007 CheckJoinGuild [1] (side quest 10200080): in a guild now.
@@ -136,33 +145,33 @@ public sealed partial class TaskService
     //   personal score reaches p2; R = p3, the ${2} of the text (inferred, the default formatter would show p2).
     private const int TJoinGuild = 104007, TFriends = 103019, TEchoLevelSum = 317001, TEchoUpgrade = 317002,
         TTowerJoin = 101007, TTowerWin = 101010, TTowerFloorReached = 104008, TLike = 106902, TLiveness = 101009,
-        TCampfire = 106018, TLeagueScore = 106019, TSiegeScore = 106611, TTavernTime = 106010;
-    // - 106010 [seconds] "Spend @{1} minutes in any Tavern room" (2000, the Daily Tavern quest): seconds in a room
-    //   (TavernService.SecondsToday, a snapshot target re-read on TavernService.TimeSpent). The guild tasks 1602050-1603014 reuse the id with [106010, 5] and a different
-    //   meaning the client does not show; only targets of a minute or more are the Tavern's (inferred).
-
-    // Season activity tasks (TaskConfig type 13, TaskService.ActivityTasks.cs), R = p2:
-    // - 106605 CheckGVGJoin [n] "Participate in ${1} War of Emperium matches" / 106606 CheckGVGWin [n] "Win ${1} Siege
-    //   Battles" (LC_InteractCondition.lua:1403-1445): one per settled siege the role was loaded into / its guild won.
-    // - 106801 [n] "Log in ${1} times" (110007, Lost Treasure): one per login while the quest runs; the login that
-    //   accepts it counts as the first (inferred).
-    private const int TGvgJoin = 106605, TGvgWin = 106606, TLogin = 106801;
-    // - 106610 [n] "Earn a total of ${1} Personal Points in the Territory War" (Realm Campaign 107, tasks 120001-120005
-    //   "Reach @{1} Battle Merit") / 106609 [n] "Earn a total of ${1} Guild Points in the Territory War" (120006-120010
-    //   "Reach @{1} points in Guild Territory War"), ProgressConfig 11190100104 / 11190100103: the personal score of each
-    //   settled stronghold or capital battle the role was loaded into (TerritoryWarsService.Participant.Score, the same
-    //   points that feed RoleState.Honor) / its guild's battle score (BattleState.Scores), credited to the guild's members
-    //   online at settlement. Counted since acceptance, like the other event counters; the client has no formatter for
-    //   either id (default R = p2). Siege War has its own target (106611) and is not counted (inferred).
-    private const int TTerritoryPersonal = 106610, TTerritoryGuild = 106609;
+        TCampfire = 106018, TLeagueScore = 106019, TSiegeScore = 106611;
     // - 107101 [phase, percent] "Reach @{1}% completion for the First Movement" (Genesis Movement 111, tasks 2101001-2101004,
     //   "[Symphony of Genesis] Movement @{1}"): the ExplorePhaseConfig phase's note-filling progress (NewActivityService
     //   WorldFillCoreAsync, DBWorldExplorationPhase.totalRate in basis points) in whole percent; R = p3. The client has no
     //   formatter for the id; the phase ids 101-103 and the 100 match ExplorePhaseConfig and the text (inferred).
     private const int TExplorePhase = 107101;
 
-    private readonly ConditionalWeakTable<MonsterUnit, HashSet<long>> _participants = new();
-    private readonly HashSet<GameSession> _refreshQueued = new();
+    // Season activity tasks (TaskConfig type 13, TaskService.ActivityTasks.cs), R = p2:
+    // - 106605 CheckGVGJoin [n] "Participate in ${1} War of Emperium matches" / 106606 CheckGVGWin [n] "Win ${1} Siege
+    //   Battles" (LC_InteractCondition.lua:1403-1445): one per settled siege the role was loaded into / its guild won.
+    // - 106801 [n] "Log in ${1} times" (110007, Lost Treasure): one per login while the quest runs; the login that
+    //   accepts it counts as the first (inferred).
+    // - 106610 [n] "Reach @{1} Battle Merit" (120001-120005, Realm Campaign 107; ProgressConfig "Earn a total of ${1} Personal
+    //   Points in the Territory War"): the Battle Merit points earned this Territory War season (TerritoryWarsService
+    //   GloryState.Points, not the spendable currency 15).
+    private const int TGvgJoin = 106605, TGvgWin = 106606, TLogin = 106801, TBattleMerit = 106610;
+
+    /// <summary>106610: this season's Battle Merit points of a loaded role, -1 before it loads (TerritoryWarsService.GloryPoints).</summary>
+    public Func<GameSession, long>? BattleMeritPoints { get; set; }
+
+    // 106010 BarroomToDayActTime [n] "Today's active time in the Tavern" is the Tavern quest's target (TaskConfig 2000,
+    // type 9, [106010,1200]; today's seconds in a room, TaskService.TavernTasks); the guild To-Do tasks reuse it as a
+    // stand-in, [106010,5], an event counter (TaskService.GuildEvents). Other quests with it stay without a producer.
+    private const int TBarroomActTime = 106010;
+
+    private readonly ConditionalWeakTable<MonsterUnit, HashSet<long>> _participants = [];
+    private readonly HashSet<GameSession> _refreshQueued = [];
 
     private void QueueRefresh(GameSession session)
     {
@@ -183,14 +192,14 @@ public sealed partial class TaskService
         [TPlot or TBaseLevel or TSkillPoints or TStatPoints or TResonance or TTotalRefine or TRefineSlots
             or TRefineCount or TMvp or TMvpOnce or TCargo or TAfkSeconds or TTimedBattle or TCaravan
             or TTalentLevels or TPetsDeployed or TTowerFloor or TGuildHunt or TDraculaWedding or TPetSupport
-            or TPetRoom or TTreasureDig or TDummyChallenge or TCoffinOrSurvivor or TDragonCoffin or TGveJoin or TFriends or TEchoLevelSum
-            or TEchoUpgrade or TTowerJoin or TTowerWin or TTowerFloorReached or TLike or TLiveness or TCampfire or TTavernTime
-            or TGvgJoin or TGvgWin or TLogin or TTerritoryPersonal or TTerritoryGuild, var n] => n,
+            or TPetRoom or TTreasureDig or TDummyChallenge or TCoffinOrSurvivor or TDragonCoffin or TGveJoin or TFriends
+            or TEchoLevelSum
+            or TEchoUpgrade or TTowerJoin or TTowerWin or TTowerFloorReached or TLike or TLiveness or TCampfire
+            or TGvgJoin or TGvgWin or TLogin or TBarroomActTime or TBattleMerit, var n] => n,
         [TTenBossWin, var n, _, ..] => n,
-        // Connect Quests (TaskService.ConnectQuests.cs); 106014 counts seconds against its minutes (inferred).
-        [TPartyMvp or TPartyBoss, var n, _] => n,
-        [TPartyBattleRoyale, var n] => n,
-        [TPartyAutoBattle, var minutes] when minutes > 0 && minutes <= int.MaxValue / 60 => minutes * 60,
+        [TChickenRank or TChickenUse or TChickenEquip, _, var n] => n,
+        [TChickenMonster or TChickenBox or TChickenKill, var n] => n,
+        [TChickenDisguise, var n, _, _] => n,
         [TLeagueJoin, _, var n] => n,
         [TLeagueScore, _, _, var n] => n,
         [TSiegeScore, _, var n] => n,
@@ -207,12 +216,14 @@ public sealed partial class TaskService
         [TSaplingChosen or TDeclaration, var n] => n, // Adventure Group (TaskService.AdventureGroup.cs)
         [TWaterSapling, var n, _] => n,
         [TKill or TKillInvolved, _, _, ..] => t[^1],
+        [TConnectMvp or TConnectBoss, var n, _] => n, // Connect quests (TaskService.Connect.cs)
+        [TConnectSurvivor or TConnectAfk, var n] => n,
         [TClientInteract or TMapKill or TUse or TCardStars or TCardQuality or TTreasure or TSlotRefine
             or TCraftQuality or TCollect or TEquipmentQuality or TStrength or TSkillRank or TRestrictUse, _, var n] => n,
         [TEquipment, _, _, var n] => n,
         [TCraft, _, _, var n, _] => n,
         [TSubmit, _, var n, _] => n,
-        _ => -1,
+        _ => EventTargetRequired(t), // TaskService.EventTargets.cs
     };
 
     private bool Supported(long[] t)
@@ -247,18 +258,17 @@ public sealed partial class TaskService
             TExplorePhase => _data.Row("ExplorePhaseConfig", t[1]) != null && t[2] is > 0 and <= 100,
             TStunts => t[1] >= 1 && t[2] == 0 && t[3] == 0,
             TTenBossWin => t[2..].All(boss => _data.Row("TenGameplayBossConfig", boss) != null),
-            TPartyMvp => _data.Row("NPCConfig", t[2]) != null,
-            TPartyBoss => _data.Row("TenGameplayBossConfig", t[2]) != null,
             TLeagueJoin => t[1] is >= 0 and <= 3,
             TLeagueScore => t[1] is >= 0 and <= 2 && t[2] >= 0,
             TSiegeScore => t[1] >= 0,
-            _ => true, // Only the explicit formatter cases above can reach here.
+            _ => MiscSupported(t), // Only the explicit formatter cases above can reach here.
         };
     }
 
     /// <summary>Every target of the quest has a supported reader and a positive R (a quest without one never ends).</summary>
     internal bool TargetsSupported(long taskId) => Defs().TryGetValue(taskId, out var def) && def.Targets.Length > 0
-        && def.Targets.All(t => Supported(t) && Required(null, t) > 0 && (t[0] != TTavernTime || t[1] >= 60 || GuildEventTask(def.Id)));
+        && def.Targets.All(t => Supported(t) && Required(null, t) > 0
+            && (t[0] != TBarroomActTime || GuildEventTask(def.Id) || def.Type == BarRoomTaskType));
 
     private bool ItemExists(long id) => id > 0 && id <= int.MaxValue && _data.Row("ItemConfig", id) != null;
 
@@ -283,9 +293,6 @@ public sealed partial class TaskService
         return t[0] switch
         {
             TBaseLevel => p.Level,
-            // 106010 [n >= 60]: today's Tavern seconds (TavernService); the guild To-Do stand-in [106010,5] is counted by
-            // TaskService.GuildEvents instead, so it is not a passive read.
-            TTavernTime => t[1] >= 60 ? TavernSecondsToday?.Invoke(s) ?? 0 : -1,
             // 500130 [106901,3600] displays whole consumed minutes. Reading the committed
             // daily counter also repairs a disconnect between 5035 persistence and the quest sync (inferred).
             TAfkSeconds => s.WildAfk is { } afk && s.Daily?.DailyEpoch == afk.DailyEpoch ? afk.ConsumedTodaySeconds : 0,
@@ -357,7 +364,8 @@ public sealed partial class TaskService
             TFriends => FriendCount(s),
             TEchoLevelSum => EmblemService.Worn(s).Sum(i => i.Attrs?.GetValueOrDefault(1001) ?? 0),
             TLiveness => _character.CountOf(s, 5),
-            _ => -1,
+            TBattleMerit => BattleMeritPoints?.Invoke(s) ?? -1,
+            _ => EventTargetValue(s, t), // TaskService.EventTargets.cs
         };
     }
 
@@ -414,12 +422,12 @@ public sealed partial class TaskService
         if (settlement.TaskParticipantIds == null)
         {
             var credited = _participants.TryGetValue(monster, out var ids) ? ids : [];
-            settlement.TaskParticipantIds = _sessions.All()
+            settlement.TaskParticipantIds = [.. _sessions.All()
                 .Where(s => s.Role != null && s.Tasks != null && s.WorldScene == monster.WorldScene &&
                     (ReferenceEquals(s, killer) || credited.Contains(s.Role.Id)))
-                .Select(s => s.Role!.Id).Distinct().Order().ToArray();
+                .Select(s => s.Role!.Id).Distinct().Order()];
         }
-        return settlement.TaskParticipantIds.Select(id => ReservationKey.Role(id)).ToArray();
+        return [.. settlement.TaskParticipantIds.Select(id => ReservationKey.Role(id))];
     }
 
     /// <summary>Freeze the exact running targets under all participant role reservations before the kill writer
@@ -449,8 +457,8 @@ public sealed partial class TaskService
                     var target = def.Targets[index];
                     bool matches = target[0] switch
                     {
-                        TKill => ReferenceEquals(session, killer) && target.Length >= 3 && target[1..^1].Contains(monster.Template.NpcId),
-                        TKillInvolved => target.Length >= 3 && target[1..^1].Contains(monster.Template.NpcId),
+                        TKill => ReferenceEquals(session, killer) && target.Length >= 3 && target.AsSpan(1, target.Length - 2).Contains(monster.Template.NpcId),
+                        TKillInvolved => target.Length >= 3 && target.AsSpan(1, target.Length - 2).Contains(monster.Template.NpcId),
                         TMapKill => target.Length == 3 && target[1] == monster.SceneEntry,
                         TKillOnMap => ReferenceEquals(session, killer) && target.Length == 3 && target[2] == monster.SceneEntry,
                         _ => false
@@ -485,7 +493,7 @@ public sealed partial class TaskService
                 {
                     byte[]? beforeFollowup = _roles.ReadTaskFollowup(builder, x.Role);
                     var pending = beforeFollowup is { Length: > 0 }
-                        ? JsonSerializer.Deserialize<HashSet<string>>(beforeFollowup) ?? [] : new HashSet<string>();
+                        ? JsonSerializer.Deserialize<HashSet<string>>(beforeFollowup) ?? [] : [];
                     pending.Add("kill/" + settlement.SourceKey);
                     return new KillTaskProgress(x.Role, x.BeforeTasks, x.AfterTasks, beforeFollowup,
                         JsonSerializer.SerializeToUtf8Bytes(pending));
@@ -505,7 +513,7 @@ public sealed partial class TaskService
 
     private async Task OnKillAsync(GameSession killer, MonsterUnit monster)
     {
-        var participants = _participants.TryGetValue(monster, out var credited) ? credited.ToHashSet() : new HashSet<long>();
+        var participants = _participants.TryGetValue(monster, out var credited) ? credited.ToHashSet() : [];
         if (killer.Role != null) participants.Add(killer.Role.Id);
         _participants.Remove(monster);
         if (monster.RewardSettlement?.TaskObligationsStaged == true)
@@ -518,8 +526,8 @@ public sealed partial class TaskService
         await RoleFanout.EachAsync(_sessions.All().Where(s => s.Role != null && s.WorldScene == monster.WorldScene && participants.Contains(s.Role.Id)),
             s => ProgressAsync(s, null, t => t[0] switch
             {
-                TKill when s == killer && t.Length >= 3 && t[1..^1].Contains(monster.Template.NpcId) => 1,
-                TKillInvolved when t.Length >= 3 && t[1..^1].Contains(monster.Template.NpcId) => 1,
+                TKill when s == killer && t.Length >= 3 && t.AsSpan(1, t.Length - 2).Contains(monster.Template.NpcId) => 1,
+                TKillInvolved when t.Length >= 3 && t.AsSpan(1, t.Length - 2).Contains(monster.Template.NpcId) => 1,
                 TMapKill when t.Length == 3 && t[1] == monster.SceneEntry => 1,
                 TKillOnMap when s == killer && t.Length == 3 && t[2] == monster.SceneEntry => 1,
                 _ => 0,
@@ -610,7 +618,7 @@ public sealed partial class TaskService
 /// <summary>Extra authoritative quest source state; stored alongside DBTaskInfo. No new client dataset.</summary>
 public sealed class TaskRuntimeState
 {
-    public HashSet<long> CompletedGuides { get; set; } = new();
+    public HashSet<long> CompletedGuides { get; set; } = [];
     public bool InCutScene { get; set; }
 
     /// <summary>
@@ -619,4 +627,8 @@ public sealed class TaskRuntimeState
     /// </summary>
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public Dictionary<long, int>? Forgotten { get; set; }
+    /// <summary>The game day (DailyActivityService epoch) of <see cref="FactionPoints"/> (TaskService.FactionQuest.cs).</summary>
+    public long FactionDay { get; set; }
+    /// <summary>The Faction Quest points counted that day, the exceed past 1101000's 1000 included.</summary>
+    public long FactionPoints { get; set; }
 }

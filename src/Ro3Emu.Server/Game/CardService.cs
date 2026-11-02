@@ -25,15 +25,14 @@ public sealed partial class CardService
 
     private const int PlanCount = 5; // (inferred) PublicParamConfig.SchemeNum; card plans have no separate count field.
     private const int NameMax = 8; // (inferred) PublicParamConfig.SchemeNameNumMax shared with scheme UI.
-    public List<Func<GameSession, Task>> CollectionChanged { get; } = new();
+    public List<Func<GameSession, Task>> CollectionChanged { get; } = [];
     /// <summary>Required quest continuation, installed by TaskService. Unlike optional observers it
     /// retains durable debt until the task pass has committed.</summary>
     internal Func<GameSession, OwnerContext, Task<bool>>? RequiredCollectionRefresh { get; set; }
 
-    /// <summary>
-    /// ItemConfig._iCardPart (enum_CardPosType) → equipment grids, LC_CardHelper's pos table: 1 weapon, 2 shield,
-    /// 3 armour, 4 cloak, 5 shoes, 6 accessory (both), 7 head, 8 face, 9 mouth.
-    /// </summary>
+    /// <summary>ItemConfig._iCardPart (enum_CardPosType) → equipment grids, LC_CardHelper.lua:54-104: 1..6 the
+    /// equipment grids (accessory both 6 and 7), 7/8/9 HeadAccessory/FaceAccessory/MouthAccessory the costume grids
+    /// 8/9/10 (head "Card: Willow", face/mouth the MVP "Sketch Card"/"Portrait Card").</summary>
     private static int[] GridsFor(long part) => part switch
     {
         1 => [1],
@@ -155,7 +154,7 @@ public sealed partial class CardService
         int error = card == null ? ErrorCodes.ItemMissing
             : !_character.IsCard(card.Entry) ? ErrorCodes.Parameter // (inferred) no card-specific type error.
             : AddressError(grid, socket) is var address and not 0 ? address
-            : !GridsFor(Part(card.Entry)).Contains(grid) ? ErrorCodes.EquipSlot // (inferred) grid incompatibility.
+            : !CardFitsGrid(session, card.Entry, grid) ? ErrorCodes.EquipSlot // (inferred) grid incompatibility.
             : SocketError(session, grid, socket) is var sealedSocket and not 0 ? sealedSocket
             : InsertRuleError(card.Entry, SocketedExcept(session.Items, (grid, socket)));
         _log.LogInformation("{Name} inserts card {Card} into {Grid}/{Socket}: {Result}", session.Role!.Name, card?.Entry, grid, socket, error);
@@ -223,11 +222,11 @@ public sealed partial class CardService
         var src = ValidSocket(srcGrid, req.SrcEquipSlot) ? Socketed(session, srcGrid, req.SrcEquipSlot) : null;
         var dst = ValidSocket(dstGrid, req.DestEquipSlot) ? Socketed(session, dstGrid, req.DestEquipSlot) : null;
         int error = src == null ? AddressError(srcGrid, req.SrcEquipSlot) is var e and not 0 ? e : ErrorCodes.SlotEmpty
-            : !GridsFor(Part(src.Entry)).Contains(dstGrid) ? ErrorCodes.EquipSlot // (inferred)
+            : !CardFitsGrid(session, src.Entry, dstGrid) ? ErrorCodes.EquipSlot // (inferred)
             : SocketError(session, dstGrid, req.DestEquipSlot) is var d and not 0 ? d
-            : dst != null && !GridsFor(Part(dst.Entry)).Contains(srcGrid) ? ErrorCodes.EquipSlot // (inferred)
-                                                                                                 // The client sends 31408 without CheckCardInsert: a move or swap keeps the socketed set. (inferred) The
-                                                                                                 // server still holds each moved card to the insert rules against the cards it stays beside.
+            : dst != null && !CardFitsGrid(session, dst.Entry, srcGrid) ? ErrorCodes.EquipSlot // (inferred)
+                                                                                               // The client sends 31408 without CheckCardInsert: a move or swap keeps the socketed set. (inferred) The
+                                                                                               // server still holds each moved card to the insert rules against the cards it stays beside.
             : InsertRuleError(src.Entry, SocketedExcept(session.Items, (srcGrid, req.SrcEquipSlot), (dstGrid, req.DestEquipSlot))
                 .Concat(dst == null ? [] : [dst.Entry])) is var srcRule and not 0 ? srcRule
             : dst != null ? InsertRuleError(dst.Entry, SocketedExcept(session.Items, (srcGrid, req.SrcEquipSlot), (dstGrid, req.DestEquipSlot))
@@ -268,16 +267,14 @@ public sealed partial class CardService
     private InvItem? Socketed(GameSession session, int grid, int socket) =>
         session.Items.FirstOrDefault(i => i.Grid == CharacterService.CardGrid(grid, socket));
 
-    private bool ValidSocket(int grid, int socket) => socket is >= 1 and <= 4 && SocketGridRow(grid) is not null;
+    /// <summary>The EquipGridConfig row of a grid. The client keys the table by _iID, which is the EquipGridType enum
+    /// (Lua_CFG_EquipGridConfig.lua:87-89 m_kEquipGridList[_iID], LC_DAL_Equipment._canInsertCardSlotPos GetEntryPtr(grid));
+    /// _iEquipGridType repeats per category (costume Head 8 has _iEquipGridType 1), so it must not be the lookup key.
+    /// Category 1 = equipment, 3 = costume; 2 (CareerSpecial) has no sockets.</summary>
+    private JsonElement? GridRow(int grid) =>
+        _data.Row("EquipGridConfig", grid) is { } row && GameData.Int(row, "_iGridCategory") is 1 or 3 ? row : null;
 
-    /// <summary>
-    /// The EquipGridConfig row of a card grid. Lua_CFG_EquipGridConfig keys it by _iID, which is the EquipGridType
-    /// (8 head, 9 face, 10 mouth), not by _iEquipGridType: the appearance rows reuse 1..9 there (row 8 is the headwear
-    /// grid with _iEquipGridType 1). A card grid is a row with at least one _kSocketOpenN (its m_kCardGridList).
-    /// </summary>
-    private JsonElement? SocketGridRow(int grid) =>
-        _data.Row("EquipGridConfig", grid) is { ValueKind: JsonValueKind.Object } row && GameData.Int(row, "_iGridCategory") is 1 or 3
-            && Enumerable.Range(1, 4).Any(n => GameData.Int(row, $"_kSocketOpen{n}") != 0) ? row : null;
+    private bool ValidSocket(int grid, int socket) => socket is >= 1 and <= 4 && GridRow(grid) != null;
 
     /// <summary>Lua_CFG_EquipGridConfig.CheckGridOpenCondition: the appearance card grids open with their wardrobe page.</summary>
     private static long GridFunction(int grid) => grid switch { 8 => 3203, 9 => 3204, 10 => 3205, _ => 0 };
@@ -292,7 +289,7 @@ public sealed partial class CardService
     private int SocketError(GameSession session, int grid, int socket)
     {
         if (AddressError(grid, socket) is var address and not 0) return address;
-        if (SocketGridRow(grid) is not { } row) return ErrorCodes.EquipSlot; // (inferred) bad grid.
+        if (GridRow(grid) is not { } row) return ErrorCodes.EquipSlot; // (inferred) bad grid.
         if (GridFunction(grid) is var function and not 0 && !_functions.IsOpen(session, function)) return ErrorCodes.SlotSealed;
         if (!row.TryGetProperty($"_kSocketOpen{socket}", out var cond) || GameData.Number(cond) is not { } id || id <= 0) return ErrorCodes.SlotSealed;
         if (grid is 1 or 2 && session.Items.All(i => i.Grid != grid)) return ErrorCodes.EquipSlot; // (inferred) no worn weapon.
@@ -300,6 +297,9 @@ public sealed partial class CardService
     }
 
     private long Part(int entry) => _data.Row("ItemConfig", entry) is { } row ? GameData.Int(row, "_iCardPart") : 0;
+
+    private bool CardFitsGrid(GameSession session, int entry, int grid) =>
+        GridsFor(Part(entry)).Contains(grid) || Part(entry) == 1 && _character.IsDualWieldOffHand(session, grid);
 
     private static InvItem CloneOne(InvItem stack)
     {
@@ -331,7 +331,7 @@ public sealed partial class CardService
                 .Where(x => x.Choice.ItemId > 0).OrderBy(x => x.Grid).ThenBy(x => x.Socket).ToList();
             foreach (var (grid, socket, choice) in desired)
             {
-                if (SocketError(session, grid, socket) != 0 || !GridsFor(Part((int)choice.ItemId)).Contains(grid))
+                if (SocketError(session, grid, socket) != 0 || !CardFitsGrid(session, (int)choice.ItemId, grid))
                     return ErrorCodes.EquipSlot;
             }
             if (!replaceCurrent || index != plans.CurrentPlan) CaptureActive(session, plans);
@@ -381,7 +381,7 @@ public sealed partial class CardService
             var desired = target.CardInfo.SelectMany(g => g.Value.CardSlotInfo.Select(s => (Grid: g.Key, Socket: s.Key, Choice: s.Value)))
                 .Where(x => x.Choice.ItemId > 0).OrderBy(x => x.Grid).ThenBy(x => x.Socket).ToList();
             // Validate all selected sockets before moving any card. Missing copies simply leave that slot empty (inferred).
-            if (desired.Any(x => SocketError(session, x.Grid, x.Socket) != 0 || !GridsFor(Part((int)x.Choice.ItemId)).Contains(x.Grid))) error = ErrorCodes.EquipSlot;
+            if (desired.Any(x => SocketError(session, x.Grid, x.Socket) != 0 || !CardFitsGrid(session, (int)x.Choice.ItemId, x.Grid))) error = ErrorCodes.EquipSlot;
             if (error == 0)
             {
                 var staged = session.Items.Select(i => i.Clone()).ToList();
@@ -432,7 +432,7 @@ public sealed partial class CardService
         {
             var plans = session.CardPlans!.Clone();
             plans.StoragePlans[req.TargetIndex].PlanName = req.Name;
-            await CommitCardStateAsync(session, session.Items.Select(i => i.Clone()).ToList(), plans,
+            await CommitCardStateAsync(session, [.. session.Items.Select(i => i.Clone())], plans,
                 "cd13a/card-rename", new { req.TargetIndex, req.Name });
             await CharacterService.SyncAsync(session, StorageHoleSync, plans.Clone());
         }
@@ -464,9 +464,9 @@ public sealed partial class CardService
     private static int MissingTarget(int sourceType) => sourceType is 2 or 3 ? ErrorCodes.FeatureUnavailable
         : sourceType is 1 or 4 ? ErrorCodes.ItemMissing : ErrorCodes.Parameter; // (inferred) legacy carrier refusal.
 
-    private static List<(int Entry, long Count)> Cost(JsonElement row, string name) => GameData.Pairs(row, name)
+    private static List<(int Entry, long Count)> Cost(JsonElement row, string name) => [.. GameData.Pairs(row, name)
         .Select(p => ((int)p.Item1, (long)p.Item2)).Where(p => p.Item1 > 0 && p.Item2 > 0)
-        .GroupBy(p => p.Item1).Select(g => (Entry: g.Key, Count: g.Sum(p => p.Item2))).ToList();
+        .GroupBy(p => p.Item1).Select(g => (Entry: g.Key, Count: g.Sum(p => p.Item2)))];
 
     private readonly record struct PaidCost(int Entry, long Count, int BindType, long BindExpire, int CardType);
 
@@ -507,7 +507,7 @@ public sealed partial class CardService
 
     private static int RecordCost(InvItem target, IEnumerable<PaidCost> cost, int start, int end)
     {
-        var ledger = target.StringAttrs ??= new();
+        var ledger = target.StringAttrs ??= [];
         foreach (var (entry, count, bind, expire, type) in cost)
         {
             int slot = 0;
@@ -561,7 +561,7 @@ public sealed partial class CardService
             {
                 var target = staged.Single(i => i.Guid == card!.Guid);
                 StageSingleTarget(staged, target);
-                target.Attrs ??= new();
+                target.Attrs ??= [];
                 target.Attrs[501] = level + 1;
                 if (RecordCost(target, payment.Ledger, 510, 513) != 0)
                     throw new InvalidOperationException("Validated card level ledger changed during staging.");
@@ -600,7 +600,7 @@ public sealed partial class CardService
         if (error == 0 && session.Library != null)
         {
             var starred = card!.Clone();
-            starred.Attrs ??= new();
+            starred.Attrs ??= [];
             starred.Attrs[502] = tier + 1;
             var library = session.Library.Clone();
             var before = library.Cards.GetValueOrDefault(card.Entry);
@@ -617,14 +617,14 @@ public sealed partial class CardService
                 if (nextPlans != null) builder.RoleBlob(session.Role!.Id, "card_plans", nextPlans.ToByteArray());
                 if (nextLibrary != null) builder.RoleBlob(session.Role!.Id, "library", nextLibrary.ToByteArray());
                 builder.WithEconomy(_character.FamilyEconomy(session, "cd13a/card-star",
-                    economyCosts, tierGains.ToArray(),
+                    economyCosts, [.. tierGains],
                     new { Card = card!.Entry, Guid = card!.Guid, NewStar = tier + 1 }));
             },
             stageItems: staged =>
             {
                 var target = staged.Single(i => i.Guid == card!.Guid);
                 StageSingleTarget(staged, target);
-                target.Attrs ??= new();
+                target.Attrs ??= [];
                 target.Attrs[502] = tier + 1;
                 if (RecordCost(target, payment.Ledger, 520, 529) != 0)
                     throw new InvalidOperationException("Validated card star ledger changed during staging.");
@@ -654,7 +654,7 @@ public sealed partial class CardService
     private static List<PaidCost> ReadLedger(InvItem card)
     {
         var result = new List<PaidCost>();
-        foreach (var (key, text) in card.StringAttrs ?? new())
+        foreach (var (key, text) in card.StringAttrs ?? [])
         {
             if (key is < 510 or > 529 || key is > 513 and < 520) continue;
             var parts = text.Split('|');
@@ -689,8 +689,7 @@ public sealed partial class CardService
         {
             try
             {
-                grouped = refund.GroupBy(x => (x.Entry, x.BindType, x.BindExpire, x.CardType))
-                    .Select(g => (g.Key, Count: g.Sum(x => x.Count))).ToList();
+                grouped = [.. refund.GroupBy(x => (x.Entry, x.BindType, x.BindExpire, x.CardType)).Select(g => (g.Key, Count: g.Sum(x => x.Count)))];
             }
             catch (OverflowException) { error = ErrorCodes.Parameter; }
         }
@@ -703,13 +702,13 @@ public sealed partial class CardService
         if (error == 0 && (granted = await _character.ExchangeLockedAsync(session, fee, [], popup: false, sync: false,
             reservedGuid: card!.Guid, attributedGoods: goods,
             persist: builder => builder.WithEconomy(_character.FamilyEconomy(session, "cd13a/card-revert",
-                fee, goods.Select(g => (g.Entry, g.Count)).ToArray(),
+                fee, [.. goods.Select(g => (g.Entry, g.Count))],
                 new { Card = card!.Entry, Guid = card!.Guid, Refunded = goods.Select(g => new { g.Entry, g.Count, g.BindType, g.BindExpire, g.CardType }).ToArray() })),
             stageAfterGoods: staged =>
             {
                 var target = staged.Single(i => i.Guid == card!.Guid);
                 StageSingleTarget(staged, target);
-                target.Attrs ??= new();
+                target.Attrs ??= [];
                 target.Attrs[501] = 0;
                 target.Attrs[502] = 0;
                 if (target.StringAttrs != null)
@@ -792,7 +791,7 @@ public sealed partial class CardService
                 if (newCards.Length == 0) { builder.RoleBlob(role, "library", next.ToByteArray()); return; } // a Codex kill only
                 byte[]? old = _roles.ReadTaskFollowup(builder, role);
                 var pending = old is { Length: > 0 }
-                    ? JsonSerializer.Deserialize<HashSet<string>>(old) ?? [] : new HashSet<string>();
+                    ? JsonSerializer.Deserialize<HashSet<string>>(old) ?? [] : [];
                 foreach (long card in newCards) pending.Add($"card-sight/{role}/{epoch}/{card}");
                 builder.RoleBlob(role, "library", next.ToByteArray());
                 builder.RoleBlob(role, "task_followup", JsonSerializer.SerializeToUtf8Bytes(pending));

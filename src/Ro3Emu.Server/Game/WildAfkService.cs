@@ -46,9 +46,7 @@ public sealed class WildAfkService : IGameTicker
         public long ConsumedTodaySeconds { get; set; }
         public long RemainderMs { get; set; }
         public long LastToggleMs { get; set; }
-        public Dictionary<int, long> TotalDrops { get; set; } = new();
-        /// <summary>Party auto-battle seconds not yet added to Connect Quest 106014 (batched, see ReconcileCoreAsync).</summary>
-        public long PartyAutoBattleSeconds { get; set; }
+        public Dictionary<int, long> TotalDrops { get; set; } = [];
         [JsonIgnore] public DBWildAFKInfo Info { get; set; } = new();
         [JsonIgnore] public long AccountedAtMs { get; set; }
         [JsonIgnore] public long LastKillAtMs { get; set; }
@@ -273,24 +271,11 @@ public sealed class WildAfkService : IGameTicker
         // The tick's reconcile of a running clock is saved lazily; a reset, a pause or resume, or the end of Bonus
         // Time is durable at once.
         bool clockOnly = tick && publish && !reset && running && info.IsHighMagnification && !info.IsSuspended;
-        // Connect Quest 106014 "Auto-battle in a party" (TaskService.ConnectQuests.cs): seconds consumed in a party are
-        // batched here and added once a minute, when they would complete the quest, or when the clock stops, instead of
-        // a quest save and full quest sync every second. The batch is part of the saved state, so a relog keeps it.
-        if (publish && consumed > 0 && _tasks.CountsPartyAutoBattle(s)) state.PartyAutoBattleSeconds += consumed;
-        long party = 0;
-        if (publish && s.Tasks != null && state.PartyAutoBattleSeconds > 0 && (!clockOnly || state.PartyAutoBattleSeconds >= 60
-            || _tasks.PartyAutoBattleCompletes(s, state.PartyAutoBattleSeconds)))
-        {
-            party = state.PartyAutoBattleSeconds;
-            state.PartyAutoBattleSeconds = 0;
-        }
         Save(s, lazy: clockOnly);
         if (!publish) return; // Disconnected sockets must not interrupt durable accounting or world cleanup.
-        // The daily [106901, 3600] quest reads ConsumedTodaySeconds and shows whole minutes, so a running clock re-reads it
-        // when the minute changes (and on the day's first second, so the quest shows it started), not every second.
-        bool minute = consumed > 0 && (!clockOnly || consumedBefore == 0 || consumedBefore / 60 != state.ConsumedTodaySeconds / 60);
-        bool refresh = (reset || minute || PendingDailyAward(state, s.Daily, s.Tasks, s.DailyRows)) && s.Tasks != null && s.DailyReady;
-        await _tasks.OnAutoBattleTickAsync(s, party, refresh);
+        if (consumed > 0) await _tasks.OnBonusTimeConsumedAsync(s, consumed); // Connect target 106014
+        if ((reset || consumed > 0 || PendingDailyAward(state, s.Daily, s.Tasks, s.DailyRows))
+            && s.Tasks != null && s.DailyReady) await _tasks.RefreshAsync(s);
         await SyncAsync(s);
         if (info.IsSuspended && reason.Length > 0 && reason != state.LastReason)
             await s.SendGameAsync(SuspendReason, new SuspendReasonRes { Reason = reason });
@@ -408,6 +393,7 @@ public sealed class WildAfkService : IGameTicker
         using var scope = s.Owners is { } owners && role != null
             ? await owners.EnterWithGateAsync("wild-afk/leave", state.Gate, [ReservationKey.Role(role.Id)]) : null;
         if (scope == null) await state.Gate.WaitAsync();
+        bool refused = false;
         try
         {
             if (Owns(s, state) && ReferenceEquals(s.Role, role))
@@ -416,9 +402,11 @@ public sealed class WildAfkService : IGameTicker
                 await ReconcileCoreAsync(s, Now, forceSuspended: true, publish: false);
             }
         }
+        // A full queue wrote nothing: the state stays for the handover's retry, which would otherwise find nothing to save.
+        catch (Exception e) when (Accounts.Persistence.QueueFullPatience.Refused(e)) { refused = true; throw; }
         finally
         {
-            if (ReferenceEquals(s.WildAfk, state))
+            if (!refused && ReferenceEquals(s.WildAfk, state))
             {
                 s.AutoBattle = false;
                 s.WildAfk = null;

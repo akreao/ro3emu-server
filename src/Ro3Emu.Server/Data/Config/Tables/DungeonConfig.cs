@@ -15,8 +15,11 @@ public readonly partial record struct DungeonConfig(JsonElement Row)
     [ConfigField("_iMapResourceID")] public partial long MapResourceId { get; }
     [ConfigField("_iName")] public partial long[] Name { get; }
     [ConfigField("_iPerformanceForbidden")] public partial long PerformanceForbidden { get; }
+    [ConfigField("_iPlaneMapID")] public partial long PlaneMapId { get; }
     [ConfigField("_iRoleCntLimit")] public partial long RoleCntLimit { get; }
+    [ConfigField("_iSameDupLoadingType")] public partial long SameDupLoadingType { get; }
     [ConfigField("_kAdventureGroupWhitelist")] public partial long[] AdventureGroupWhitelist { get; }
     [ConfigField("_kGuildWhitelist")] public partial long[] GuildWhitelist { get; }
     [ConfigField("_kResSceneEditorName")] public partial string ResSceneEditorName { get; }
+    [ConfigField("_kSameDupLoadingTypeParam")] public partial long[] SameDupLoadingTypeParam { get; }
 }

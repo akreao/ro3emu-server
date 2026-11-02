@@ -24,6 +24,7 @@ public sealed class VoiceRelayTests : IAsyncLifetime
         _app = ServerHost.Create([], o =>
         {
             o.DataDir = _dataDir;
+            o.GameDataDir = SyntheticData.Dir;
             o.HttpPort = httpPort;
             o.MicroGatePort = microPort;
             o.GameGatePort = gamePort;
@@ -179,7 +180,7 @@ public sealed class VoiceRelayTests : IAsyncLifetime
             Assert.Equal(VoiceDown.Audio, type);
             Assert.Equal(aliceRole, BitConverter.ToInt64(payload));
             Assert.Equal(seq, BitConverter.ToUInt16(payload, 8));
-            Assert.Equal(new byte[] { (byte)seq, (byte)seq, (byte)seq }, payload[10..]);
+            Assert.Equal([(byte)seq, (byte)seq, (byte)seq], payload[10..]);
         }
         // Alice never hears her own voice.
         await aliceVoice.ExpectNoneAsync((t, _) => t == VoiceDown.Audio, TimeSpan.FromMilliseconds(300));
@@ -254,8 +255,7 @@ public sealed class VoiceRelayTests : IAsyncLifetime
         var notSeated = await carolVoice.WaitTypeAsync(VoiceDown.JoinResult, Wait);
         Assert.Equal(VoiceJoinCode.NotMember, notSeated.Payload[0]);
 
-        // The "3_..." string form of a Tavern room is not served; Tavern rooms join by their numeric room id
-        // (TavernVoiceTests).
+        // No talk type sends this shape (a Tavern room is its guid in decimal: TavernTests).
         await carolVoice.JoinAsync("3_5_1");
         var unsupported = await carolVoice.WaitTypeAsync(VoiceDown.JoinResult, Wait);
         Assert.Equal(VoiceJoinCode.UnsupportedRoom, unsupported.Payload[0]);
@@ -634,6 +634,7 @@ public sealed class VoiceRelayTests : IAsyncLifetime
         var off = ServerHost.Create([], o =>
         {
             o.DataDir = dataDir;
+            o.GameDataDir = SyntheticData.Dir;
             o.HttpPort = httpPort;
             o.MicroGatePort = microPort;
             o.GameGatePort = gamePort;

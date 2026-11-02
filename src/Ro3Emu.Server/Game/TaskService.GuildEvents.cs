@@ -4,7 +4,7 @@ namespace Ro3Emu.Server.Game;
 /// The guild To-Do tasks "Participate in the Guild Escort / Stronghold / Regional Capital / Royal City War": hidden
 /// DailyActivityConfig rows 3008-3010 and the "(Auction Check)" rows 3103-3106 accept them through _iTaskReceiveAction
 /// [31,1,task] and LC_ConditionList [4004,task] (DailyActivityService.Defs). Their only target is [106010,5], the
-/// Tavern's BarroomToDayActTime, which the client data reuses as a stand-in (TaskObjectives.TTavernTime).
+/// Tavern's BarroomToDayActTime, which the client data reuses as a stand-in (TaskObjectives.TBarroomActTime).
 /// (inferred) Taking part in the event completes the task at once: the original counter is not in the client.
 /// Task 1602080 (Gloom over Longgu Island) has no To-Do row and stays without a producer.
 /// </summary>
@@ -26,7 +26,7 @@ public sealed partial class TaskService
     public void OnGuildEventJoined(GameSession s, GuildEvent guildEvent)
     {
         var tasks = GuildEventTasks[guildEvent];
-        _loop.PostOwned(s, () => ProgressAsync(s, TTavernTime, t => t.Length == 2 ? t[1] : 0, def => tasks.Contains(def.Id)),
+        _loop.PostOwned(s, () => ProgressAsync(s, TBarroomActTime, t => t.Length == 2 ? t[1] : 0, def => tasks.Contains(def.Id)),
             "quest guild event");
     }
 

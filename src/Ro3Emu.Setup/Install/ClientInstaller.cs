@@ -72,8 +72,10 @@ public sealed class ClientInstaller(PublisherConfig config, HttpClient http, str
             }
         }
         if (last is InstallException install) throw install;
-        throw new InstallException("The publisher's download servers could not be reached.",
-            "Check the internet connection and try again. If the servers moved, a newer RO3Emu (or RO3Emu.download.json) has the new addresses.");
+        throw new InstallException("Genesis' download servers could not be reached.",
+            "Check the internet connection and try again. Some internet providers block Genesis' mirror: connecting through "
+            + "Cloudflare WARP (or another VPN) helps, or install the game with the Genesis launcher and pick its folder instead. "
+            + "If the servers moved, a newer RO3Emu (or RO3Emu.download.json) has the new addresses.");
     }
 
     private async Task<byte[]> GetBytesAsync(string url, CancellationToken ct)
@@ -121,14 +123,14 @@ public sealed class ClientInstaller(PublisherConfig config, HttpClient http, str
         foreach (var t in missing.OrderBy(t => sources.TryGetValue((t.Path, t.Sha256), out var s) ? s.Count : 0).ThenBy(t => t.Path, StringComparer.Ordinal))
         {
             if (!sources.TryGetValue((t.Path, t.Sha256), out var candidates) || candidates.Count == 0)
-                throw new InstallException($"The publisher's release has no package for {t.Path}.", "Try again later.");
+                throw new InstallException($"Genesis' release has no package for {t.Path}.", "Try again later.");
             var package = candidates.FirstOrDefault(c => chosen.ContainsKey(c.Id)) ?? candidates[0];
             chosen.TryAdd(package.Id, package);
             needs.Add(new Need(t, package));
         }
         var order = manifests.Full.Packages.Concat(manifests.Delta?.Packages ?? []).Select(p => p.Id).Distinct().ToList();
         return new Plan(needs, targets.Count - missing.Count, keptPatched, missing.Sum(t => t.Length),
-            chosen.Values.OrderBy(p => order.IndexOf(p.Id)).ToList());
+            [.. chosen.Values.OrderBy(p => order.IndexOf(p.Id))]);
     }
 
     private enum Present { No, Yes, Patched }
@@ -185,7 +187,7 @@ public sealed class ClientInstaller(PublisherConfig config, HttpClient http, str
         var part = final + ".part";
         if (File.Exists(final))
         {
-            if (new FileInfo(final).Length == package.Length && Sha256(final) == package.Sha256.ToLowerInvariant()) return final;
+            if (new FileInfo(final).Length == package.Length && string.Equals(Sha256(final), package.Sha256, StringComparison.OrdinalIgnoreCase)) return final;
             File.Delete(final);
         }
         var urls = config.PackageUrls(package.Url);
@@ -200,7 +202,7 @@ public sealed class ClientInstaller(PublisherConfig config, HttpClient http, str
                 if (have < package.Length) await FetchRangeAsync(url, part, have, package.Length, progress, ct);
                 progress?.Invoke(package.Length, package.Length);
                 Progress?.Invoke("Checking the download", 0, 0);
-                if (Sha256(part) == package.Sha256.ToLowerInvariant())
+                if (string.Equals(Sha256(part), package.Sha256, StringComparison.OrdinalIgnoreCase))
                 {
                     File.Move(part, final, overwrite: true);
                     return final;
@@ -271,7 +273,7 @@ public sealed class ClientInstaller(PublisherConfig config, HttpClient http, str
                     output.Write(buffer, 0, read);
                     length += read;
                 }
-                if (length != f.Length || Convert.ToHexStringLower(hash.GetHashAndReset()) != f.Sha256.ToLowerInvariant())
+                if (length != f.Length || !string.Equals(Convert.ToHexStringLower(hash.GetHashAndReset()), f.Sha256, StringComparison.OrdinalIgnoreCase))
                 {
                     output.Dispose();
                     File.Delete(temp);

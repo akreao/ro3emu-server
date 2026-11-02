@@ -13,8 +13,9 @@
 <p align="center">
   <a href="https://github.com/akreao/ro3emu-server/releases/latest"><img src="https://img.shields.io/github/v/release/akreao/ro3emu-server?label=latest&color=d8b46a&labelColor=1b2740" alt="Latest release"></a>
   <a href="https://github.com/akreao/ro3emu-server/actions/workflows/tests.yml"><img src="https://img.shields.io/github/actions/workflow/status/akreao/ro3emu-server/tests.yml?branch=main&label=tests&labelColor=1b2740" alt="Tests"></a>
-  <img src="https://img.shields.io/badge/client-Genesis%202026.10.23.1-3fb950?labelColor=1b2740" alt="Works with the Genesis client 2026.10.23.1">
+  <img src="https://img.shields.io/badge/client-Genesis%202026.10.30.1-3fb950?labelColor=1b2740" alt="Works with the Genesis client 2026.10.30.1">
   <img src="https://img.shields.io/badge/license-GPL--3.0-8b949e?labelColor=1b2740" alt="GPL-3.0">
+  <a href="https://discord.gg/vVkcvMFKy3"><img src="https://img.shields.io/badge/discord-join-5865f2?logo=discord&logoColor=white&labelColor=1b2740" alt="Join the Discord"></a>
 </p>
 
 <table>
@@ -37,7 +38,7 @@
     <td width="50%" valign="top"><b>One click to play</b><br>A single <code>RO3Emu.exe</code>, nothing to install. It finds your game, prepares it and starts both the server and the game.</td>
   </tr>
   <tr>
-    <td width="50%" valign="top"><b>Your own game files</b><br>We never host the game. No game yet? RO3Emu downloads it from the Genesis update servers and checks every file's signature.</td>
+    <td width="50%" valign="top"><b>Your own game files</b><br>We never host the game. No game yet? RO3Emu downloads it from Genesis' update servers and checks every file's signature.</td>
     <td width="50%" valign="top"><b>Play together</b><br>Host for your friends from Windows or a Linux box, with party voice chat. Built for hundreds of players on two cores.</td>
   </tr>
 </table>
@@ -72,7 +73,7 @@ Hosting on Linux, a VPS or a home server? One script, nothing to install: see [h
 
 ## What works today
 
-<p align="center"><img src="docs/assets/progress.svg" alt="Progress: world, combat and bosses, story dungeons, character progress and guilds are done; Survivor Battle is in progress; War of Emperium, the Tavern, the remaining client tables and a many-player test are next" width="100%"></p>
+<p align="center"><img src="docs/assets/progress.svg" alt="Progress: world, combat and bosses, story dungeons, character progress, guilds, Survivor Battle, War of Emperium and the web panel are done; the Tavern, the remaining client tables and a many-player test are next" width="100%"></p>
 
 Everything the client can show is playable from day one, without season gates. The full list is in
 [What works](docs/features.md), and each release lists what is new in its [release notes](https://github.com/akreao/ro3emu-server/releases).
@@ -85,6 +86,11 @@ RO3Emu is built in the open. Thank you to everyone who sends fixes and reports b
 
 - **Found a bug?** [Open an issue](https://github.com/akreao/ro3emu-server/issues/new/choose), or use the Feedback button in the game menu on a hosted server.
 - **Want to help?** Read [CONTRIBUTING.md](CONTRIBUTING.md) and the [developer guide](docs/development.md).
+
+**Community projects** (maintained outside this repository, by their authors):
+
+- [ro3-cpanel](https://github.com/soyerno/ro3-cpanel): a standalone web control panel for server operators; many of its ideas went into the [panel built into RO3Emu](docs/guide/panel.md).
+- [ro3-emu-launcher](https://github.com/soyerno/ro3-emu-launcher): a desktop launcher with auto-patching, separate from `src/Ro3Emu.Launcher`.
 
 <details>
 <summary><b>For developers</b></summary>

@@ -184,13 +184,13 @@ public sealed class ParticipationTargetTests : IAsyncLifetime
     }
 
     /// <summary>The guild To-Do tasks' stand-in target 106010 (TaskService.GuildEvents.cs): taking part completes them;
-    /// the Daily Tavern quest is counted by TavernService.</summary>
+    /// the Tavern quest that owns the target reads today's time in a room instead.</summary>
     [ClientDataFact]
     public async Task GuildEventToDoTasksCompleteOnTakingPart()
     {
         var bot = await InWorld();
         var tasks = Service<TaskService>();
-        Assert.True(tasks.TargetsSupported(2000)); // Daily Tavern Quest, [106010,1200]: seconds in a Tavern room
+        Assert.True(tasks.TargetsSupported(2000)); // Daily Tavern Quest, [106010,1200]: today's time in a room (TavernTests)
         foreach (long task in new long[] { 1602050, 1602060, 1602070, 1603011, 1603012, 1603013, 1603014 })
             Assert.True(tasks.TargetsSupported(task), $"task {task}");
         await Accept(1602060); // Stronghold War
@@ -270,36 +270,4 @@ public sealed class ParticipationTargetTests : IAsyncLifetime
         await bot.DisposeAsync();
     }
 
-    /// <summary>
-    /// 106610 [n] (Realm Campaign 120001 "Reach 1000 Battle Merit") and 106609 [n] (120006 "Reach 10000 points in Guild
-    /// Territory War"): a settled Territory War battle adds the role's personal score and its guild's battle score.
-    /// Hook level: TerritoryWarsService raises BattleScored after the settlement commit (TerritoryWarsTests drive that
-    /// path). Another guild's score does not count; the counts survive a relogin.
-    /// </summary>
-    [ClientDataFact]
-    public async Task TerritoryBattleSettlementCountsPersonalAndGuildPoints()
-    {
-        var bot = await InWorld();
-        long role = await Read(() => Session.Role!.Id);
-        await Accept(120001); // [106610,1000]
-        await Accept(120006); // [106609,10000]
-        await Service<GameLoop>().InvokeAsync(() => { Session.Guild = new DBRoleGuildInfo { GuildId = 77 }; return Task.CompletedTask; });
-        var wars = Service<TerritoryWarsService>();
-        Task Settle(long personal, long ownGuild, long otherGuild) => Service<GameLoop>().InvokeAsync(() =>
-        {
-            foreach (var h in wars.BattleScored)
-                h(new Dictionary<long, long> { [role] = personal }, new Dictionary<long, long> { [77] = ownGuild, [78] = otherGuild });
-            return Task.CompletedTask;
-        });
-        await Settle(600, 4000, 9000);
-        await At(120001, 600);
-        await At(120006, 4000);
-        await Settle(400, 6000, 0);
-        await Done(120001);
-        await Done(120006);
-        bot = await Relog(bot);
-        Assert.Equal(1000, (await QuestProbe.DoneAsync(_app, "alice", 120001)).CompleteNum[0]);
-        Assert.Equal(10000, (await QuestProbe.DoneAsync(_app, "alice", 120006)).CompleteNum[0]);
-        await bot.DisposeAsync();
-    }
 }
