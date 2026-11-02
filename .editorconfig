@@ -71,7 +71,7 @@ dotnet_diagnostic.CA1001.severity = suggestion
 dotnet_diagnostic.CA1051.severity = suggestion
 # 1: CancellationToken parameters must come last
 dotnet_diagnostic.CA1068.severity = suggestion
-# 407: specify IFormatProvider
+# 405: specify IFormatProvider
 dotnet_diagnostic.CA1305.severity = suggestion
 # 56: specify StringComparison for correctness
 dotnet_diagnostic.CA1310.severity = suggestion
@@ -91,7 +91,7 @@ dotnet_diagnostic.CA1725.severity = suggestion
 dotnet_diagnostic.CA1805.severity = suggestion
 # 169: mark members as static
 dotnet_diagnostic.CA1822.severity = suggestion
-# 391: use LoggerMessage delegates
+# 390: use LoggerMessage delegates
 dotnet_diagnostic.CA1848.severity = suggestion
 # 61: use concrete types for performance
 dotnet_diagnostic.CA1859.severity = suggestion
