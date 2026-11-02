@@ -20,11 +20,6 @@ public sealed partial class TerritoryWarsService
     /// 2 and later Regional Capital). Listeners post their work.</summary>
     public List<Action<long, int>> BattleSettled { get; } = [];
 
-    /// <summary>After a committed stronghold/capital battle settlement: the personal score of each newly settled loaded
-    /// participant (by role) and each fighting guild's battle score (by guild). Quest targets 106610 / 106609 (Realm
-    /// Campaign Battle Merit and Guild Territory War points). Listeners post their work.</summary>
-    public List<Action<IReadOnlyDictionary<long, long>, IReadOnlyDictionary<long, long>>> BattleScored { get; } = [];
-
     public sealed class SiegeRunState
     {
         public int City { get; set; }

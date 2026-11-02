@@ -337,7 +337,7 @@ Reconstructed story encounters (`ReconstructedDungeons`, switch `Ro3Emu:Reconstr
   that. `CombatService.Duel` computes both sides' expected damage per second from the same formula as a real hit
   (its roll-free part was extracted, rolls unchanged). The airship's nine boarders come in three groups of three, their
   attack at 20%. A boss whose scripted step shows companions falls to them and the player together: Payon Forest's
-  Eddga (HP 1170 basis points) counts Boya's and Wule's expected damage per second standing in reach
+  Eddga (HP 1750 basis points) counts Boya's and Wule's expected damage per second standing in reach
   (`CombatService.CompanionDps`, their rotation and the same formula as their hits), about a quarter of the total.
   `DungeonTests.StoryBossTuning` keeps every boss and a boarder group inside the band. Live: the tuned
   Culvert Golden Thief Bug (4126 HP, hits of about 47) fell to a test character and the tracker showed (1/1).

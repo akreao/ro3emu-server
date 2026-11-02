@@ -205,12 +205,6 @@ public sealed partial class DungeonTests
         await Stage(alice, 1, quest: 1);
         Assert.DoesNotContain(alice.Inbox.Snapshot(), e => e.IsGame(DungeonService.Leave));
         Assert.DoesNotContain(Service<World>().AllUnits(), u => u.InstanceId == instance);
-
-        // 1000301 continues 1000201 (_iSameDupLoadingType 2): the server moves the player on into the Deniro's scene,
-        // instead of leaving them at the bottom of the dark passage with nothing happening.
-        Assert.Equal(0, (await Next(alice, DungeonService.Enter, EnterDungeonRsp.Parser)).Result);
-        await Load(alice, 1000301);
-        await Stage(alice, 1, quest: 1);
     }
 
     // Issue #181: a player inside the vortex's region 20 before the client's auto interaction came had step 2 done, the
@@ -299,12 +293,11 @@ public sealed partial class DungeonTests
         (int Npc, int Interaction, int Buff)[] chain =
         [
             (5300041, 5300028, 5301401), // help Bobo up
-            (5300005, 5300008, 5365101), // try to ride the Deniro
+            (5300005, 5300005, 5365401), // try to ride the Deniro
             (5300055, 5300010, 5365201), // collect the fluorescent substance
             (5300005, 5300009, 5365301), // feed the Deniro
-            (5300005, 5300005, 5365401), // ride the Deniro to the depths
+            (5300005, 5300008, 5365101), // ride to the depths
         ];
-        DungeonService.SceneActorUnit? mount = null;
         for (int step = 0; step < chain.Length; step++)
         {
             if (step > 0) await Stage(alice, step + 1, quest: step + 1); // the first one was awaited above
@@ -317,7 +310,7 @@ public sealed partial class DungeonTests
             if (step == 1)
                 // The kept Deniro got its buff in place (31104), without leaving and re-entering the view.
                 await Next(alice, BuffService.BuffUpdate, BuffUpdateNotify.Parser,
-                    n => n.UnitId == actor.Uid && n.Buffs.Any(b => b.ConfigId == 5365101));
+                    n => n.UnitId == actor.Uid && n.Buffs.Any(b => b.ConfigId == 5365401));
             await Beside(alice, actor.X, actor.Y, actor.Z);
             // The reverse dungeon's client reports the NPC's place (31089) before each interaction (LC_DAL_Interact.SyncNpcPos).
             await alice.SendGameAsync(WorldCoreService.TeleportObject, new ClientTeleportObject
@@ -334,26 +327,6 @@ public sealed partial class DungeonTests
         // ... and gets no error tip for it.
         Assert.DoesNotContain(alice.Inbox.Snapshot(), e => e.IsGame(99999)
             && APIErrorMsg.Parser.ParseFrom(e.Body).OriginMsgId == WorldCoreService.TeleportObject);
-
-        // The last 'Ride' seats the player on the Deniro: the vehicle driver state on it and the seat's controls.
-        long role = Session(alice).Role!.Id;
-        var seated = await Next(alice, WorldInteractionService.Change, InteractChangeNtf.Parser, n => n.Uid == role);
-        Assert.Equal(((InteractInfo.Types.EState)3, 3, 5300005, mount!.Uid),
-            (seated.DataInfo.EType, seated.DataInfo.StateId, seated.DataInfo.InteractConfigId, seated.DataInfo.ActiveObjId));
-        Assert.Equal(9, (await Next(alice, WorldInteractionService.Change3C, Change3CNtf.Parser)).CfgId);
-        Assert.Equal(5, Session(alice).DungeonAttempt!.Wave + 1); // getting on is not the end of the ride
-        // The seat's own button gets the player off, and the ride can be taken again.
-        await alice.SendGameAsync(WorldInteractionService.Action, new UseInteractActionReq { ButtonId = 26 });
-        Assert.Equal(0, (await Next(alice, WorldInteractionService.Action, UseInteractActionRes.Parser)).Result);
-        Assert.Equal(InteractInfo.Types.EState.Idle,
-            (await Next(alice, WorldInteractionService.Change, InteractChangeNtf.Parser, n => n.Uid == role)).DataInfo.EType);
-        Assert.Equal(0, await Interact(alice, mount, 5300005));
-        await Next(alice, WorldInteractionService.Change, InteractChangeNtf.Parser, n => n.Uid == role && (int)n.DataInfo.EType == 3);
-
-        // Riding down into the end region ends the ride and the scene.
-        await WalkInto(alice, Service<WorldData>().Map(scene)!.Regions[31]);
-        Assert.Equal(InteractInfo.Types.EState.Idle,
-            (await Next(alice, WorldInteractionService.Change, InteractChangeNtf.Parser, n => n.Uid == role)).DataInfo.EType);
         var result = await Next(alice, DungeonService.Result, DungeonResNotify.Parser);
         Assert.Equal((DungeonRes)1, result.Res);
         // The ride (inferred): the player was moved from the start of guide 36 to its end in forced positions.

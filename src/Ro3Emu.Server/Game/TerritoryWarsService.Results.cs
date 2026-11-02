@@ -113,11 +113,6 @@ public sealed partial class TerritoryWarsService
             transaction.WithEventEconomy(reward);
         await _roles.CommitAsync(transaction, "territory/settle");
         PublishCommitted(next);
-        var personal = roleChanges.Keys.ToDictionary(id => id, id => r.Players[id].Score);
-        var guildScores = new Dictionary<long, long>(r.Scores);
-        foreach (var handler in BattleScored)
-            try { handler(personal, guildScores); }
-            catch (Exception e) { _log.LogError(e, "Territory battle settlement hook failed for zone {Zone}", r.Zone); }
         await RoleFanout.EachAsync(_sessions.All().Where(s => s.Role != null && roleChanges.ContainsKey(s.Role.Id)), s =>
         {
             if (s.Role is { } current && roleChanges.TryGetValue(current.Id, out var role)) s.TerritoryWars = role;

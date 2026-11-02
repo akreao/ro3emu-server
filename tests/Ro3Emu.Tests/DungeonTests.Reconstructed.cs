@@ -176,6 +176,7 @@ public sealed partial class DungeonTests
     {
         // Seen on a player's client: Southern Payon's portal waves ended at (3/3) and the empty plane stayed until exit.
         const long scene = 1021301;
+        Service<IOptions<ServerOptions>>().Value.ScriptedScenePacePercent = 10; // the portals' delays, shortened
         await using var alice = await InWorld("Alice");
         await Gm(alice, "!lvl 99");
         Assert.Equal(0, await Enter(alice, new EnterDungeonReq { SceneEntry = scene }));
@@ -353,6 +354,7 @@ public sealed partial class DungeonTests
         // 5001049 drops NpcNormalDropConfig 100241949 -> DropPool 241949 -> DropGroup 144: Card: Poring 1420300,
         // _iQuestLimit 10102100 (dialogue 1010211001: "you picked up a Card: Poring!").
         const long scene = 1021301, quest = 10102100;
+        Service<IOptions<ServerOptions>>().Value.ScriptedScenePacePercent = 10; // the portals' delays, shortened
         await using var alice = await InWorld("Alice");
         await Gm(alice, "!lvl 16");
         await Gm(alice, $"!quest accept {quest}");

@@ -1148,7 +1148,7 @@ public sealed class ActivityAdventuresTests : IAsyncLifetime
         await Gm("bob", $"!jump {x} {z}");
         await alice.SendGameAsync(SceneService.NpcInteraction, new NpcInteractionReq
         {
-            NpcUid = SceneService.TreasureUidPrefix | finder.Role!.Id, InteractionId = 4,
+            NpcUid = SceneService.TreasureUidPrefix | finder.Role!.Id, InteractionId = 21070002,
         });
         Assert.Equal(0, (await Next(alice, SceneService.NpcInteraction, NpcInteractionRsp.Parser)).Result);
         Assert.Equal(5, (int)(await Next(alice, 83251, TreasureEventNotify.Parser)).Type);
