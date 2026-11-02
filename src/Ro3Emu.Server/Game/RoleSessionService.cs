@@ -362,10 +362,11 @@ public sealed partial class RoleSessionService(RoleStore roles, Data.GameData da
             SceneService.HoldWalk(session, DateTime.UtcNow, walking: false);
             return;
         }
+        // The walk check refuses (and counts) a position that is not a number, even when it only reports.
+        if (!await scene.AcceptWalkAsync(session, walk)) return;
         // NaN makes every later "dist > max" range check false, so a NaN position would pass all of them.
         if (!WorldCoreService.Finite(walk.Pos) || !float.IsFinite(walk.Face) || MathF.Abs(walk.Pos.X) > MaxCoordinate
             || MathF.Abs(walk.Pos.Y) > MaxCoordinate || MathF.Abs(walk.Pos.Z) > MaxCoordinate) return;
-        if (!await scene.AcceptWalkAsync(session, walk)) return;
         session.PreviousPosition = session.Position;
         session.Position = walk.Pos;
         session.Face = walk.Face;

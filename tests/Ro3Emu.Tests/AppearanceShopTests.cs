@@ -480,7 +480,7 @@ public sealed class AppearanceShopTests : IAsyncLifetime
         var picked = await Pick(bob, sent.OrderId);
         Assert.Equal(0, picked.Result);
         var unlocked = await Next(bob, WardrobeService.WardrobeSync, DBWardRobeInfoIncrement.Parser, i => i.AllLightUpAppearances.ContainsKey(TeaPartySuit));
-        Assert.True(unlocked.AllLightUpAppearances.ContainsKey(TeaPartyHat));
+        Assert.False(unlocked.AllLightUpAppearances.ContainsKey(TeaPartyHat)); // the bonus voucher's piece, as for a purchase
         Assert.Equal(crystals - 1880, Crystals); // the recipient pays nothing
         var bobSession = Service<SessionRegistry>().All().Single(s => s.Account == "fashionbob" && s.Role != null);
         Assert.Equal(1, bobSession.Items.Where(i => i.Entry == TeaPartyBonus).Sum(i => i.Stack)); // same bonus a direct purchase grants

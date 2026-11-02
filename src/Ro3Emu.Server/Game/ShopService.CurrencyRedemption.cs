@@ -34,7 +34,7 @@ public sealed partial class ShopService
         if (row.SingleLimit > 0 && req.Count > row.SingleLimit) return SingleExchangeLimit;
         if (req.Count > int.MaxValue / row.Rate) return SingleExchangeLimit;
         long gained = req.Count * row.Rate;
-        (int Entry, long Count)[] cost = [((int)req.ItemId, req.Count)];
+        var cost = Payment(session, (int)req.ItemId, req.Count); // crystals: bound ones first, nothing with CashShop:Free
         (int Entry, int Count)[] goods = [((int)row.TargetId, (int)gained)];
         using var guard = await CharacterService.Lock(session);
         var economy = _character.FamilyEconomy(session, "cd13a/shop-currency-redemption", cost, goods,

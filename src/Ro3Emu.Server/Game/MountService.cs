@@ -226,7 +226,8 @@ public sealed class MountService : IGameTicker
     {
         if (s.Dead) return ErrorCodes.MountStateInvalid;
         if (s.SceneLoading) return ErrorCodes.SwitchingScenes;
-        if (slot == 1 && (s.StatusBits & (1L << 15)) != 0) return ErrorCodes.MountCombat;
+        // A flying rider keeps its mount in a fight, as for a cast (DismountForCastAsync); landing ends the flight first (inferred).
+        if (slot == 1 && (s.StatusBits & (1L << 15)) != 0 && !s.WorldState.Flying) return ErrorCodes.MountCombat;
         if (_data.Row("MapConfig", s.SceneEntry) is { } map && map.TryGetProperty("_kRiderForbidden", out var flags)
             && flags.ValueKind == JsonValueKind.Array)
         {

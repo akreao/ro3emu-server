@@ -149,7 +149,7 @@ public sealed partial class ShopService
         PruneSentHistory(senderGifts);
         senderGifts.Sent[order.OrderId] = order;
         recipientGifts.Received[order.OrderId] = order;
-        var cost = currency > 0 && unit > 0 ? new[] { (currency, (long)unit) } : [];
+        var cost = currency > 0 && unit > 0 ? Payment(session, currency, unit) : []; // bound crystals first, nothing with CashShop:Free
         var paid = await _character.ExchangeLockedAsync(session, cost, [], persist: tx =>
         {
             tx.RoleBlob(session.Role.Id, "gifts", JsonSerializer.SerializeToUtf8Bytes(senderGifts));

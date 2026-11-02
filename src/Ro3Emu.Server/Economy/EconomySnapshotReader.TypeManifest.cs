@@ -117,7 +117,7 @@ public static partial class EconomySnapshotReader
     // newactivity receipt that also saves them.
     // Leaderboard rewards: server_state rank_rewards (RankRewardService) names each rewarded board's last settlement
     // time. A key, no balance: the goods are the rank letters' attachments, each delivered once by its delivery key.
-    public const string ExpectedFormatManifestHash = "77E95F108A58DBEB382686AF5C92D2F471FDFA040CD939D96667B0E8F626026D";
+    public const string ExpectedFormatManifestHash = "08843DD0466DA119C97E145A7301D2609D9901F6466C0FBA3E971BAA9F7F5F45";
     public static string FormatManifestHash => State.FormatManifestHash;
 
     private sealed partial class State

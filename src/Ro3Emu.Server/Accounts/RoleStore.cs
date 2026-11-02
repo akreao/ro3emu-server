@@ -403,8 +403,6 @@ public sealed class RoleStore(AccountStore accounts)
     public byte[]? LoadSocialOutfit(long id) => LoadBlob(id, "social_outfit");
     public byte[]? LoadEmojiInfo(long id) => LoadBlob(id, "emoji_info");
     public byte[]? LoadTavern(long id) => LoadBlob(id, "barroom");
-    public byte[]? LoadPresentSent(long id) => LoadBlob(id, "present_sent");
-    public byte[]? LoadPresentReceived(long id) => LoadBlob(id, "present_received");
     public byte[]? LoadPersonalUpvotes(long id, RoleItemPlanBuilder? transaction = null) => LoadBlob(id, "personal_upvote", transaction);
     public void SavePersonalUpvotes(long id, byte[] value, RoleItemPlanBuilder transaction) => SaveBlob(id, "personal_upvote", value, transaction);
     public byte[]? LoadPopularity(long id, RoleItemPlanBuilder? transaction = null) => LoadBlob(id, "popularity", transaction);

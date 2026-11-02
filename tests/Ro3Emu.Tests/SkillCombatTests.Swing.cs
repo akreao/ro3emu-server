@@ -73,7 +73,7 @@ public sealed partial class SkillCombatTests
     public async Task AnArcherNormalAttackWaitsForTheSwingBeforeIt()
     {
         await using var archer = await InWorld("Archer");
-        await Gm("archer", "!job 3100");
+        await Gm("archer", "!job 3100"); await Wield("archer", 2110120); // the bow shot is the normal attack of a bow (JobAttackConfig)
         var target = await Target("archer", stationary: true);
         await Loop.InvokeAsync(() => { target.Hp = 1_000_000; return Task.CompletedTask; });
         var session = Session("archer");

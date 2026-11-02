@@ -161,10 +161,10 @@ public sealed class SkillGrowthTests : IAsyncLifetime
             await Gm("sword", "!job 1100");
             await sword.SendGameAsync(1023, new PlayerAssetReq { AssetType = { 5 } });
             var swordman = await Next(sword, SkillService.SkillDataSync, DBSkillDataIncrement.Parser,
-                m => m.SyncAllMark && m.CurrentAtkSkillId == 1100001);
+                m => m.SyncAllMark && m.CurrentAtkSkillId == 1001001);
             Assert.Contains(Cell, swordman.SkillList.All.Value);
             Assert.Equal(1, swordman.SkillAssignPlans.All.Value[0].SkillAssigns[Cell].SkillLevel);
-            Assert.Equal(1100001, swordman.SkillWheel.All.WhellSkills[1].SkillConfigId);
+            Assert.Equal(1001001, swordman.SkillWheel.All.WhellSkills[1].SkillConfigId);
 
             Assert.Equal(0, await Load(sword, SkillLoadOperation.SkillLoadOpLoad, 1, SwordSmash));
             Assert.Equal(0, await Load(sword, SkillLoadOperation.SkillLoadOpUnload, 0, Attack));
@@ -182,7 +182,7 @@ public sealed class SkillGrowthTests : IAsyncLifetime
         await using (var again = await InWorld("Sword", create: false))
         {
             var removed = await Next(again, SkillService.SkillDataSync, DBSkillDataIncrement.Parser);
-            Assert.DoesNotContain(removed.SkillWheel.All.WhellSkills.Values, slot => slot.SkillConfigId == 1100001);
+            Assert.DoesNotContain(removed.SkillWheel.All.WhellSkills.Values, slot => slot.SkillConfigId == 1001001);
             Assert.Contains(Cell, removed.SkillList.All.Value);
             Assert.All(removed.SkillAssignPlans.All.Value, plan => Assert.Equal(1, plan.SkillAssigns[Cell].SkillLevel));
             // Dragged from the cell, it shows as the career's own attack; moving it keeps one copy on the bar.
@@ -191,8 +191,8 @@ public sealed class SkillGrowthTests : IAsyncLifetime
         }
         await using var last = await InWorld("Sword", create: false);
         var restored = await Next(last, SkillService.SkillDataSync, DBSkillDataIncrement.Parser);
-        Assert.Equal(1100001, restored.SkillWheel.All.WhellSkills[3].SkillConfigId);
-        Assert.Single(restored.SkillWheel.All.WhellSkills.Values, slot => slot.SkillConfigId == 1100001);
+        Assert.Equal(1001001, restored.SkillWheel.All.WhellSkills[3].SkillConfigId);
+        Assert.Single(restored.SkillWheel.All.WhellSkills.Values, slot => slot.SkillConfigId == 1001001);
         // The client names the slot by the row it shows (11000), not the cell's stored 10010.
         Assert.Equal(0, await Load(last, SkillLoadOperation.SkillLoadOpLoad, 0, Cell));
         Assert.Equal(0, await Load(last, SkillLoadOperation.SkillLoadOpUnload, 0, Attack));

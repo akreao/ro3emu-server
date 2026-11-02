@@ -392,6 +392,9 @@ public sealed partial class CombatService
                 if (CleanseKinds(row) is { Length: > 0 } kinds)
                     foreach (var buff in recipient.Buffs.Where(b => BuffConfig.Get(_data, b.ConfigId) is { } config && Cleanses(kinds, config)).ToArray())
                         await _buffs.RemoveAsync(recipient, buff);
+                if (CleansedCategories(row, recipient == s) is { Length: > 0 } categories)
+                    foreach (var buff in recipient.Buffs.Where(b => _data.Row("BuffConfig", b.ConfigId) is { } br && HasCategory(br, categories)).ToArray())
+                        await _buffs.RemoveAsync(recipient, buff);
             }
             if (hit.Dsts.Count > 0 || shownOnly.Count > 0)
             {

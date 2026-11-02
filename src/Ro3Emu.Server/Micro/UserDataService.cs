@@ -57,10 +57,9 @@ public sealed class UserDataService(SocialOwnerCache cache, OwnerRegistry owners
                 var stable = await cache.GuildStampsAsync(ids);
                 if (ids.Any(id => stamps[id] != stable[id])) continue;
                 var profiles = await cache.LoadProfilesAsync(ids, stable);
-                var answered = ids.ToHashSet();
                 foreach (var key in asks)
                 {
-                    if (!long.TryParse(key.ToString(), out long uid) || !answered.Remove(uid)) continue;
+                    if (!long.TryParse(key.ToString(), out long uid)) continue;
                     var asked = uids[key] is IDictionary<object, object?> types
                         ? types.Keys.Select(t => t?.ToString() ?? "").ToHashSet() : [];
                     if (profiles.TryGetValue(uid, out var profile) && profile is not null) results.Add(Entry(profile, asked));

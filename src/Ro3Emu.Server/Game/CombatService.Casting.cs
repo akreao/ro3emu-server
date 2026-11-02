@@ -178,6 +178,8 @@ public sealed partial class CombatService
         float arrival = s.Speed / 100f; // before BeforeCast: a cast dismount lowers Speed, not the ground the ride covered
         // Before the 31102 reply: LC_State_Unit_Skill holds a skill while m_bRideSystemMount is set, then drops it once
         // its time has passed, so a rider dismounted later by the 1 s mount tick swung unseen.
+        // A flying mount's own take-off and landing keep the rider on it: no cast dismount for them (inferred).
+        bool mountFlight = MountService.FlySkills(s, _data) is { } fly && (req.SkillId == fly.Up || req.SkillId == fly.Down);
         foreach (var handler in BeforeCastSkill) await handler(s, req.SkillId);
         int turn = owned == null ? SwingTurnLeft(s.SkillCast, row!.Value) : 0;
         await CancelCastAsync(s, SkillInterruptedInfo.Types.SkillInterruptType.Skill);
@@ -187,7 +189,7 @@ public sealed partial class CombatService
         bool chanted = GameData.Int(row!.Value, "_iChantFix") + GameData.Int(row.Value, "_iChantVar") > 0;
         if (!chanted) await PayCostsAsync(s, costs);
         if (!unlimited) await _buffs.SpendEnergyAsync(s, row!.Value);
-        int lead = (owned == null && BeforeCast is { } before ? await before(s) : 0) + turn;
+        int lead = (owned == null && !mountFlight && BeforeCast is { } before ? await before(s) : 0) + turn;
         if (!lineup) await s.SendGameAsync(UseSkill, new CastSkillRsp { SessionId = id, IsAutoCast = req.IsAutoCast });
         var target = FindMonster(s.WorldScene, req.TargetId);
         var playerTarget = EventTarget(s, req.TargetId);
